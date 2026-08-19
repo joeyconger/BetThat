@@ -143,3 +143,54 @@ export async function runExternalRatingsSweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
+
+/**
+ * Sweeps sosWeight — the strength-of-schedule knob (see ratings/elo.ts's
+ * SOS multiplier and README "Rating model") — which has never actually
+ * been validated against a backtest. CFB's 0.4 (vs. NFL's 0.15) was set
+ * "per spec" at the very start of the project and never tested; this
+ * checks whether it actually helps, including sosWeight=0 in the grid as
+ * a real "no SOS adjustment at all" baseline to compare against. Holds
+ * every other param fixed at CFB's current validated defaults.
+ */
+const DEFAULT_SOS_WEIGHT = [0, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0];
+
+export interface SosSweepResult {
+  sosWeight: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runSosSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  sosWeightGrid: number[] = DEFAULT_SOS_WEIGHT,
+): Promise<SosSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: SosSweepResult[] = [];
+
+  for (const sosWeight of sosWeightGrid) {
+    const paramsOverride: RatingParams = { ...base, sosWeight };
+    const name = `sweep-sos-${sport}-w${sosWeight}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      sosWeight,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `sosWeight=${sosWeight}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      } (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}

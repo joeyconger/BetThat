@@ -4,7 +4,7 @@ import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
-import { runSweep, runExternalRatingsSweep } from "./backtest/sweep.js";
+import { runSweep, runExternalRatingsSweep, runSosSweep } from "./backtest/sweep.js";
 import {
   getOverallReport,
   getOpeningCoverRate,
@@ -280,6 +280,22 @@ export function startCfbSegmentsJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Sweeps sosWeight (see backtest/sweep.ts's runSosSweep doc) — the SOS
+ * strength knob, set "per spec" at project start and never actually
+ * tested against a backtest until now. Includes sosWeight=0 to check
+ * whether SOS adjustment helps at all versus doing nothing.
+ */
+export function startCfbSosSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-sos-sweep", async (job) => {
+    log(job, "sweeping cfb sosWeight, 2023-2025");
+    const results = await runSosSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `sosWeight=${r.sosWeight}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -289,4 +305,5 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-external-sweep": startCfbExternalSweepJob,
   "cfb-walkforward": startCfbWalkforwardJob,
   "cfb-segments": startCfbSegmentsJob,
+  "cfb-sos-sweep": startCfbSosSweepJob,
 };
