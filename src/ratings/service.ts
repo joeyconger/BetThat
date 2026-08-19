@@ -8,18 +8,24 @@ import {
   insertModelPrediction,
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
-import { getRatingParams } from "./config.js";
+import { getRatingParams, type RatingParams } from "./config.js";
 import { computeSeasonRatings, carryoverRating, predictSpread, type TeamRatingState } from "./elo.js";
 
 const METHOD = "elo" as const;
 
-/** Computes each team's rating as of the end of `throughWeek` and persists it. Returns the rating state for reuse. */
+/**
+ * Computes each team's rating as of the end of `throughWeek` and persists
+ * it. Returns the rating state for reuse. `paramsOverride` lets a
+ * calibration sweep (src/backtest/sweep.ts) try different constants
+ * without touching config.ts's defaults — omit it for normal use.
+ */
 export async function computeAndStoreRatings(
   sport: Sport,
   season: number,
   throughWeek: number,
+  paramsOverride?: RatingParams,
 ): Promise<Map<number, TeamRatingState>> {
-  const params = getRatingParams(sport);
+  const params = paramsOverride ?? getRatingParams(sport);
   const games = await getSeasonGamesForRating(sport, season, throughWeek);
 
   const teamIds = new Set<number>();
@@ -58,9 +64,10 @@ async function predictAndStoreWeek(
   season: number,
   week: number,
   getMarketLine: (gameId: number) => Promise<number | undefined>,
+  paramsOverride?: RatingParams,
 ): Promise<{ predicted: number }> {
-  const params = getRatingParams(sport);
-  const ratingState = await computeAndStoreRatings(sport, season, week - 1);
+  const params = paramsOverride ?? getRatingParams(sport);
+  const ratingState = await computeAndStoreRatings(sport, season, week - 1, paramsOverride);
   const games = await getGamesForWeek(sport, season, week);
 
   let predicted = 0;
@@ -116,6 +123,7 @@ export function generateBacktestPredictionsForWeek(
   sport: Sport,
   season: number,
   week: number,
+  paramsOverride?: RatingParams,
 ): Promise<{ predicted: number }> {
-  return predictAndStoreWeek(sport, season, week, getOpeningLine);
+  return predictAndStoreWeek(sport, season, week, getOpeningLine, paramsOverride);
 }

@@ -9,6 +9,7 @@ import {
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
 import { generateBacktestPredictionsForWeek } from "../ratings/service.js";
+import type { RatingParams } from "../ratings/config.js";
 import { computeClv, computeCovered, pickSideFromDeviation } from "./clv.js";
 
 const METHOD = "elo" as const;
@@ -18,6 +19,8 @@ export interface BacktestParams {
   sport: Sport;
   seasonStart: number;
   seasonEnd: number;
+  /** Overrides ratings/config.ts's defaults for this run — see backtest/sweep.ts. */
+  paramsOverride?: RatingParams;
 }
 
 export interface BacktestSummary {
@@ -55,7 +58,7 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
     method: METHOD,
     seasonStart: input.seasonStart,
     seasonEnd: input.seasonEnd,
-    params: { sport: input.sport },
+    params: { sport: input.sport, ratingParams: input.paramsOverride },
   });
 
   let scored = 0;
@@ -64,7 +67,7 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
   for (let season = input.seasonStart; season <= input.seasonEnd; season++) {
     const weeks = await getDistinctWeeks(input.sport, season);
     for (const week of weeks) {
-      await generateBacktestPredictionsForWeek(input.sport, season, week);
+      await generateBacktestPredictionsForWeek(input.sport, season, week, input.paramsOverride);
       const games = await getFinalGamesForWeek(input.sport, season, week);
 
       for (const game of games) {

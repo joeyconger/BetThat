@@ -295,6 +295,28 @@ npm run backtest:report -- --runId 1
 # or just open /backtest/1 in the debug dashboard (src/server.ts)
 ```
 
+### Calibration sweep (`src/backtest/sweep.ts`)
+
+Manually editing `ratings/config.ts`, redeploying, and re-running doesn't
+scale once there's a real grid of constants to search. `backtest:sweep`
+tries a grid of `pointsPerEpa` × `baseK` values (the two constants most
+directly implicated so far — unanchored predictions were running too hot,
+i.e. `pointsPerEpa` too large) against the same season range, storing each
+combo as its own `backtest_runs` row (`params.ratingParams` records exactly
+which values produced it) and printing cover rate sorted best-first.
+Deliberately a small 3×3 grid by default — coarse search, then narrow the
+grid around whichever corner wins and run again, rather than one huge
+sweep:
+
+```bash
+npm run backtest:sweep -- --sport nfl --seasonStart 2023 --seasonEnd 2025
+```
+
+Verified locally end to end (all 9 combos ran clean against a real local
+Postgres instance, correct sequencing of `backtest_runs` ids, sorted
+output) — not yet run against the real 2023-2025 data for an actual
+calibrated result.
+
 ## Backtest results — and a real bug in the first run
 
 The first real run (855 NFL games, 2023-2025) reported a **44.7% cover
