@@ -13,6 +13,7 @@ import type { Sport } from "./db/repo.js";
 import {
   getOverallReport,
   getOverallStatsByRun,
+  getOpeningCoverRate,
   getThresholdReport,
   getConfidenceReport,
   getSportSeasonReport,
@@ -175,13 +176,14 @@ async function handleRequest(
       res.end("backtest run not found");
       return;
     }
-    const [overall, thresholds, confidence, bySeasonSport] = await Promise.all([
+    const [overall, openingCover, thresholds, confidence, bySeasonSport] = await Promise.all([
       getOverallReport(runId),
+      getOpeningCoverRate(runId),
       getThresholdReport(runId),
       getConfidenceReport(runId),
       getSportSeasonReport(runId),
     ]);
-    html(res, renderBacktestReport(run, overall, thresholds, confidence, bySeasonSport));
+    html(res, renderBacktestReport(run, overall, openingCover, thresholds, confidence, bySeasonSport));
     return;
   }
 

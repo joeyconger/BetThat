@@ -1,6 +1,12 @@
 import { renderPage, nav, escapeHtml } from "../layout.js";
 import { renderCoverRateChart } from "../charts.js";
-import type { AggregateStats, ThresholdStats, ConfidenceStats, SportSeasonStats } from "../../backtest/report.js";
+import type {
+  AggregateStats,
+  ThresholdStats,
+  ConfidenceStats,
+  SportSeasonStats,
+  OpeningCoverStats,
+} from "../../backtest/report.js";
 import type { BacktestRunSummary } from "../../db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -21,6 +27,7 @@ function coverClass(value: number | null): string {
 export function renderBacktestReport(
   run: BacktestRunSummary,
   overall: AggregateStats,
+  openingCover: OpeningCoverStats,
   thresholds: ThresholdStats[],
   confidence: ConfidenceStats[],
   bySeasonSport: SportSeasonStats[],
@@ -84,14 +91,16 @@ export function renderBacktestReport(
 
     <h2>Overall</h2>
     <table>
-      <thead><tr><th>Games</th><th>Cover rate</th><th>Avg CLV</th><th>Beat-close rate</th></tr></thead>
+      <thead><tr><th>Games</th><th>Cover rate (vs. close)</th><th>Cover rate (vs. open)</th><th>Avg CLV</th><th>Beat-close rate</th></tr></thead>
       <tbody><tr>
         <td class="num">${overall.games}</td>
         <td class="num ${coverClass(overall.coverRate)}">${fmtPct(overall.coverRate)}</td>
+        <td class="num ${coverClass(openingCover.coverRateVsOpening)}">${fmtPct(openingCover.coverRateVsOpening)} <span class="subtitle">(${openingCover.games} games)</span></td>
         <td class="num">${fmtSigned(overall.avgClv)}</td>
         <td class="num">${fmtPct(overall.beatCloseRate)}</td>
       </tr></tbody>
     </table>
+    <p class="subtitle">"Cover rate (vs. open)" is whether the pick would have won money bet AT the opening line, using the real result — the actual answer to "would this have been profitable," restricted to games with a real opening line. Different from Avg CLV (price movement only) and from "vs. close" (whether the CLOSING number, not the price you'd have bet, was beaten).</p>
 
     <h2>By deviation threshold</h2>
     <p class="subtitle">Restricting to picks where the model disagreed with the market by at least this much. Dashed line is the 50% no-edge baseline.</p>

@@ -39,6 +39,49 @@ export async function getOverallReport(backtestRunId: number): Promise<Aggregate
   return toAggregateStats(rows[0]!);
 }
 
+export interface OpeningCoverStats {
+  games: number;
+  coverRateVsOpening: number | null;
+}
+
+/**
+ * Would the model's pick have won money if bet AT THE OPENING LINE, using
+ * the real final score — distinct from `coverRate` (vs. the closing line)
+ * and `avgClv` (price movement only, independent of who wins). This is the
+ * metric that actually answers "if I could get a bet down at open, would I
+ * profit" — see README "Backtest results" for how this compares against
+ * the closing-line cover rate and why the gap between them matters.
+ * Restricted to games with a real opening line (same subset getThresholdReport
+ * and computeClv use); a game with only a closing line has no opening price
+ * to test against.
+ */
+export async function getOpeningCoverRate(backtestRunId: number): Promise<OpeningCoverStats> {
+  const rows = await query<{ games: string; cover_rate_vs_opening: string | null }>(
+    `SELECT count(*) AS games,
+       avg(
+         CASE
+           WHEN open_cover_margin = 0 THEN NULL
+           WHEN pick_side = 'home' AND open_cover_margin > 0 THEN 1
+           WHEN pick_side = 'away' AND open_cover_margin < 0 THEN 1
+           ELSE 0
+         END
+       ) AS cover_rate_vs_opening
+     FROM (
+       SELECT
+         CASE WHEN (br.opening_spread_home - br.model_spread_home) >= 0 THEN 'home' ELSE 'away' END AS pick_side,
+         (br.actual_margin_home + br.opening_spread_home) AS open_cover_margin
+       FROM backtest_results br
+       WHERE br.backtest_run_id = $1 AND br.opening_spread_home IS NOT NULL
+     ) picks`,
+    [backtestRunId],
+  );
+  const row = rows[0]!;
+  return {
+    games: Number(row.games),
+    coverRateVsOpening: row.cover_rate_vs_opening === null ? null : Number(row.cover_rate_vs_opening),
+  };
+}
+
 /** Overall stats for every run at once — one query instead of N, for a run-list page. */
 export async function getOverallStatsByRun(): Promise<Map<number, AggregateStats>> {
   const rows = await query<AggregateRow & { backtest_run_id: number }>(

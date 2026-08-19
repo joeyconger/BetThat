@@ -5,7 +5,13 @@ import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { runSweep, runExternalRatingsSweep } from "./backtest/sweep.js";
+import { getOverallReport, getOpeningCoverRate } from "./backtest/report.js";
+import { getRatingParams } from "./ratings/config.js";
 import type { Sport } from "./db/repo.js";
+
+function fmtPct(value: number | null): string {
+  return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
+}
 
 /**
  * Background job runner for anything too slow to run inside Railway's
@@ -163,6 +169,53 @@ export function startCfbExternalSweepJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Walk-forward validation: calibrates spPriorWeight/eloSignalPoints using
+ * ONLY 2023-2024 (the same grid as cfb-external-sweep), then tests that
+ * winning combo on 2025 alone — data the calibration never saw. Answers
+ * "is the edge real, or did we just tune spPriorWeight/eloSignalPoints to
+ * fit noise in the exact 2023-2025 sample we're also evaluating on."
+ * Reports both cover rate vs. closing line and vs. opening line for the
+ * 2025 holdout — the opening-line number is the one that actually answers
+ * "would this have been profitable" (see README "Backtest results").
+ */
+export function startCfbWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-walkforward", async (job) => {
+    log(job, "training: sweeping spPriorWeight x eloSignalPoints on 2023-2024 only");
+    const trainResults = await runExternalRatingsSweep("cfb", 2023, 2024, 20, 0.25);
+    for (const r of trainResults) {
+      log(job, `train: spPriorWeight=${r.spPriorWeight} eloSignalPoints=${r.eloSignalPoints}: cover=${fmtPct(r.coverRate)} (run ${r.runId})`);
+    }
+    const best = trainResults[0]!; // runExternalRatingsSweep sorts desc by coverRate
+    log(job, `best training combo: spPriorWeight=${best.spPriorWeight} eloSignalPoints=${best.eloSignalPoints} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected params");
+    const base = getRatingParams("cfb");
+    const paramsOverride = {
+      ...base,
+      pointsPerEpa: 20,
+      baseK: 0.25,
+      spPriorWeight: best.spPriorWeight,
+      eloSignalPoints: best.eloSignalPoints,
+    };
+    const holdout = await runBacktest({
+      name: "cfb-walkforward-holdout-2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025: ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -170,4 +223,5 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-sweep": startCfbSweepJob,
   "cfb-external-ratings": startCfbExternalRatingsJob,
   "cfb-external-sweep": startCfbExternalSweepJob,
+  "cfb-walkforward": startCfbWalkforwardJob,
 };

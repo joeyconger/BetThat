@@ -16,8 +16,8 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
 | 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked. Fixed a real bug (unbounded SOS multiplier causing rating blowups, see "A real bug" below) |
-| 2. Rating model — external ratings (CFB) | ⚠️ Built (CFBD SP+ as season prior, weekly CFBD Elo as in-season z-score signal), **UNVERIFIED** — see "External ratings" below |
-| 3. Backtest harness | ✅ **Run for real** against 2023-2025 NFL (855 games) — see "Backtest results" below. A real bug (numeric-string coercion) invalidated the first run; fixed, re-run pending review |
+| 2. Rating model — external ratings (CFB) | ⚠️ Built and calibrated via sweep (spPriorWeight=0, eloSignalPoints=1.5 — SP+ prior hurt, weekly Elo signal helped), ingested data still **UNVERIFIED** against a real response — see "External ratings" below |
+| 3. Backtest harness | ✅ **Run for real** against 2023-2025, both sports. Two real bugs found and fixed (numeric-string coercion; unbounded SOS multiplier) — see "Backtest results" below. Best result so far: 52.78% cover rate vs. opening line (CFB), not yet walk-forward validated |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
 
 **Debug dashboard**: `src/server.ts` — backtest reports, team ratings, and raw
@@ -438,6 +438,77 @@ backtest re-run is queued (see `railway.json`); check `/backtest/` in the
 debug dashboard for the latest run once it's landed, and don't trust any
 number from before this fix.
 
+### Three metrics, and why they're different questions
+
+The dashboard's "Overall" table shows three numbers that are easy to
+conflate but answer different questions:
+
+- **Cover rate (vs. close)**: would the pick have won against the
+  *closing* line, using the real score. Every trustworthy run so far
+  (NFL and CFB, across every parameter combo tried) has landed at
+  **48-50%** — below the 52.4% breakeven line at standard -110 odds. No
+  edge found here yet.
+- **Avg CLV**: does the closing line move toward the picked side, relative
+  to opening — a pure price-movement measure, independent of who wins.
+  Real, statistically significant positive signal found in CFB (not
+  computable for NFL — nflverse has no opening line, see "Odds data").
+- **Cover rate (vs. open)** (`getOpeningCoverRate` in
+  `src/backtest/report.ts`): would the pick have won money bet AT the
+  *opening* line, using the real score — the metric that actually answers
+  "would this have been profitable." This is different from CLV (which
+  only measures price movement, not the game outcome) and from cover-vs-
+  close (which grades against a different, moved number than what you'd
+  have actually bet). Best result found: **52.78%** (CFB, calibrated
+  params, n=2051) — the first result all session to clear breakeven, but
+  the 95% CI (~[50.6%, 54.9%]) still spans both sides of 52.4%, so this is
+  "probably better than a coin flip" (real, p≈0.01 vs. 50%), not yet
+  "confirmed to clear the vig." Two real caveats beyond the stats: this
+  hasn't been walk-forward validated (see below — the calibration that
+  produced it was tuned on the same data being evaluated), and actually
+  getting a bet down at the true opening number is a real execution
+  problem separate from the model being right (books limit opener action;
+  lines move within minutes of posting).
+
+### A real bug: unbounded SOS multiplier, and the external-ratings sweep
+
+Found while reviewing early CFB backtest data: several week-9
+`model_spread_home` values had exploded into the millions (one reached
+~1e26) — see "Rating model / A real bug" above for the root cause
+(unbounded SOS multiplier) and fix (`maxSosMultiplier`). Every CFB number
+from before that fix is unreliable.
+
+Two CFBD-derived signals were added on top (`spPriorWeight` for prior-
+season SP+, `eloSignalPoints` for weekly Elo — see "External ratings"
+above), then swept: `spPriorWeight` **consistently hurt** cover rate once
+weighted above ~0.3 (worst at `spPriorWeight=1`, 47.4%) — likely because of
+the flagged uncertainty around whether CFBD's SP+ value is genuinely
+preseason-informed or just last season's final number. `eloSignalPoints`
+showed a **real, fairly clean positive effect**, peaking around 1.5-2.
+`CFB_PARAMS`'s defaults were updated to match (`spPriorWeight: 0`,
+`eloSignalPoints: 1.5`, `pointsPerEpa: 20`) — the first time this file's
+constants reflect an actual sweep result rather than a guess.
+
+A second, subtler bug was found in the same sweep: `computeInitialRating`
+fell through to raw `priorSpRating` whenever a team had no carryover
+rating available, **regardless of `spPriorWeight`** — meaning `weight=0`
+still silently injected full-strength SP+ for the entire 2023 season (the
+backtest's first season, with no prior-season ratings ever computed).
+Fixed by blending against league-average (0) instead of skipping straight
+to the raw SP+ value when carryover is missing. Every external-ratings
+sweep result from before this fix should be disregarded.
+
+### Walk-forward validation (`cfb-walkforward` job)
+
+The 52.78% opening-line result above was found by sweeping
+`spPriorWeight`/`eloSignalPoints` against 2023-2025 and then *evaluating*
+the winning combo against that same 2023-2025 data — a real risk of fitting
+noise rather than finding a real edge. `src/adminJobs.ts`'s
+`startCfbWalkforwardJob` addresses this properly: calibrates using only
+2023-2024, then tests that winning combo purely on 2025 — data the
+calibration never saw. Reports cover rate vs. both closing and opening
+line for the 2025 holdout. Not yet run — this is the next real
+validation step before trusting the calibrated params at all.
+
 ## Schema
 
 Everything joins through `games`:
@@ -494,15 +565,19 @@ src/
 
 ## What's next
 
-1. Review the corrected NFL backtest and the CFB backtest together —
-   specifically whether the CFB run shows the same direction of result as
-   NFL independently (a real structural pattern should show up in both; an
-   NFL-only pattern is weaker evidence). Open question: CFB's avg CLV
-   climbs with the deviation threshold while ATS cover rate stays flat —
-   not yet explained.
-2. Use `backtest:report`'s threshold and confidence sweeps to tune
-   `src/ratings/config.ts`'s currently-guessed constants (pointsPerEpa
-   especially — unanchored predictions were producing unrealistic -25
-   point NFL spreads in early testing).
+1. **Run `cfb-walkforward`** (calibrate on 2023-2024, test on 2025 alone) —
+   the immediate next step. The 52.78% opening-line result was found by
+   calibrating and evaluating on the same 2023-2025 data; this checks
+   whether it survives being tested on data the calibration never saw.
+2. If it holds up, look at whether the CFB pattern shows up independently
+   in NFL too (weaker without a real opening line to test against, but
+   still worth checking cover-rate-vs-deviation-threshold trends).
 3. **Live picks (Phase 4) do not get built until this is done and reviewed
    together.**
+4. *(Later, once the model's edge — if any — is validated)*: a
+   hypothetical-matchup tool — pick any two teams/weeks, not just ones on
+   the real schedule, and see the model's implied line. `predictSpread`
+   already supports this structurally (it only needs two ratings, not a
+   real scheduled game); the one real gap is confirming it degrades
+   sensibly with no market line to anchor to, since a hypothetical matchup
+   has no real market price.
