@@ -130,26 +130,38 @@ npm run ingest:nfl:stats -- --season 2023
 not just a final number: `snapshot_type` is `'opening'`, `'movement'`, or
 `'closing'`, with a `captured_at` timestamp on every row.
 
-Two different sources feed it, split by what they're good for:
+Three sources feed it, split by what they're good for:
 
-- **Historical backtest data (Phase 3, 2-3 past seasons)**: free archives —
-  [SportsbookReviewsOnline](https://www.sportsbookreviewsonline.com/)'s free
-  season spreadsheets (NFL + CFB opening/closing spreads, totals,
-  moneylines, years of history) plus CFBD's own free `/lines` endpoint for
-  CFB. **Not yet finished** — `src/ingest/odds/sbrImport.ts` is a scaffold
-  with the target interface documented, but throws until someone downloads
-  a real season file and the column mapping is verified against it (SBR's
-  layout has drifted across seasons in the past, so this deliberately isn't
-  guessed blind).
-- **Live/current lines (Phase 4 and later backtest windows)**: The Odds API
-  (`src/ingest/odds/oddsApiClient.ts` + `syncCurrentOdds.ts`), fully working
-  — polls current spreads/moneylines/totals and records them as `'movement'`
-  snapshots. **The Odds API is deliberately not used for the historical
-  backtest** — its historical snapshot endpoint is metered per-market/
-  per-region/per-timestamp and pulling 2-3 seasons of NFL+CFB line history
-  that way would run real money; free archives cover that instead.
+- **NFL historical (closing only)**: `src/ingest/nflverse/syncHistoricalOdds.ts`
+  — the same `games.csv` already streamed for schedules turned out to
+  carry a closing-line number back to 1999, confirmed against nflverse's
+  real data dictionary. **Verified live** against 2023-2025. No opening
+  line in this source, only closing — see "Phase 3" below for how the
+  backtest handles that.
+- **CFB historical (opening + closing, maybe)**: `src/ingest/cfbd/syncHistoricalOdds.ts`
+  hits CFBD's `/lines` endpoint, which — per its documented shape, recalled
+  from memory since this sandbox can't reach CFBD's docs — carries both a
+  `spread` (closing) and `spreadOpen` (opening) per provider. **UNVERIFIED**:
+  the exact field names and sign convention haven't been confirmed against
+  a real response. Run it for real and check the `odds_snapshots` rows it
+  produces (a plausible closing-line range, opening present or not) before
+  trusting it — same posture as the ESPN injuries client.
+- **Live/current lines (Phase 4 and beyond)**: The Odds API
+  (`src/ingest/odds/oddsApiClient.ts` + `syncCurrentOdds.ts`), **verified
+  live** — polls current spreads/moneylines/totals, real sane values
+  confirmed against the 2026 NFL schedule. Not used for the historical
+  backtest — its historical snapshot endpoint is metered per-market/
+  per-region/per-timestamp and would run real money for 2-3 seasons of
+  history; the two sources above cover that for free instead.
+  SportsbookReviewsOnline (originally the planned historical source) turned
+  out to only archive back to 2021-22 — too stale to be useful here, hence
+  the pivot to nflverse/CFBD; `src/ingest/odds/sbrImport.ts` is still an
+  unfinished scaffold, kept in case a real opening-line source for NFL is
+  ever needed (nflverse doesn't have one).
 
 ```bash
+npm run ingest:nfl:historicalOdds -- --season 2024
+npm run ingest:cfbd:historicalOdds -- --year 2024
 npm run ingest:odds:current -- --sport nfl   # or --sport cfb
 ```
 
@@ -369,14 +381,16 @@ src/
 
 ## What's next
 
-1. Finish `src/ingest/odds/sbrImport.ts` against a real downloaded
-   SportsbookReviewsOnline file, so historical opening/closing lines exist
-   to backtest against — this is the only thing blocking Phase 3 from
-   producing a real result; everything else is built.
-2. Run `backtest:run` for 2-3 completed seasons once that data exists, and
-   use `backtest:report`'s threshold sweep to tune `src/ratings/config.ts`'s
-   currently-guessed constants (pointsPerEpa especially — the one real
-   finding so far, from the smoke test, is that unanchored predictions run
-   too hot: -25 point NFL spreads with no market line to blend toward).
-   **Live picks (Phase 4) do not get built until this is done and
-   reviewed together.**
+1. Check the CFBD historical-odds ingestion's real output (UNVERIFIED —
+   see "Odds data" above) and fix field names/sign convention if the
+   guesses were wrong.
+2. Review the corrected NFL backtest and the new CFB backtest together —
+   specifically whether the CFB run shows the same direction of result as
+   NFL independently (a real structural pattern should show up in both; an
+   NFL-only pattern is weaker evidence).
+3. Use `backtest:report`'s threshold and confidence sweeps to tune
+   `src/ratings/config.ts`'s currently-guessed constants (pointsPerEpa
+   especially — unanchored predictions were producing unrealistic -25
+   point NFL spreads in early testing).
+4. **Live picks (Phase 4) do not get built until this is done and reviewed
+   together.**

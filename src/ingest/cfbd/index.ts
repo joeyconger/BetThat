@@ -2,6 +2,7 @@ import { parseArgs, requireFlag } from "../cliArgs.js";
 import { syncCfbdTeams } from "./syncTeams.js";
 import { syncCfbdGames } from "./syncGames.js";
 import { syncCfbdGameStats } from "./syncStats.js";
+import { syncCfbdHistoricalOdds } from "./syncHistoricalOdds.js";
 import { pool } from "../../db/pool.js";
 
 async function main() {
@@ -25,8 +26,13 @@ async function main() {
       console.log(`synced ${synced} CFB team-game stat rows for ${year} (${seasonType}), skipped ${skipped} (run 'games' first if this is high)`);
       break;
     }
+    case "historicalOdds": {
+      const { synced, skipped } = await syncCfbdHistoricalOdds(year, seasonType);
+      console.log(`synced ${synced} CFB odds rows for ${year} (${seasonType}), skipped ${skipped} — UNVERIFIED, check real values before trusting`);
+      break;
+    }
     default:
-      console.error("usage: tsx src/ingest/cfbd/index.ts <teams|games|stats> --year 2023 [--seasonType regular|postseason]");
+      console.error("usage: tsx src/ingest/cfbd/index.ts <teams|games|stats|historicalOdds> --year 2023 [--seasonType regular|postseason]");
       process.exitCode = 1;
   }
 

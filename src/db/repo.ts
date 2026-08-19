@@ -257,6 +257,11 @@ export async function findTeamIdFuzzy(sport: Sport, externalName: string): Promi
   return matches.length === 1 ? matches[0]!.id : undefined;
 }
 
+export async function getGameDate(gameId: number): Promise<Date | undefined> {
+  const result = await pool.query<{ game_date: Date }>(`SELECT game_date FROM games WHERE id = $1`, [gameId]);
+  return result.rows[0]?.game_date;
+}
+
 export async function getGameTeamIds(gameId: number): Promise<{ homeTeamId: number; awayTeamId: number } | undefined> {
   const result = await pool.query<{ home_team_id: number; away_team_id: number }>(
     `SELECT home_team_id, away_team_id FROM games WHERE id = $1`,

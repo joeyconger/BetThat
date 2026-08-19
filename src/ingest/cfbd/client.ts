@@ -77,3 +77,34 @@ export function getGameAdvancedStats(
 ): Promise<CfbdGameAdvancedStats[]> {
   return cfbdGet<CfbdGameAdvancedStats[]>("/stats/game/advanced", { year, week, seasonType });
 }
+
+// UNVERIFIED shape — recalled from CFBD's documented /lines response, not
+// confirmed against a real call (this sandbox has no CFBD_API_KEY and no
+// network path to the API). Parsed defensively in syncHistoricalOdds.ts;
+// treat the actual field names and spread sign convention as unconfirmed
+// until a real response has been inspected (see README "Odds data").
+export interface CfbdLineEntry {
+  provider: string;
+  spread: number | null;
+  spreadOpen: number | null;
+  overUnder: number | null;
+  overUnderOpen: number | null;
+  homeMoneyline: number | null;
+  awayMoneyline: number | null;
+}
+
+export interface CfbdGameLines {
+  id: number;
+  season: number;
+  week: number;
+  homeTeam: string;
+  awayTeam: string;
+  lines: CfbdLineEntry[];
+}
+
+export function getLines(
+  year: number,
+  seasonType: "regular" | "postseason" = "regular",
+): Promise<CfbdGameLines[]> {
+  return cfbdGet<CfbdGameLines[]>("/lines", { year, seasonType });
+}

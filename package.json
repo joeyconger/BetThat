@@ -12,6 +12,7 @@
     "ingest:cfbd:teams": "tsx src/ingest/cfbd/index.ts teams",
     "ingest:cfbd:games": "tsx src/ingest/cfbd/index.ts games",
     "ingest:cfbd:stats": "tsx src/ingest/cfbd/index.ts stats",
+    "ingest:cfbd:historicalOdds": "tsx src/ingest/cfbd/index.ts historicalOdds",
     "ingest:nfl:schedules": "tsx src/ingest/nflverse/index.ts schedules",
     "ingest:nfl:stats": "tsx src/ingest/nflverse/index.ts stats",
     "ingest:nfl:historicalOdds": "tsx src/ingest/nflverse/index.ts historicalOdds",
