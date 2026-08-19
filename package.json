@@ -18,6 +18,8 @@
     "ingest:injuries:current": "tsx src/ingest/injuries/index.ts current",
     "ingest:weather": "tsx src/ingest/weather/index.ts",
     "smoke": "tsx src/smoke.ts",
+    "smoke:cfb": "tsx src/smokeCfb.ts",
+    "cleanup:cfb": "tsx src/cleanupCfb.ts",
     "verify": "tsx src/verify.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"

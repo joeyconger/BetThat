@@ -13,7 +13,11 @@ export async function syncCfbdGames(
     const homeTeamId = await findTeamId("cfb", String(game.homeId));
     const awayTeamId = await findTeamId("cfb", String(game.awayId));
     if (!homeTeamId || !awayTeamId) {
-      // team not FBS (no conference) or not yet synced — run syncCfbdTeams first
+      // Either team isn't FBS (syncCfbdTeams only syncs FBS teams) or
+      // teams haven't been synced yet for this year — run that first.
+      // This also means an FBS-vs-FCS game is intentionally dropped here:
+      // the FCS side never resolves, so the game never gets a home+away
+      // pair. Deliberate — this project only rates FBS-vs-FBS games.
       skipped += 1;
       continue;
     }
