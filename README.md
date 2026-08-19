@@ -75,8 +75,9 @@ curl -X POST https://<your-domain>/query \
 
 ```bash
 npm install
-cp .env.example .env   # fill in DATABASE_URL, CFBD_API_KEY, ODDS_API_KEY
+cp .env.example .env   # fill in DATABASE_URL, CFBD_API_KEY, ODDS_API_KEY, ADMIN_TOKEN, DASHBOARD_USER/PASSWORD
 npm run migrate
+npm run server          # dashboard + API at http://localhost:3000
 ```
 
 ## Data sources — what and why
@@ -357,26 +358,31 @@ railway.json
 .env.example
 src/
   config.ts              # env loading
+  server.ts               # HTTP entry point — dashboard + /health + /query (see "Debug dashboard" above)
   db/
-    pool.ts               # pg Pool
+    pool.ts               # pg Pool (incl. the numeric-column type-parser fix — see "Backtest results")
     migrate.ts              # migration runner
     migrations/               # numbered .sql files
     repo.ts                    # typed upsert/query helpers shared by every ingest module
   ingest/
     cliArgs.ts             # tiny --flag value parser shared by CLI entry points
-    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate)
-    nflverse/                 # NFL schedules + play-by-play EPA/success rate
-    odds/                       # current lines (Odds API) + historical archive import (scaffold)
+    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate), historical odds (UNVERIFIED)
+    nflverse/                 # NFL schedules, play-by-play EPA/success rate, historical closing lines
+    odds/                       # current lines (Odds API) + SBR historical archive import (unfinished scaffold)
     injuries/                    # ESPN unofficial injuries (unverified)
     weather/                      # Open-Meteo, NFL stadiums
   ratings/                # Phase 2 — EPA-driven Elo, market-anchored
     config.ts              # tunable params per sport, flagged as uncalibrated defaults
     elo.ts                   # pure rating math (no DB) — computeSeasonRatings, predictSpread
     service.ts                 # DB orchestration: computeAndStoreRatings, generatePredictionsForWeek(+Backtest)
-  backtest/                # Phase 3 — built, blocked on historical odds data
-    clv.ts                   # pure math (no DB) — computeClv, computeCovered
+  backtest/                # Phase 3 — run for real; see "Backtest results" above
+    clv.ts                   # pure math (no DB) — computeClv, computeCovered, pickSideFromDeviation
     run.ts                     # replays predictions across a season range, scores against real lines
-    report.ts                    # overall / by-threshold / by-sport-week aggregate CLV reporting
+    report.ts                    # overall / threshold / confidence / sport-season aggregate reporting
+  web/                    # src/server.ts's HTML dashboard
+    layout.ts               # shared page shell, CSS tokens (incl. dataviz-validated status colors)
+    charts.ts                 # inline-SVG cover-rate bar chart, no charting library
+    pages/                     # one render function per route
 ```
 
 ## What's next

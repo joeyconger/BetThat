@@ -14,6 +14,12 @@ types.setTypeParser(1700, (value: string) => parseFloat(value));
 export const pool = new Pool({
   connectionString: config.databaseUrl,
   ssl: config.databaseUrl.includes("railway") ? { rejectUnauthorized: false } : undefined,
+  // A runaway query (an accidental cartesian join, or an expensive ad hoc
+  // SELECT via server.ts's /query) shouldn't be able to hang a connection
+  // indefinitely. 30s comfortably covers every real query in this app —
+  // the slowest is the season-long backtest replay, which is many small
+  // queries, not one long-running one.
+  statement_timeout: 30_000,
 });
 
 export async function query<T extends Record<string, unknown> = Record<string, unknown>>(
