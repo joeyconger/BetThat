@@ -63,6 +63,8 @@ reviewing backtest results without round-tripping through deploy logs:
   rowCount }`, for ad hoc verification beyond the fixed pages above. That
   bearer token is the only safety rail on this one; treat it as a real
   secret.
+- `POST /admin/jobs/:name`, `GET /admin/jobs`, `GET /admin/jobs/:id` (same
+  bearer auth) — background job triggers, see `src/adminJobs.ts` below.
 
 ```bash
 curl -X POST https://<your-domain>/query \
@@ -70,6 +72,32 @@ curl -X POST https://<your-domain>/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "select * from backtest_runs order by id desc limit 5"}'
 ```
+
+### Background jobs (`src/adminJobs.ts`) — and why they exist
+
+`railway.json`'s `startCommand` used to chain ingestion + a backtest run
+*before* `npm run server` — convenient for getting a fresh result on every
+deploy, but a real mistake: Railway's healthcheck only waits ~1m40s for
+`/health` to respond, and multi-season CFBD ingestion routinely takes
+longer than that. Every deploy that chained it either got lucky and beat
+the clock, or got killed as unhealthy mid-job — not a reliable way to run
+anything real. `startCommand` is back to just `npm run migrate && npm run
+server` (always fast, always passes healthcheck), and slow jobs run
+*after* the server is already up, triggered on demand instead:
+
+```bash
+curl -X POST https://<your-domain>/admin/jobs/nfl-backtest-refresh -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -X POST https://<your-domain>/admin/jobs/cfb-pipeline -H "Authorization: Bearer $ADMIN_TOKEN"
+# returns {"started": "<job-id>"} immediately; poll:
+curl https://<your-domain>/admin/jobs/<job-id> -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Job state is in-memory only (resets on redeploy) — that's fine, since the
+actual output (new `backtest_runs` rows) persists in Postgres regardless
+and shows up in the dashboard once done. Verified locally against a real
+Postgres instance, both the success path and the error path (killed local
+Postgres mid-job, confirmed the job correctly reported `status: "error"`
+with the real error message rather than hanging or crashing the server).
 
 ## Setup
 

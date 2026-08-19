@@ -17,6 +17,7 @@ import {
   getConfidenceReport,
   getSportSeasonReport,
 } from "./backtest/report.js";
+import { listJobs, getJob, JOB_STARTERS } from "./adminJobs.js";
 
 // A read-only diagnostics surface: backtest reports, team ratings, and raw
 // model predictions vs. market lines. NOT the live-picks app (still
@@ -100,6 +101,56 @@ async function handleRequest(
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: (err as Error).message }));
     }
+    return;
+  }
+
+  // Background job triggers — for anything too slow to run inside
+  // startCommand without risking the deploy healthcheck (see adminJobs.ts).
+  // Same bearer-token auth as /query.
+  if (req.method === "POST" && /^\/admin\/jobs\/[\w-]+$/.test(url.pathname)) {
+    if (!isQueryAuthorized(req.headers.authorization)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const name = url.pathname.split("/")[3]!;
+    const starter = JOB_STARTERS[name];
+    if (!starter) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `unknown job: ${name}`, available: Object.keys(JOB_STARTERS) }));
+      return;
+    }
+    const job = await starter();
+    res.writeHead(202, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ started: job.id }));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/admin/jobs") {
+    if (!isQueryAuthorized(req.headers.authorization)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(listJobs()));
+    return;
+  }
+
+  if (req.method === "GET" && /^\/admin\/jobs\/[\w-]+$/.test(url.pathname)) {
+    if (!isQueryAuthorized(req.headers.authorization)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const job = getJob(url.pathname.split("/")[3]!);
+    if (!job) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "job not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(job));
     return;
   }
 

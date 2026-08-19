@@ -5,7 +5,7 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "npm run migrate && npm run ingest:cfbd:teams -- --year 2023 && npm run ingest:cfbd:games -- --year 2023 && npm run ingest:cfbd:stats -- --year 2023 && npm run ingest:cfbd:historicalOdds -- --year 2023 && npm run ingest:cfbd:teams -- --year 2024 && npm run ingest:cfbd:games -- --year 2024 && npm run ingest:cfbd:stats -- --year 2024 && npm run ingest:cfbd:historicalOdds -- --year 2024 && npm run ingest:cfbd:historicalOdds -- --year 2025 && npm run backtest:run -- --sport cfb --seasonStart 2023 --seasonEnd 2025 --name cfb-v1 && npm run server",
+    "startCommand": "npm run migrate && npm run server",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 100,
     "restartPolicyType": "ON_FAILURE",
