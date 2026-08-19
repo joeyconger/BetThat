@@ -96,9 +96,15 @@ export function computeInitialRating(
   priorSpRating: number | undefined,
   params: RatingParams,
 ): number {
-  const carryover = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : undefined;
-  if (priorSpRating === undefined) return carryover ?? 0;
-  if (carryover === undefined) return priorSpRating;
+  if (priorSpRating === undefined) {
+    return priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
+  }
+  // Missing carryover (e.g. the first season in a backtest range, where no
+  // prior-season rating was ever computed) blends against league-average
+  // (0), not straight to priorSpRating — otherwise spPriorWeight=0 would
+  // still inject full-strength SP+ whenever carryover happens to be
+  // missing, silently ignoring the weight the caller asked for.
+  const carryover = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
   return (1 - params.spPriorWeight) * carryover + params.spPriorWeight * priorSpRating;
 }
 
