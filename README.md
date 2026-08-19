@@ -35,11 +35,31 @@ exists, check its own status notes before trusting anything it outputs.
 - Env-based config (`src/config.ts`, `.env.example`) — same shape as the
   other Railway apps this follows
 - Deploy target: Railway (Postgres plugin + this service, deployed straight
-  from this repo's root — no monorepo subfolder). Nothing here runs as a
-  long-lived server yet — Phase 1-3 are one-off/scheduled scripts, not a web
-  app. `railway.json`'s start command just runs migrations on deploy for
-  now; real scheduled jobs (ingestion, weekly picks) get wired up as
-  Railway Cron Jobs once there's something worth scheduling.
+  from this repo's root — no monorepo subfolder). Real scheduled jobs
+  (ingestion, weekly picks) get wired up as Railway Cron Jobs once there's
+  something worth scheduling; for now the deploy runs migrations, then
+  `src/server.ts`.
+
+## Debug/report endpoint (`src/server.ts`)
+
+**Not the live-picks app** (still gated — see Phase 4 status above) — a
+minimal, read-only HTTP surface for pulling backtest results and running
+ad hoc verification queries over HTTPS instead of round-tripping through
+deploy logs. Two routes:
+
+- `GET /health` — for Railway's healthcheck
+- `POST /query` (requires `Authorization: Bearer $ADMIN_TOKEN`) — runs a
+  `SELECT`-only query (rejects anything else) and returns `{ rows,
+  rowCount }`. That's the only safety rail; treat `ADMIN_TOKEN` as a real
+  secret, and don't point this at a database you wouldn't want read by
+  whoever holds that token.
+
+```bash
+curl -X POST https://<your-domain>/query \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "select * from backtest_runs order by id desc limit 5"}'
+```
 
 ## Setup
 
