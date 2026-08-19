@@ -63,8 +63,16 @@ const CFB_PARAMS: RatingParams = {
   homeFieldAdvantage: 2.5,
   sosWeight: 0.4, // stronger SOS adjustment for CFB than NFL, per spec
   marketShrinkageK: 6, // shallower CFB schedules (12 games) mean less time to prove the model out
-  spPriorWeight: 0.5, // uncalibrated default — equal blend of our own carryover and prior-season SP+
-  eloSignalPoints: 1.5, // uncalibrated default — points per unit z-score gap in CFBD's weekly Elo
+  // pointsPerEpa/spPriorWeight/eloSignalPoints below: calibrated from the
+  // cfb-external-sweep run (see README "External ratings" / backtest run
+  // 101-125) — spPriorWeight and eloSignalPoints were NOT independent
+  // guesses like the rest of this file, they're the actual best-cover-rate
+  // combo found (49.9%, still below the 52.4% breakeven line, but the
+  // highest of every combo tested). Re-sweep if pointsPerEpa/baseK change,
+  // since this pair was only tested holding those two fixed.
+  pointsPerEpa: 20,
+  spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
+  eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
 };
 
 export function getRatingParams(sport: Sport): RatingParams {
