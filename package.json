@@ -26,6 +26,7 @@
     "smoke:ratings": "tsx src/smokeRatings.ts",
     "backtest:run": "tsx src/backtest/index.ts run",
     "backtest:report": "tsx src/backtest/index.ts report",
+    "verify:odds": "tsx src/verifyOdds.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
