@@ -39,6 +39,14 @@ export async function getOverallReport(backtestRunId: number): Promise<Aggregate
   return toAggregateStats(rows[0]!);
 }
 
+/** Overall stats for every run at once — one query instead of N, for a run-list page. */
+export async function getOverallStatsByRun(): Promise<Map<number, AggregateStats>> {
+  const rows = await query<AggregateRow & { backtest_run_id: number }>(
+    `SELECT backtest_run_id, ${AGGREGATE_SELECT} FROM backtest_results GROUP BY backtest_run_id`,
+  );
+  return new Map(rows.map((row) => [row.backtest_run_id, toAggregateStats(row)]));
+}
+
 export interface ThresholdStats extends AggregateStats {
   threshold: number;
 }

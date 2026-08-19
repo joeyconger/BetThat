@@ -10,7 +10,13 @@ import {
   getPredictionsForWeek,
 } from "./db/repo.js";
 import type { Sport } from "./db/repo.js";
-import { getOverallReport, getThresholdReport, getConfidenceReport, getSportSeasonReport } from "./backtest/report.js";
+import {
+  getOverallReport,
+  getOverallStatsByRun,
+  getThresholdReport,
+  getConfidenceReport,
+  getSportSeasonReport,
+} from "./backtest/report.js";
 
 // A read-only diagnostics surface: backtest reports, team ratings, and raw
 // model predictions vs. market lines. NOT the live-picks app (still
@@ -44,8 +50,28 @@ function isSport(value: string): value is Sport {
   return value === "nfl" || value === "cfb";
 }
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+const server = createServer((req, res) => {
+  handleRequest(req, res).catch((err) => {
+    console.error("unhandled request error:", err);
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+    }
+    res.end("internal error");
+  });
+});
+
+async function handleRequest(
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  } catch {
+    res.writeHead(400, { "Content-Type": "text/plain" });
+    res.end("bad request");
+    return;
+  }
 
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -84,7 +110,8 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/") {
-    html(res, renderHome(await listBacktestRuns()));
+    const [runs, statsByRun] = await Promise.all([listBacktestRuns(), getOverallStatsByRun()]);
+    html(res, renderHome(runs, statsByRun));
     return;
   }
 
@@ -129,7 +156,7 @@ const server = createServer(async (req, res) => {
 
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("not found");
-});
+}
 
 server.listen(Number(PORT), () => {
   console.log(`server listening on ${PORT}`);
