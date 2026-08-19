@@ -3,8 +3,6 @@ import type { RatingParams } from "../ratings/config.js";
 import type { Sport } from "../db/repo.js";
 import { runBacktest } from "./run.js";
 import { getOverallReport } from "./report.js";
-import { pool } from "../db/pool.js";
-import { parseFlags, requireFlag } from "../ingest/cliArgs.js";
 
 /**
  * Tries a grid of rating-model constants against the same season range and
@@ -24,7 +22,7 @@ import { parseFlags, requireFlag } from "../ingest/cliArgs.js";
 const DEFAULT_POINTS_PER_EPA = [20, 30, 40];
 const DEFAULT_BASE_K = [0.15, 0.25, 0.35];
 
-interface SweepResult {
+export interface SweepResult {
   pointsPerEpa: number;
   baseK: number;
   runId: number;
@@ -74,24 +72,3 @@ export async function runSweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
-
-async function main() {
-  const flags = parseFlags(process.argv.slice(2));
-  const sport = requireFlag(flags, "sport") as Sport;
-  const seasonStart = Number(requireFlag(flags, "seasonStart"));
-  const seasonEnd = Number(requireFlag(flags, "seasonEnd"));
-
-  const results = await runSweep(sport, seasonStart, seasonEnd);
-
-  console.log("\n--- best combos by cover rate ---");
-  for (const r of results.slice(0, 5)) {
-    console.log(JSON.stringify(r));
-  }
-
-  await pool.end();
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});

@@ -23,7 +23,7 @@
     "ratings:predict": "tsx src/ratings/index.ts predict",
     "backtest:run": "tsx src/backtest/index.ts run",
     "backtest:report": "tsx src/backtest/index.ts report",
-    "backtest:sweep": "tsx src/backtest/sweep.ts",
+    "backtest:sweep": "tsx src/backtest/sweepCli.ts",
     "server": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
