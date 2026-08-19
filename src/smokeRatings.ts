@@ -22,7 +22,7 @@ async function main() {
     console.log(`--- ${sport} ${SEASON} ratings through week ${WEEK} ---`);
     const state = await computeAndStoreRatings(sport, SEASON, WEEK);
     console.log(`computed ratings for ${state.size} teams`);
-    console.log("top 5:", await topRatings(sport));
+    console.log("top 5:", JSON.stringify(await topRatings(sport)));
 
     console.log(`--- ${sport} ${SEASON} predictions for week ${WEEK + 1} ---`);
     const { predicted } = await generatePredictionsForWeek(sport, SEASON, WEEK + 1);
@@ -39,7 +39,7 @@ async function main() {
        ORDER BY g.id LIMIT 5`,
       [sport, SEASON, WEEK + 1],
     );
-    console.log("sample predictions:", preds);
+    console.log("sample predictions:", JSON.stringify(preds));
   }
 
   await pool.end();
