@@ -70,20 +70,43 @@ export async function getThresholdReport(
   return results;
 }
 
+export interface SportSeasonStats extends AggregateStats {
+  sport: string;
+  season: number;
+}
+
+/**
+ * Breaks results down by sport and season — the first thing to check
+ * before trusting an aggregate number: is the pattern stable year to
+ * year, or is one season driving the whole result?
+ */
+export async function getSportSeasonReport(backtestRunId: number): Promise<SportSeasonStats[]> {
+  const rows = await query<AggregateRow & { sport: string; season: number }>(
+    `SELECT g.sport, g.season, ${AGGREGATE_SELECT}
+     FROM backtest_results br JOIN games g ON g.id = br.game_id
+     WHERE br.backtest_run_id = $1
+     GROUP BY g.sport, g.season
+     ORDER BY g.sport, g.season`,
+    [backtestRunId],
+  );
+  return rows.map((row) => ({ sport: row.sport, season: row.season, ...toAggregateStats(row) }));
+}
+
 export interface SportWeekStats extends AggregateStats {
   sport: string;
+  season: number;
   week: number;
 }
 
-/** Breaks CLV down by sport and week, to spot where the model is weak rather than just an overall average. */
+/** Breaks results down by sport/season/week, to spot where the model is weak rather than just an overall average. */
 export async function getSportWeekReport(backtestRunId: number): Promise<SportWeekStats[]> {
-  const rows = await query<AggregateRow & { sport: string; week: number }>(
-    `SELECT g.sport, g.week, ${AGGREGATE_SELECT}
+  const rows = await query<AggregateRow & { sport: string; season: number; week: number }>(
+    `SELECT g.sport, g.season, g.week, ${AGGREGATE_SELECT}
      FROM backtest_results br JOIN games g ON g.id = br.game_id
      WHERE br.backtest_run_id = $1
-     GROUP BY g.sport, g.week
-     ORDER BY g.sport, g.week`,
+     GROUP BY g.sport, g.season, g.week
+     ORDER BY g.sport, g.season, g.week`,
     [backtestRunId],
   );
-  return rows.map((row) => ({ sport: row.sport, week: row.week, ...toAggregateStats(row) }));
+  return rows.map((row) => ({ sport: row.sport, season: row.season, week: row.week, ...toAggregateStats(row) }));
 }
