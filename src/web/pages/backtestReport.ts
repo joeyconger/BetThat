@@ -1,4 +1,5 @@
 import { renderPage, nav, escapeHtml } from "../layout.js";
+import { renderCoverRateChart } from "../charts.js";
 import type { AggregateStats, ThresholdStats, ConfidenceStats, SportSeasonStats } from "../../backtest/report.js";
 import type { BacktestRunSummary } from "../../db/repo.js";
 
@@ -46,6 +47,18 @@ export function renderBacktestReport(
     )
     .join("");
 
+  const thresholdChart = renderCoverRateChart(
+    thresholds.map((t) => ({ label: `${t.threshold}+`, coverRate: t.coverRate, games: t.games })),
+  );
+
+  const confidenceChart = renderCoverRateChart(
+    confidence.map((c) => ({ label: `≤${c.maxConfidence}`, coverRate: c.coverRate, games: c.games })),
+  );
+
+  const seasonChart = renderCoverRateChart(
+    bySeasonSport.map((s) => ({ label: `${s.sport} ${s.season}`, coverRate: s.coverRate, games: s.games })),
+  );
+
   const seasonRows = bySeasonSport
     .map(
       (s) => `<tr>
@@ -81,7 +94,8 @@ export function renderBacktestReport(
     </table>
 
     <h2>By deviation threshold</h2>
-    <p class="subtitle">Restricting to picks where the model disagreed with the market by at least this much.</p>
+    <p class="subtitle">Restricting to picks where the model disagreed with the market by at least this much. Dashed line is the 50% no-edge baseline.</p>
+    ${thresholdChart}
     <table>
       <thead><tr><th>Min deviation (pts)</th><th>Games</th><th>Cover rate</th><th>Avg CLV</th></tr></thead>
       <tbody>${thresholdRows}</tbody>
@@ -89,12 +103,15 @@ export function renderBacktestReport(
 
     <h2>By confidence</h2>
     <p class="subtitle">Restricting to picks with at least this much certainty (lower = more games observed when predicted) — a different question than deviation size above.</p>
+    ${confidenceChart}
     <table>
       <thead><tr><th>Max error (±pts)</th><th>Games</th><th>Cover rate</th><th>Avg CLV</th></tr></thead>
       <tbody>${confidenceRows}</tbody>
     </table>
 
     <h2>By sport/season</h2>
+    <p class="subtitle">Is the result stable year to year, or is one season driving it?</p>
+    ${seasonChart}
     <table>
       <thead><tr><th>Sport</th><th>Season</th><th>Games</th><th>Cover rate</th><th>Avg CLV</th></tr></thead>
       <tbody>${seasonRows}</tbody>

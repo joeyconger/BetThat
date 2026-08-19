@@ -18,6 +18,13 @@ const STYLES = `
     --accent: #3b5bfd;
     --good: #17803d;
     --bad: #c0342c;
+    /* Status colors for chart marks (non-text graphics, ≥3:1 contrast) —
+       mode-invariant by design, unlike --good/--bad above which are tuned
+       separately for text contrast at 4.5:1. */
+    --chart-good: #0ca30c;
+    --chart-bad: #d03b3b;
+    --chart-axis: #898781;
+    --chart-baseline: #c3c2b7;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -29,6 +36,7 @@ const STYLES = `
       --accent: #7c93ff;
       --good: #4ade80;
       --bad: #f87171;
+      --chart-baseline: #383835;
     }
   }
   * { box-sizing: border-box; }
@@ -58,6 +66,16 @@ const STYLES = `
   .muted { color: var(--muted); }
   a.run-link { color: var(--accent); text-decoration: none; }
   a.run-link:hover { text-decoration: underline; }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem 1rem 0.5rem; margin-bottom: 1.5rem;
+  }
+  .chart-bar-good { fill: var(--chart-good); }
+  .chart-bar-bad { fill: var(--chart-bad); }
+  .chart-axis-label { fill: var(--chart-axis); font-size: 10px; }
+  .chart-value-label { fill: var(--text); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .chart-baseline-line { stroke: var(--chart-baseline); stroke-width: 1; stroke-dasharray: 3 3; }
+  .chart-na-label { fill: var(--muted); font-size: 10px; }
 `;
 
 export function renderPage(title: string, bodyHtml: string): string {
