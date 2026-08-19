@@ -1,5 +1,5 @@
 import { renderPage, nav, escapeHtml } from "../layout.js";
-import type { AggregateStats, ThresholdStats, SportSeasonStats } from "../../backtest/report.js";
+import type { AggregateStats, ThresholdStats, ConfidenceStats, SportSeasonStats } from "../../backtest/report.js";
 import type { BacktestRunSummary } from "../../db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -21,6 +21,7 @@ export function renderBacktestReport(
   run: BacktestRunSummary,
   overall: AggregateStats,
   thresholds: ThresholdStats[],
+  confidence: ConfidenceStats[],
   bySeasonSport: SportSeasonStats[],
 ): string {
   const thresholdRows = thresholds
@@ -30,6 +31,17 @@ export function renderBacktestReport(
         <td class="num">${t.games}</td>
         <td class="num ${coverClass(t.coverRate)}">${fmtPct(t.coverRate)}</td>
         <td class="num">${fmtSigned(t.avgClv)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const confidenceRows = confidence
+    .map(
+      (c) => `<tr>
+        <td class="num">≤${c.maxConfidence}</td>
+        <td class="num">${c.games}</td>
+        <td class="num ${coverClass(c.coverRate)}">${fmtPct(c.coverRate)}</td>
+        <td class="num">${fmtSigned(c.avgClv)}</td>
       </tr>`,
     )
     .join("");
@@ -69,9 +81,17 @@ export function renderBacktestReport(
     </table>
 
     <h2>By deviation threshold</h2>
+    <p class="subtitle">Restricting to picks where the model disagreed with the market by at least this much.</p>
     <table>
       <thead><tr><th>Min deviation (pts)</th><th>Games</th><th>Cover rate</th><th>Avg CLV</th></tr></thead>
       <tbody>${thresholdRows}</tbody>
+    </table>
+
+    <h2>By confidence</h2>
+    <p class="subtitle">Restricting to picks with at least this much certainty (lower = more games observed when predicted) — a different question than deviation size above.</p>
+    <table>
+      <thead><tr><th>Max error (±pts)</th><th>Games</th><th>Cover rate</th><th>Avg CLV</th></tr></thead>
+      <tbody>${confidenceRows}</tbody>
     </table>
 
     <h2>By sport/season</h2>

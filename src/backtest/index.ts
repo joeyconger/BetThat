@@ -1,6 +1,6 @@
 import { parseArgs, requireFlag } from "../ingest/cliArgs.js";
 import { runBacktest } from "./run.js";
-import { getOverallReport, getThresholdReport, getSportSeasonReport } from "./report.js";
+import { getOverallReport, getThresholdReport, getSportSeasonReport, getConfidenceReport } from "./report.js";
 import { pool } from "../db/pool.js";
 import type { Sport } from "../db/repo.js";
 
@@ -27,6 +27,7 @@ async function main() {
       const runId = Number(requireFlag(flags, "runId"));
       console.log("overall:", JSON.stringify(await getOverallReport(runId)));
       console.log("by threshold:", JSON.stringify(await getThresholdReport(runId)));
+      console.log("by confidence:", JSON.stringify(await getConfidenceReport(runId)));
       console.log("by sport/season:", JSON.stringify(await getSportSeasonReport(runId)));
       break;
     }

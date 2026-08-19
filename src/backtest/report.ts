@@ -92,6 +92,39 @@ export async function getSportSeasonReport(backtestRunId: number): Promise<Sport
   return rows.map((row) => ({ sport: row.sport, season: row.season, ...toAggregateStats(row) }));
 }
 
+export interface ConfidenceStats extends AggregateStats {
+  maxConfidence: number;
+}
+
+const DEFAULT_CONFIDENCE_CEILINGS = [8, 6, 4, 3, 2.5, 2, 1.5];
+
+/**
+ * CLV/cover-rate performance restricted to predictions with at least a
+ * given amount of certainty — distinct from getThresholdReport, which
+ * filters by deviation *size*. `confidence` is an error estimate in
+ * points (see ratings/elo.ts's predictSpread) — smaller means more games
+ * were on the books when the prediction was made, so this answers "does
+ * the model do better once it's actually seen enough of the season to
+ * have a real opinion," not just "when it disagrees with the market a
+ * lot." A big edge early in a season (little data) can still carry a
+ * wide confidence interval; this asks a different question than that.
+ */
+export async function getConfidenceReport(
+  backtestRunId: number,
+  confidenceCeilings: number[] = DEFAULT_CONFIDENCE_CEILINGS,
+): Promise<ConfidenceStats[]> {
+  const results: ConfidenceStats[] = [];
+  for (const maxConfidence of confidenceCeilings) {
+    const rows = await query<AggregateRow>(
+      `SELECT ${AGGREGATE_SELECT} FROM backtest_results
+       WHERE backtest_run_id = $1 AND confidence IS NOT NULL AND confidence <= $2`,
+      [backtestRunId, maxConfidence],
+    );
+    results.push({ maxConfidence, ...toAggregateStats(rows[0]!) });
+  }
+  return results;
+}
+
 export interface SportWeekStats extends AggregateStats {
   sport: string;
   season: number;

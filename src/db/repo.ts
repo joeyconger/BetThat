@@ -528,14 +528,20 @@ export async function getFinalGamesForWeek(sport: Sport, season: number, week: n
   }));
 }
 
-export async function getLatestPrediction(gameId: number, method: string): Promise<number | undefined> {
-  const result = await pool.query<{ model_spread_home: number }>(
-    `SELECT model_spread_home FROM model_predictions
+export interface LatestPrediction {
+  modelSpreadHome: number;
+  confidence: number | null;
+}
+
+export async function getLatestPrediction(gameId: number, method: string): Promise<LatestPrediction | undefined> {
+  const result = await pool.query<{ model_spread_home: number; confidence: number | null }>(
+    `SELECT model_spread_home, confidence FROM model_predictions
      WHERE game_id = $1 AND method = $2
      ORDER BY predicted_at DESC LIMIT 1`,
     [gameId, method],
   );
-  return result.rows[0]?.model_spread_home;
+  const row = result.rows[0];
+  return row ? { modelSpreadHome: row.model_spread_home, confidence: row.confidence } : undefined;
 }
 
 export interface InsertBacktestRunInput {
@@ -567,19 +573,21 @@ export interface InsertBacktestResultInput {
   clv: number | null;
   covered: boolean | null;
   beatClose: boolean | null;
+  /** The prediction's own error estimate at the time it was made — see ratings/elo.ts's predictSpread. */
+  confidence: number | null;
 }
 
 export async function insertBacktestResult(input: InsertBacktestResultInput): Promise<void> {
   await pool.query(
     `INSERT INTO backtest_results (
        backtest_run_id, game_id, model_spread_home, opening_spread_home, closing_spread_home,
-       actual_margin_home, clv, covered, beat_close
+       actual_margin_home, clv, covered, beat_close, confidence
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (backtest_run_id, game_id)
      DO UPDATE SET model_spread_home = EXCLUDED.model_spread_home, opening_spread_home = EXCLUDED.opening_spread_home,
        closing_spread_home = EXCLUDED.closing_spread_home, actual_margin_home = EXCLUDED.actual_margin_home,
-       clv = EXCLUDED.clv, covered = EXCLUDED.covered, beat_close = EXCLUDED.beat_close`,
+       clv = EXCLUDED.clv, covered = EXCLUDED.covered, beat_close = EXCLUDED.beat_close, confidence = EXCLUDED.confidence`,
     [
       input.backtestRunId,
       input.gameId,
@@ -590,6 +598,7 @@ export async function insertBacktestResult(input: InsertBacktestResultInput): Pr
       input.clv,
       input.covered,
       input.beatClose,
+      input.confidence,
     ],
   );
 }

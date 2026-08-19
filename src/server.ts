@@ -10,7 +10,7 @@ import {
   getPredictionsForWeek,
 } from "./db/repo.js";
 import type { Sport } from "./db/repo.js";
-import { getOverallReport, getThresholdReport, getSportSeasonReport } from "./backtest/report.js";
+import { getOverallReport, getThresholdReport, getConfidenceReport, getSportSeasonReport } from "./backtest/report.js";
 
 // A read-only diagnostics surface: backtest reports, team ratings, and raw
 // model predictions vs. market lines. NOT the live-picks app (still
@@ -97,12 +97,13 @@ const server = createServer(async (req, res) => {
       res.end("backtest run not found");
       return;
     }
-    const [overall, thresholds, bySeasonSport] = await Promise.all([
+    const [overall, thresholds, confidence, bySeasonSport] = await Promise.all([
       getOverallReport(runId),
       getThresholdReport(runId),
+      getConfidenceReport(runId),
       getSportSeasonReport(runId),
     ]);
-    html(res, renderBacktestReport(run, overall, thresholds, bySeasonSport));
+    html(res, renderBacktestReport(run, overall, thresholds, confidence, bySeasonSport));
     return;
   }
 

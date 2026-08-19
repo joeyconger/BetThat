@@ -68,14 +68,15 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
       const games = await getFinalGamesForWeek(input.sport, season, week);
 
       for (const game of games) {
-        const modelSpreadHome = await getLatestPrediction(game.id, METHOD);
+        const prediction = await getLatestPrediction(game.id, METHOD);
         const openingSpreadHome = (await getOpeningLine(game.id)) ?? null;
         const closingSpreadHome = await getClosingLine(game.id);
 
-        if (modelSpreadHome === undefined || closingSpreadHome === undefined) {
+        if (prediction === undefined || closingSpreadHome === undefined) {
           skippedNoOdds += 1;
           continue;
         }
+        const { modelSpreadHome, confidence } = prediction;
 
         const actualMarginHome = game.homeScore - game.awayScore;
 
@@ -96,6 +97,7 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
           clv,
           covered,
           beatClose: clv === null ? null : clv > 0,
+          confidence,
         });
         scored += 1;
       }
