@@ -72,3 +72,74 @@ export async function runSweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
+
+/**
+ * Same coarse-search-then-refine approach as runSweep, but for the two
+ * external-ratings blend weights (spPriorWeight, eloSignalPoints) added in
+ * ratings/config.ts — see README "External ratings". Deliberately holds
+ * pointsPerEpa/baseK fixed at a single value (the best combo from an
+ * earlier runSweep pass) rather than sweeping all four at once: a 3x3x3x3
+ * grid would take ~9x longer for marginal extra information over two
+ * separate, smaller sweeps. CFB-only — these params are always 0 for NFL.
+ */
+const DEFAULT_SP_PRIOR_WEIGHT = [0, 0.3, 0.5, 0.7, 1];
+const DEFAULT_ELO_SIGNAL_POINTS = [0, 1, 1.5, 2, 3];
+
+export interface ExternalRatingsSweepResult {
+  spPriorWeight: number;
+  eloSignalPoints: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runExternalRatingsSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  fixedPointsPerEpa: number,
+  fixedBaseK: number,
+  spPriorWeightGrid: number[] = DEFAULT_SP_PRIOR_WEIGHT,
+  eloSignalPointsGrid: number[] = DEFAULT_ELO_SIGNAL_POINTS,
+): Promise<ExternalRatingsSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: ExternalRatingsSweepResult[] = [];
+
+  for (const spPriorWeight of spPriorWeightGrid) {
+    for (const eloSignalPoints of eloSignalPointsGrid) {
+      const paramsOverride: RatingParams = {
+        ...base,
+        pointsPerEpa: fixedPointsPerEpa,
+        baseK: fixedBaseK,
+        spPriorWeight,
+        eloSignalPoints,
+      };
+      const name = `sweep-external-${sport}-sp${spPriorWeight}-elo${eloSignalPoints}`;
+      const { backtestRunId, scored } = await runBacktest({
+        name,
+        sport,
+        seasonStart,
+        seasonEnd,
+        paramsOverride,
+      });
+      const overall = await getOverallReport(backtestRunId);
+      results.push({
+        spPriorWeight,
+        eloSignalPoints,
+        runId: backtestRunId,
+        games: scored,
+        coverRate: overall.coverRate,
+        avgClv: overall.avgClv,
+      });
+      console.log(
+        `spPriorWeight=${spPriorWeight} eloSignalPoints=${eloSignalPoints}: ${scored} games, cover=${
+          overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+        } (run ${backtestRunId})`,
+      );
+    }
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}

@@ -4,7 +4,7 @@ import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
-import { runSweep } from "./backtest/sweep.js";
+import { runSweep, runExternalRatingsSweep } from "./backtest/sweep.js";
 import type { Sport } from "./db/repo.js";
 
 /**
@@ -145,10 +145,29 @@ export function startCfbExternalRatingsJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Grids spPriorWeight x eloSignalPoints (25 combos) with pointsPerEpa=20,
+ * baseK=0.25 held fixed — the best cover-rate combo from the post-SOS-fix
+ * cfb-sweep run. Requires cfb-external-ratings to have run first (needs
+ * external_ratings data present).
+ */
+export function startCfbExternalSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-external-sweep", async (job) => {
+    log(job, "sweeping cfb spPriorWeight x eloSignalPoints, 2023-2025");
+    const results = await runExternalRatingsSweep("cfb", 2023, 2025, 20, 0.25);
+    for (const r of results) {
+      const cover = r.coverRate === null ? "n/a" : `${(r.coverRate * 100).toFixed(1)}%`;
+      const clv = r.avgClv === null ? "n/a" : r.avgClv.toFixed(2);
+      log(job, `spPriorWeight=${r.spPriorWeight} eloSignalPoints=${r.eloSignalPoints}: ${r.games} games, cover=${cover}, avgClv=${clv} (run ${r.runId})`);
+    }
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
   "nfl-sweep": startNflSweepJob,
   "cfb-sweep": startCfbSweepJob,
   "cfb-external-ratings": startCfbExternalRatingsJob,
+  "cfb-external-sweep": startCfbExternalSweepJob,
 };
