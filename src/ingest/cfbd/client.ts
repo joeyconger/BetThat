@@ -78,11 +78,10 @@ export function getGameAdvancedStats(
   return cfbdGet<CfbdGameAdvancedStats[]>("/stats/game/advanced", { year, week, seasonType });
 }
 
-// UNVERIFIED shape — recalled from CFBD's documented /lines response, not
-// confirmed against a real call (this sandbox has no CFBD_API_KEY and no
-// network path to the API). Parsed defensively in syncHistoricalOdds.ts;
-// treat the actual field names and spread sign convention as unconfirmed
-// until a real response has been inspected (see README "Odds data").
+// Verified against a real CFBD response — field names and spread sign
+// convention (positive = away favored, negative = home favored, same as
+// this project's schema) confirmed correct via 2024 season data checked
+// against known game outcomes. See syncHistoricalOdds.ts for details.
 export interface CfbdLineEntry {
   provider: string;
   spread: number | null;

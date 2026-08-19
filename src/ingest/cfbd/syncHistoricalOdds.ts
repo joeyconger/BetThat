@@ -2,11 +2,13 @@ import { getLines } from "./client.js";
 import { findGameId, getGameDate, insertOddsSnapshot } from "../../db/repo.js";
 
 /**
- * UNVERIFIED against a real CFBD response (see client.ts's getLines doc) —
- * this is CFB's only candidate for a *both* opening-and-closing odds
- * source (nflverse, used for NFL, is closing-only). Run this once for real
- * and check the `odds_snapshots` rows it produces before trusting them for
- * anything, same as the ESPN injuries client's UNVERIFIED status.
+ * Verified against real CFBD responses: ingested 2024 CFB odds spot-checked
+ * against known results (e.g. Georgia Tech's upset of Florida State,
+ * Vanderbilt's upset of Virginia Tech, Georgia over Clemson, Minnesota/UNC
+ * crossing from home-favored to away-favored) — spread sign convention and
+ * values were internally consistent and correct with no negation needed.
+ * This is CFB's only candidate for a *both* opening-and-closing odds source
+ * (nflverse, used for NFL, is closing-only).
  *
  * CFBD doesn't give real per-line timestamps, so captured_at is a rough
  * proxy: kickoff for closing, kickoff minus 6 days for opening. Only

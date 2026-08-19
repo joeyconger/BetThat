@@ -12,7 +12,7 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — CFBD (CFB teams/games/PPA stats) | ✅ **Verified live** — 2025 season synced to a real Railway Postgres instance, FBS-only after fixing an early bug that pulled every division |
 | 1. Data layer — nflverse (NFL schedules/EPA stats) | ✅ **Verified live** — 2025 season synced (285 games, 570 team-game rows, exact expected counts) |
 | 1. Data layer — odds (current lines) | ✅ **Verified live** — full 2026 NFL schedule (272/272 games) matched and synced from The Odds API, real sane spread/moneyline values confirmed |
-| 1. Data layer — odds (historical, for backtesting) | ✅ **Verified live** — nflverse's games.csv carries closing lines back to 1999 (see "Odds data" below); SBR's opening-line archive is still an unfinished scaffold, only relevant for real CLV rather than the cover-rate metric currently in use |
+| 1. Data layer — odds (historical, for backtesting) | ✅ **Verified live** — nflverse's games.csv carries closing lines back to 1999 (NFL, closing only); CFBD's `/lines` carries both opening and closing for CFB, spot-checked against real 2024 outcomes (see "Odds data" below). SBR's opening-line archive is still an unfinished scaffold, only relevant for real CLV rather than the cover-rate metric currently in use |
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
 | 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked |
@@ -167,14 +167,14 @@ Three sources feed it, split by what they're good for:
   real data dictionary. **Verified live** against 2023-2025. No opening
   line in this source, only closing — see "Phase 3" below for how the
   backtest handles that.
-- **CFB historical (opening + closing, maybe)**: `src/ingest/cfbd/syncHistoricalOdds.ts`
-  hits CFBD's `/lines` endpoint, which — per its documented shape, recalled
-  from memory since this sandbox can't reach CFBD's docs — carries both a
-  `spread` (closing) and `spreadOpen` (opening) per provider. **UNVERIFIED**:
-  the exact field names and sign convention haven't been confirmed against
-  a real response. Run it for real and check the `odds_snapshots` rows it
-  produces (a plausible closing-line range, opening present or not) before
-  trusting it — same posture as the ESPN injuries client.
+- **CFB historical (opening + closing)**: `src/ingest/cfbd/syncHistoricalOdds.ts`
+  hits CFBD's `/lines` endpoint, which carries both a `spread` (closing) and
+  `spreadOpen` (opening) per provider. **Verified live**: 2024 season data
+  spot-checked against known real outcomes (Georgia Tech's upset of Florida
+  State, Vanderbilt's upset of Virginia Tech, Georgia's blowout of Clemson,
+  Minnesota/UNC crossing from home-favored to away-favored) — field names,
+  spread sign convention (matches this project's schema directly, no
+  negation needed, unlike nflverse), and values all checked out.
 - **Live/current lines (Phase 4 and beyond)**: The Odds API
   (`src/ingest/odds/oddsApiClient.ts` + `syncCurrentOdds.ts`), **verified
   live** — polls current spreads/moneylines/totals, real sane values
@@ -416,7 +416,7 @@ src/
     repo.ts                    # typed upsert/query helpers shared by every ingest module
   ingest/
     cliArgs.ts             # tiny --flag value parser shared by CLI entry points
-    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate), historical odds (UNVERIFIED)
+    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate), historical odds (verified live)
     nflverse/                 # NFL schedules, play-by-play EPA/success rate, historical closing lines
     odds/                       # current lines (Odds API) + SBR historical archive import (unfinished scaffold)
     injuries/                    # ESPN unofficial injuries (unverified)
@@ -437,16 +437,15 @@ src/
 
 ## What's next
 
-1. Check the CFBD historical-odds ingestion's real output (UNVERIFIED —
-   see "Odds data" above) and fix field names/sign convention if the
-   guesses were wrong.
-2. Review the corrected NFL backtest and the new CFB backtest together —
+1. Review the corrected NFL backtest and the CFB backtest together —
    specifically whether the CFB run shows the same direction of result as
    NFL independently (a real structural pattern should show up in both; an
-   NFL-only pattern is weaker evidence).
-3. Use `backtest:report`'s threshold and confidence sweeps to tune
+   NFL-only pattern is weaker evidence). Open question: CFB's avg CLV
+   climbs with the deviation threshold while ATS cover rate stays flat —
+   not yet explained.
+2. Use `backtest:report`'s threshold and confidence sweeps to tune
    `src/ratings/config.ts`'s currently-guessed constants (pointsPerEpa
    especially — unanchored predictions were producing unrealistic -25
    point NFL spreads in early testing).
-4. **Live picks (Phase 4) do not get built until this is done and reviewed
+3. **Live picks (Phase 4) do not get built until this is done and reviewed
    together.**
