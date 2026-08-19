@@ -55,13 +55,13 @@ export function computeSeasonRatings(
     const actualMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
     const error = actualMargin - predictedMargin;
 
-    const homeSosMultiplier = Math.max(
-      params.minSosMultiplier,
-      1 + params.sosWeight * (away.rating / params.ratingScaleRef),
+    const homeSosMultiplier = Math.min(
+      params.maxSosMultiplier,
+      Math.max(params.minSosMultiplier, 1 + params.sosWeight * (away.rating / params.ratingScaleRef)),
     );
-    const awaySosMultiplier = Math.max(
-      params.minSosMultiplier,
-      1 + params.sosWeight * (home.rating / params.ratingScaleRef),
+    const awaySosMultiplier = Math.min(
+      params.maxSosMultiplier,
+      Math.max(params.minSosMultiplier, 1 + params.sosWeight * (home.rating / params.ratingScaleRef)),
     );
 
     state.set(game.homeTeamId, {

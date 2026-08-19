@@ -21,6 +21,16 @@ export interface RatingParams {
   ratingScaleRef: number;
   /** Floor on the SOS multiplier so a blowout over a very weak opponent can't flip the sign of a rating update. */
   minSosMultiplier: number;
+  /**
+   * Ceiling on the SOS multiplier. Without this, a team's rating update is
+   * amplified without bound by however strong its opponent's rating already
+   * is — and that amplified rating then amplifies the next team's update
+   * when they play it, chaining across the schedule graph as the season
+   * progresses. Observed in practice: uncapped, this produced team ratings
+   * in the millions (and eventually 1e26) by CFB week 9 of the 2024
+   * backtest. Symmetric with minSosMultiplier's distance from 1.
+   */
+  maxSosMultiplier: number;
   /** How much of a team's final rating carries into next season (the rest regresses to league-average 0). */
   seasonCarryover: number;
   /** Points of predicted-margin uncertainty at zero games played; shrinks as sqrt(games played) grows. */
@@ -36,6 +46,7 @@ const NFL_PARAMS: RatingParams = {
   sosWeight: 0.15,
   ratingScaleRef: 10,
   minSosMultiplier: 0.2,
+  maxSosMultiplier: 1.8,
   seasonCarryover: 0.6,
   baseErrorPoints: 8,
   marketShrinkageK: 8,
