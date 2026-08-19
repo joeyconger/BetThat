@@ -593,3 +593,89 @@ export async function insertBacktestResult(input: InsertBacktestResultInput): Pr
     ],
   );
 }
+
+export interface BacktestRunSummary {
+  id: number;
+  name: string;
+  method: string;
+  sport: string | null;
+  seasonStart: number;
+  seasonEnd: number;
+  createdAt: Date;
+}
+
+export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
+  const result = await pool.query<{
+    id: number;
+    name: string;
+    method: string;
+    params: { sport?: string } | null;
+    season_start: number;
+    season_end: number;
+    created_at: Date;
+  }>(`SELECT id, name, method, params, season_start, season_end, created_at FROM backtest_runs ORDER BY id DESC`);
+  return result.rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    method: r.method,
+    sport: r.params?.sport ?? null,
+    seasonStart: r.season_start,
+    seasonEnd: r.season_end,
+    createdAt: r.created_at,
+  }));
+}
+
+export interface TeamRatingRow {
+  teamName: string;
+  rating: number;
+  ratingError: number | null;
+}
+
+export async function getTeamRatingsForWeek(sport: Sport, season: number, throughWeek: number): Promise<TeamRatingRow[]> {
+  const result = await pool.query<{ name: string; rating: number; rating_error: number | null }>(
+    `SELECT t.name, tr.rating, tr.rating_error
+     FROM team_ratings tr JOIN teams t ON t.id = tr.team_id
+     WHERE tr.sport = $1 AND tr.season = $2 AND tr.through_week = $3 AND tr.method = 'elo'
+     ORDER BY tr.rating DESC`,
+    [sport, season, throughWeek],
+  );
+  return result.rows.map((r) => ({ teamName: r.name, rating: r.rating, ratingError: r.rating_error }));
+}
+
+export interface PredictionRow {
+  gameId: number;
+  homeTeam: string;
+  awayTeam: string;
+  modelSpreadHome: number;
+  marketSpreadHome: number | null;
+  confidence: number | null;
+}
+
+export async function getPredictionsForWeek(sport: Sport, season: number, week: number): Promise<PredictionRow[]> {
+  const result = await pool.query<{
+    game_id: number;
+    home: string;
+    away: string;
+    model_spread_home: number;
+    market_spread_home: number | null;
+    confidence: number | null;
+  }>(
+    `SELECT DISTINCT ON (g.id) g.id AS game_id, ht.name AS home, at.name AS away,
+            mp.model_spread_home, mp.market_spread_home, mp.confidence
+     FROM model_predictions mp
+     JOIN games g ON g.id = mp.game_id
+     JOIN teams ht ON ht.id = g.home_team_id
+     JOIN teams at ON at.id = g.away_team_id
+     WHERE g.sport = $1 AND g.season = $2 AND g.week = $3 AND mp.method = 'elo'
+     ORDER BY g.id, mp.predicted_at DESC`,
+    [sport, season, week],
+  );
+  return result.rows.map((r) => ({
+    gameId: r.game_id,
+    homeTeam: r.home,
+    awayTeam: r.away,
+    modelSpreadHome: r.model_spread_home,
+    marketSpreadHome: r.market_spread_home,
+    confidence: r.confidence,
+  }));
+}

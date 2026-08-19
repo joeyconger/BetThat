@@ -12,12 +12,16 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — CFBD (CFB teams/games/PPA stats) | ✅ **Verified live** — 2025 season synced to a real Railway Postgres instance, FBS-only after fixing an early bug that pulled every division |
 | 1. Data layer — nflverse (NFL schedules/EPA stats) | ✅ **Verified live** — 2025 season synced (285 games, 570 team-game rows, exact expected counts) |
 | 1. Data layer — odds (current lines) | ✅ **Verified live** — full 2026 NFL schedule (272/272 games) matched and synced from The Odds API, real sane spread/moneyline values confirmed |
-| 1. Data layer — odds (historical, for backtesting) | ⚠️ Scaffolded only — see "Odds data" below, needs a real SBR file to finish |
+| 1. Data layer — odds (historical, for backtesting) | ✅ **Verified live** — nflverse's games.csv carries closing lines back to 1999 (see "Odds data" below); SBR's opening-line archive is still an unfinished scaffold, only relevant for real CLV rather than the cover-rate metric currently in use |
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
-| 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked, not yet run against real data long enough to judge |
-| 3. Backtest harness | ✅ Built, math sanity-checked — **can't produce real numbers yet, blocked on historical odds data** |
+| 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked |
+| 3. Backtest harness | ✅ **Run for real** against 2023-2025 NFL (855 games) — see "Backtest results" below. A real bug (numeric-string coercion) invalidated the first run; fixed, re-run pending review |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
+
+**Debug dashboard**: `src/server.ts` — backtest reports, team ratings, and raw
+model predictions vs. market, over HTTP (Basic-auth gated). Not the
+Phase 4 picks app; see "Debug/report endpoint" below.
 
 **This repo does not produce live picks.** There is no Phase 4 code yet, and
 there won't be until the Phase 3 backtest shows real CLV signal and we've
@@ -40,19 +44,25 @@ exists, check its own status notes before trusting anything it outputs.
   something worth scheduling; for now the deploy runs migrations, then
   `src/server.ts`.
 
-## Debug/report endpoint (`src/server.ts`)
+## Debug dashboard / report endpoint (`src/server.ts`)
 
 **Not the live-picks app** (still gated — see Phase 4 status above) — a
-minimal, read-only HTTP surface for pulling backtest results and running
-ad hoc verification queries over HTTPS instead of round-tripping through
-deploy logs. Two routes:
+minimal, read-only HTTP surface, Basic-auth gated (`DASHBOARD_USER`/
+`DASHBOARD_PASSWORD`, same shape as this repo's other Railway app), for
+reviewing backtest results without round-tripping through deploy logs:
 
+- `GET /` — list of backtest runs
+- `GET /backtest/:runId` — overall/threshold/season-breakdown report for one run
+- `GET /ratings?sport=&season=&week=` — team power ratings as of a given week
+- `GET /predictions?sport=&season=&week=` — raw model line vs. market line
+  per game that week (diagnostic only — explicitly not styled or filtered
+  as picks)
 - `GET /health` — for Railway's healthcheck
-- `POST /query` (requires `Authorization: Bearer $ADMIN_TOKEN`) — runs a
-  `SELECT`-only query (rejects anything else) and returns `{ rows,
-  rowCount }`. That's the only safety rail; treat `ADMIN_TOKEN` as a real
-  secret, and don't point this at a database you wouldn't want read by
-  whoever holds that token.
+- `POST /query` (separate auth: `Authorization: Bearer $ADMIN_TOKEN`) — runs
+  a `SELECT`-only query (rejects anything else) and returns `{ rows,
+  rowCount }`, for ad hoc verification beyond the fixed pages above. That
+  bearer token is the only safety rail on this one; treat it as a real
+  secret.
 
 ```bash
 curl -X POST https://<your-domain>/query \
@@ -234,13 +244,23 @@ it does for a real future week.
 ## Phase 3: the backtest harness
 
 `src/backtest/run.ts` replays the rating model week by week across a season
-range and scores every completed game against its real opening line,
-closing line, and actual result — **it cannot produce a real number yet**,
-because it skips any game missing opening/closing odds data, and that's
-currently every game (the SBR historical importer isn't finished — see
-"Odds data" above). The harness itself is done and ready; it's waiting on
-data, not code.
+range and scores every completed game against its real line(s) and actual
+result. It's now run for real against 2023-2025 NFL (855 games) — see
+"Backtest results" below for what came out of that and an important
+correction to it.
 
+- **Closing line is required, opening line is optional** — nflverse's
+  historical odds (see "Odds data" above) only has closing lines, so a real
+  opening line is the exception, not the rule, in the data this project has
+  free access to:
+  - Both exist: real CLV (`src/backtest/clv.ts`'s `computeClv`), pick side
+    from deviation off the **opening** line.
+  - Only closing exists (the common case): `clv` is left `null` — there's
+    no bet price to compare against — and pick side instead comes from
+    deviation off the **closing** line. `covered` (did that pick beat the
+    closing number, using the real final score) is the primary
+    signal-quality metric here, and needs no opening line at all.
+  - Neither exists: game is skipped.
 - **Anchoring is opening-line-only, deliberately separate from the live
   path**: `generateBacktestPredictionsForWeek` (in `src/ratings/service.ts`)
   calls `getOpeningLine`, never `getLatestMarketLine` — the function Phase
@@ -249,30 +269,54 @@ data, not code.
   handing the model information it wouldn't have had before kickoff. Kept
   as two separate functions rather than one with a flag, so this can't
   regress by accident.
-- **CLV definition** (`src/backtest/clv.ts`): the model's deviation from
-  the opening line decides which side it "picked" (`edgePoints` = that
-  deviation's size — the quantity the threshold sweep filters on); CLV is
-  then how far the closing line moved in that side's favor from the
-  opening line, signed positive for good. This is deliberately about the
-  *number* moving the model's way, not whether the bet would have won —
-  `covered` is tracked separately for that, from the actual final score
-  against the closing line.
 - **Reporting** (`src/backtest/report.ts`): overall CLV/beat-close-rate/
   cover-rate; the same broken out by a sweep of deviation thresholds
-  (0 to 5 points) so a sane betting threshold can actually be chosen from
-  data instead of guessed; and broken out by sport and week, to find where
-  the model is weak instead of just an aggregate.
+  (0 to 5 points, measured from opening where it exists, closing
+  otherwise) so a sane betting threshold can actually be chosen from data
+  instead of guessed; and broken out by sport and season, to check whether
+  a result is stable year to year rather than driven by one of them.
 
 ```bash
-npm run backtest:run -- --sport nfl --seasonStart 2022 --seasonEnd 2024 --name v1
+npm run backtest:run -- --sport nfl --seasonStart 2023 --seasonEnd 2025 --name v1
 npm run backtest:report -- --runId 1
+# or just open /backtest/1 in the debug dashboard (src/server.ts)
 ```
 
-CLV math was hand-verified with synthetic inputs (model favoring a side
-with the closing line moving that way scores positive CLV; moving away
-scores negative; an exact push reports `covered: null` rather than a wrong
-true/false) — correctness of the formula, not a real result, since there's
-no real odds data yet to run it against.
+## Backtest results — and a real bug in the first run
+
+The first real run (855 NFL games, 2023-2025) reported a **44.7% cover
+rate** against the closing line — meaningfully *below* the ~50% no-edge
+baseline, and stable across all three seasons individually (41-47% each).
+That result was wrong: **`computeCovered` had a numeric-string bug that
+made it return `false` for every single home pick and `true` for every
+single away pick, regardless of the real outcome.**
+
+`pg` (the Postgres client) returns `numeric`/`decimal` columns as JS
+strings, not numbers, to avoid float precision loss — every spread column
+in this schema is `numeric`. `computeCovered` did
+`actualMarginHome + closingSpreadHome`, where `actualMarginHome` is a real
+number (scores are `int`, parsed fine) but `closingSpreadHome` was a
+string. JS's `+` concatenates when either side is a string (`7 + "-3.5"` →
+`"7-3.5"`, not `3.5`), and every downstream comparison against that garbage
+string evaluated to `false`. `-`, `*`, and `/` all coerce strings to
+numbers correctly in JS, which is exactly what let this hide everywhere
+else in the codebase (the Elo rating math and `computeClv` only ever use
+those) — `+` was the one place a DB-sourced value got added to something,
+and it was wrong 100% of the time, silently.
+
+**Fixed** in `src/db/pool.ts` with a global type parser
+(`types.setTypeParser(1700, parseFloat)`) rather than patching the one call
+site — the safer fix, since it means every `numeric` column comes back as a
+real number everywhere, not just wherever someone remembered to cast.
+Verified against a real Postgres instance before and after (confirmed the
+bug reproduces with a real DB-sourced string, confirmed the fix produces a
+correct `computeCovered` result) — not just a read of the code.
+
+**The real 44.7% number is meaningless** — it's mostly just measuring the
+ratio of away-picks to home-picks in this run, not model skill. A corrected
+backtest re-run is queued (see `railway.json`); check `/backtest/` in the
+debug dashboard for the latest run once it's landed, and don't trust any
+number from before this fix.
 
 ## Schema
 
