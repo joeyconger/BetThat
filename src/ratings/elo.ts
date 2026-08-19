@@ -82,12 +82,52 @@ export function carryoverRating(priorRating: number, params: RatingParams): numb
   return priorRating * params.seasonCarryover;
 }
 
+/**
+ * Blends this model's own carried-over rating with the prior season's final
+ * CFBD SP+ rating (see ingest/cfbd/client.ts's getSpRatings doc) to seed a
+ * new season's starting point — an externally-computed, informed number
+ * instead of just regressing our own model's prior guess toward 0. Falls
+ * back to whichever single source is available if only one is, and to 0
+ * (this project's existing default for a team with no history at all) if
+ * neither is.
+ */
+export function computeInitialRating(
+  priorEloRating: number | undefined,
+  priorSpRating: number | undefined,
+  params: RatingParams,
+): number {
+  const carryover = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : undefined;
+  if (priorSpRating === undefined) return carryover ?? 0;
+  if (carryover === undefined) return priorSpRating;
+  return (1 - params.spPriorWeight) * carryover + params.spPriorWeight * priorSpRating;
+}
+
+/** Standard z-score: how many standard deviations `value` is from the mean of `population`. 0 if the population has no spread. */
+export function zScore(value: number, population: number[]): number {
+  const n = population.length;
+  const mean = population.reduce((sum, v) => sum + v, 0) / n;
+  const variance = population.reduce((sum, v) => sum + (v - mean) ** 2, 0) / n;
+  const sd = Math.sqrt(variance);
+  return sd === 0 ? 0 : (value - mean) / sd;
+}
+
 export interface PredictionInput {
   homeRating: number;
   awayRating: number;
   homeGamesPlayed: number;
   awayGamesPlayed: number;
   marketSpreadHome: number | null;
+  /**
+   * z-scores of each team's CFBD Elo rating against that week's full FBS
+   * distribution (see ratings/service.ts) — scale-invariant on purpose,
+   * since CFBD's own Elo scale isn't documented and guessing a conversion
+   * factor to points would be an unverified assumption baked into the
+   * model. Undefined when no CFBD Elo data exists for that team/week (e.g.
+   * NFL, which CFBD doesn't cover, or an early-season week with too few
+   * teams rated yet).
+   */
+  homeEloZ?: number;
+  awayEloZ?: number;
 }
 
 export interface Prediction {
@@ -111,7 +151,8 @@ export interface Prediction {
  * should treat that prediction as lower-confidence / unanchored).
  */
 export function predictSpread(input: PredictionInput, params: RatingParams): Prediction {
-  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage;
+  const eloSignal = params.eloSignalPoints * ((input.homeEloZ ?? 0) - (input.awayEloZ ?? 0));
+  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal;
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;

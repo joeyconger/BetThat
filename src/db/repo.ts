@@ -399,6 +399,61 @@ export async function getPriorSeasonFinalRating(
   return result.rows[0]?.rating;
 }
 
+export interface ExternalRatingInput {
+  teamId: number;
+  season: number;
+  /** null = season-final value (cfbd_sp, which has no week granularity). */
+  week: number | null;
+  source: "cfbd_sp" | "cfbd_elo";
+  rating: number;
+}
+
+/** See db/migrations/0003_external_ratings.sql for why this is two partial-index upserts, not one. */
+export async function upsertExternalRating(input: ExternalRatingInput): Promise<void> {
+  if (input.week === null) {
+    await pool.query(
+      `INSERT INTO external_ratings (team_id, season, week, source, rating)
+       VALUES ($1, $2, NULL, $3, $4)
+       ON CONFLICT (team_id, season, source) WHERE week IS NULL
+       DO UPDATE SET rating = EXCLUDED.rating`,
+      [input.teamId, input.season, input.source, input.rating],
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO external_ratings (team_id, season, week, source, rating)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (team_id, season, week, source) WHERE week IS NOT NULL
+       DO UPDATE SET rating = EXCLUDED.rating`,
+      [input.teamId, input.season, input.week, input.source, input.rating],
+    );
+  }
+}
+
+/** Season Y-1's SP+ used as season Y's rating prior — see client.ts's getSpRatings doc. */
+export async function getPriorSeasonSpRating(teamId: number, priorSeason: number): Promise<number | undefined> {
+  const result = await pool.query<{ rating: number }>(
+    `SELECT rating FROM external_ratings WHERE team_id = $1 AND season = $2 AND source = 'cfbd_sp' AND week IS NULL`,
+    [teamId, priorSeason],
+  );
+  return result.rows[0]?.rating;
+}
+
+/** Every team's CFBD Elo as of a given week — the population a single team's z-score is computed against. */
+export async function getCfbdEloDistributionForWeek(
+  sport: Sport,
+  season: number,
+  week: number,
+): Promise<Map<number, number>> {
+  const result = await pool.query<{ team_id: number; rating: number }>(
+    `SELECT er.team_id, er.rating
+     FROM external_ratings er
+     JOIN teams t ON t.id = er.team_id
+     WHERE t.sport = $1 AND er.season = $2 AND er.week = $3 AND er.source = 'cfbd_elo'`,
+    [sport, season, week],
+  );
+  return new Map(result.rows.map((r) => [r.team_id, r.rating]));
+}
+
 export interface UpsertTeamRatingInput {
   teamId: number;
   sport: Sport;

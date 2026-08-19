@@ -37,6 +37,10 @@ export interface RatingParams {
   baseErrorPoints: number;
   /** "Games worth of trust" the market line gets before the model's own signal outweighs it (see predict.ts). */
   marketShrinkageK: number;
+  /** Weight (0-1) given to the prior season's CFBD SP+ rating vs. this model's own carryover, when seeding a new season's initial rating. CFB-only — SP+ doesn't exist for NFL. */
+  spPriorWeight: number;
+  /** Points of predicted-margin adjustment per unit z-score gap in CFBD's weekly Elo (see ratings/elo.ts's predictSpread). CFB-only — 0 for NFL, which CFBD doesn't cover. */
+  eloSignalPoints: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -50,6 +54,8 @@ const NFL_PARAMS: RatingParams = {
   seasonCarryover: 0.6,
   baseErrorPoints: 8,
   marketShrinkageK: 8,
+  spPriorWeight: 0, // no SP+ for NFL
+  eloSignalPoints: 0, // no CFBD Elo for NFL
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -57,6 +63,8 @@ const CFB_PARAMS: RatingParams = {
   homeFieldAdvantage: 2.5,
   sosWeight: 0.4, // stronger SOS adjustment for CFB than NFL, per spec
   marketShrinkageK: 6, // shallower CFB schedules (12 games) mean less time to prove the model out
+  spPriorWeight: 0.5, // uncalibrated default — equal blend of our own carryover and prior-season SP+
+  eloSignalPoints: 1.5, // uncalibrated default — points per unit z-score gap in CFBD's weekly Elo
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

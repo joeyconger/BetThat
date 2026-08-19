@@ -1,6 +1,8 @@
 import {
   getSeasonGamesForRating,
   getPriorSeasonFinalRating,
+  getPriorSeasonSpRating,
+  getCfbdEloDistributionForWeek,
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
@@ -9,9 +11,12 @@ import {
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
 import { getRatingParams, type RatingParams } from "./config.js";
-import { computeSeasonRatings, carryoverRating, predictSpread, type TeamRatingState } from "./elo.js";
+import { computeSeasonRatings, computeInitialRating, predictSpread, zScore, type TeamRatingState } from "./elo.js";
 
 const METHOD = "elo" as const;
+
+/** Below this many rated teams, a week's CFBD Elo z-score isn't a meaningful population to compare against — skip the signal rather than compute a noisy one. */
+const MIN_ELO_SAMPLE = 20;
 
 /**
  * Computes each team's rating as of the end of `throughWeek` and persists
@@ -37,8 +42,9 @@ export async function computeAndStoreRatings(
   const initialRatings = new Map<number, number>();
   for (const teamId of teamIds) {
     const priorRating = await getPriorSeasonFinalRating(teamId, sport, season - 1, METHOD);
-    if (priorRating !== undefined) {
-      initialRatings.set(teamId, carryoverRating(priorRating, params));
+    const priorSp = sport === "cfb" ? await getPriorSeasonSpRating(teamId, season - 1) : undefined;
+    if (priorRating !== undefined || priorSp !== undefined) {
+      initialRatings.set(teamId, computeInitialRating(priorRating, priorSp, params));
     }
   }
 
@@ -70,12 +76,25 @@ async function predictAndStoreWeek(
   const ratingState = await computeAndStoreRatings(sport, season, week - 1, paramsOverride);
   const games = await getGamesForWeek(sport, season, week);
 
+  // As-of-end-of-prior-week, same invariant as the ratings themselves — never
+  // this week's own CFBD Elo update. CFB only; NFL's map is always empty
+  // since CFBD doesn't cover it, so homeEloZ/awayEloZ stay undefined there.
+  const eloDistribution =
+    sport === "cfb" ? await getCfbdEloDistributionForWeek(sport, season, week - 1) : new Map<number, number>();
+  const eloValues = [...eloDistribution.values()];
+  const hasEloSample = eloValues.length >= MIN_ELO_SAMPLE;
+
   let predicted = 0;
 
   for (const game of games) {
     const home = ratingState.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0 };
     const away = ratingState.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0 };
     const marketSpreadHome = (await getMarketLine(game.id)) ?? null;
+
+    const homeElo = eloDistribution.get(game.homeTeamId);
+    const awayElo = eloDistribution.get(game.awayTeamId);
+    const homeEloZ = hasEloSample && homeElo !== undefined ? zScore(homeElo, eloValues) : undefined;
+    const awayEloZ = hasEloSample && awayElo !== undefined ? zScore(awayElo, eloValues) : undefined;
 
     const prediction = predictSpread(
       {
@@ -84,6 +103,8 @@ async function predictAndStoreWeek(
         homeGamesPlayed: home.gamesPlayed,
         awayGamesPlayed: away.gamesPlayed,
         marketSpreadHome,
+        homeEloZ,
+        awayEloZ,
       },
       params,
     );

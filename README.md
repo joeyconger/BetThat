@@ -15,7 +15,8 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — odds (historical, for backtesting) | ✅ **Verified live** — nflverse's games.csv carries closing lines back to 1999 (NFL, closing only); CFBD's `/lines` carries both opening and closing for CFB, spot-checked against real 2024 outcomes (see "Odds data" below). SBR's opening-line archive is still an unfinished scaffold, only relevant for real CLV rather than the cover-rate metric currently in use |
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
-| 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked |
+| 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked. Fixed a real bug (unbounded SOS multiplier causing rating blowups, see "A real bug" below) |
+| 2. Rating model — external ratings (CFB) | ⚠️ Built (CFBD SP+ as season prior, weekly CFBD Elo as in-season z-score signal), **UNVERIFIED** — see "External ratings" below |
 | 3. Backtest harness | ✅ **Run for real** against 2023-2025 NFL (855 games) — see "Backtest results" below. A real bug (numeric-string coercion) invalidated the first run; fixed, re-run pending review |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
 
@@ -282,6 +283,62 @@ before predicting `week`'s games — a prediction can never see the result of
 the game it's predicting, which matters as much for the Phase 3 backtest as
 it does for a real future week.
 
+### A real bug: unbounded SOS multiplier
+
+The SOS multiplier (`1 + sosWeight * opponentRating/ratingScaleRef`) had a
+floor (`minSosMultiplier`) but no ceiling until this was found and fixed.
+Without one, a team's rating update is amplified by however strong its
+opponent already is, with no bound — and that amplified rating then
+amplifies whoever plays *them* next, cascading through the schedule graph
+as a season progresses. Confirmed in the real 2023-2025 CFB backtest: by
+week 9, several `model_spread_home` values had exploded into the millions
+(one reached ~1e26). Because pick side only depends on the *sign* of the
+model's deviation from market, these degenerate predictions still counted
+as real picks, contaminating both cover rate and CLV numbers. Fixed with a
+`maxSosMultiplier` ceiling (1.8, symmetric with the existing 0.2 floor) —
+verified with a synthetic worst-case (most aggressive sweep params, 13
+weeks of adversarial one-sided blowouts) that ratings now stay bounded
+(~48) instead of exploding. NFL's numbers turned out to be unaffected in
+practice (lower `sosWeight`, shorter/less-connected schedule never pushed
+the old unbounded formula into blowup range) — CFB numbers should be
+treated as more trustworthy after the fix than before it.
+
+### External ratings (CFB only)
+
+Two CFBD rating sources beyond raw EPA, both because a homegrown Elo
+starting from nothing is worse than borrowing an externally-computed,
+informed number where one exists (`src/ingest/cfbd/syncExternalRatings.ts`,
+`src/ratings/elo.ts`'s `computeInitialRating`/`zScore`):
+
+- **SP+ as a season's rating prior**: CFBD's `/ratings/sp` has no `week`
+  param — one value per team per year, not a time series. Real caveat:
+  Connelly's SP+ methodology blends a genuine preseason projection
+  (recruiting, returning production, coaching changes) into the in-season
+  number and phases it out week by week, but this endpoint gives no way to
+  tell which point in that blend a given year's value reflects (most likely
+  the final, fully-informed number). Only safe use: season Y-1's value as
+  season Y's rating prior (`spPriorWeight`, blended with the model's own
+  carryover) — no lookahead risk either way, since Y-1 is complete before Y
+  starts. **UNVERIFIED** — check ingested values land in a plausible range
+  (roughly -30 to +30) before trusting.
+- **CFBD's own weekly Elo as an in-season signal**: unlike SP+, `/ratings/elo`
+  does take a `week` param — the one CFBD rating source that can give an
+  as-of-a-specific-week snapshot. Its scale isn't documented, so rather than
+  guess a conversion factor to points, each team's weekly Elo is converted
+  to a z-score against that week's full FBS distribution (scale-invariant),
+  then `eloSignalPoints` turns that z-score gap into a points adjustment on
+  the model's own predicted margin. Skipped entirely when fewer than 20
+  teams have Elo data for a given week (too small a population for a
+  meaningful z-score) — early/preseason weeks may not have data at all.
+  **UNVERIFIED** — exact max week and preseason-week availability haven't
+  been confirmed against a real response; `syncCfbdEloRatings` loops a
+  generous week range (0-20) and treats empty results as "not available,"
+  not an error.
+
+Both `spPriorWeight` (0.5) and `eloSignalPoints` (1.5) are uncalibrated
+defaults, same as everything else in `config.ts` — 0 for NFL, since neither
+source covers it.
+
 ## Phase 3: the backtest harness
 
 `src/backtest/run.ts` replays the rating model week by week across a season
@@ -416,7 +473,7 @@ src/
     repo.ts                    # typed upsert/query helpers shared by every ingest module
   ingest/
     cliArgs.ts             # tiny --flag value parser shared by CLI entry points
-    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate), historical odds (verified live)
+    cfbd/                    # CFB teams/games/advanced-stats (PPA, success rate), historical odds (verified live), external ratings (SP+/Elo, unverified)
     nflverse/                 # NFL schedules, play-by-play EPA/success rate, historical closing lines
     odds/                       # current lines (Odds API) + SBR historical archive import (unfinished scaffold)
     injuries/                    # ESPN unofficial injuries (unverified)

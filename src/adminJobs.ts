@@ -3,6 +3,7 @@ import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
+import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { runSweep } from "./backtest/sweep.js";
 import type { Sport } from "./db/repo.js";
 
@@ -117,9 +118,37 @@ export function startCfbSweepJob(): Promise<JobStatus> {
   return startSweepJob("cfb", 2023, 2025);
 }
 
+/**
+ * Ingests CFBD's SP+ (season-final, used as next season's rating prior) and
+ * weekly Elo (in-season z-score signal), then re-runs the CFB backtest with
+ * that data — see ratings/elo.ts's computeInitialRating/predictSpread and
+ * README "External ratings" for what these feed into. Separate from
+ * cfb-pipeline since teams/games/stats/odds are already ingested; this only
+ * needs to add the two new external_ratings sources on top.
+ */
+export function startCfbExternalRatingsJob(): Promise<JobStatus> {
+  return runJob("cfb-external-ratings", async (job) => {
+    for (const year of [2022, 2023, 2024]) {
+      log(job, `${year}: SP+ ratings`);
+      const sp = await syncCfbdSpRatings(year);
+      log(job, `${year}: SP+ synced ${sp.synced}, skipped ${sp.skipped}`);
+    }
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: weekly Elo ratings`);
+      const elo = await syncCfbdEloRatings(year);
+      log(job, `${year}: Elo synced ${elo.synced}, skipped ${elo.skipped}`);
+    }
+
+    log(job, "running CFB backtest 2023-2025 with external ratings");
+    const summary = await runBacktest({ name: "cfb-v2-external-ratings", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
+    log(job, `scored ${summary.scored}, skipped ${summary.skippedNoOdds}, run id ${summary.backtestRunId}`);
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
   "nfl-sweep": startNflSweepJob,
   "cfb-sweep": startCfbSweepJob,
+  "cfb-external-ratings": startCfbExternalRatingsJob,
 };
