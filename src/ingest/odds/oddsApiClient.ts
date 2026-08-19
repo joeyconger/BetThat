@@ -45,7 +45,7 @@ export interface OddsApiEvent {
  */
 export async function getCurrentOdds(
   sportKey: string,
-  markets: Array<"h2h" | "spreads" | "totals"> = ["spreads", "h2h"],
+  markets: Array<"h2h" | "spreads" | "totals"> = ["spreads", "h2h", "totals"],
 ): Promise<OddsApiEvent[]> {
   const apiKey = requireOddsApiKey();
   const url = new URL(`${BASE_URL}/sports/${sportKey}/odds`);
