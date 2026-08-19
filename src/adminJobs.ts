@@ -3,6 +3,8 @@ import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
+import { runSweep } from "./backtest/sweep.js";
+import type { Sport } from "./db/repo.js";
 
 /**
  * Background job runner for anything too slow to run inside Railway's
@@ -94,7 +96,30 @@ export function startCfbPipelineJob(): Promise<JobStatus> {
   });
 }
 
+/** 3x3 grid (pointsPerEpa x baseK), 9 full season replays — coarse calibration pass. */
+function startSweepJob(sport: Sport, seasonStart: number, seasonEnd: number): Promise<JobStatus> {
+  return runJob(`${sport}-sweep`, async (job) => {
+    log(job, `sweeping ${sport} ${seasonStart}-${seasonEnd}`);
+    const results = await runSweep(sport, seasonStart, seasonEnd);
+    for (const r of results) {
+      const cover = r.coverRate === null ? "n/a" : `${(r.coverRate * 100).toFixed(1)}%`;
+      const clv = r.avgClv === null ? "n/a" : r.avgClv.toFixed(2);
+      log(job, `pointsPerEpa=${r.pointsPerEpa} baseK=${r.baseK}: ${r.games} games, cover=${cover}, avgClv=${clv} (run ${r.runId})`);
+    }
+  });
+}
+
+export function startNflSweepJob(): Promise<JobStatus> {
+  return startSweepJob("nfl", 2023, 2025);
+}
+
+export function startCfbSweepJob(): Promise<JobStatus> {
+  return startSweepJob("cfb", 2023, 2025);
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
+  "nfl-sweep": startNflSweepJob,
+  "cfb-sweep": startCfbSweepJob,
 };
