@@ -16,7 +16,7 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
 | 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked, not yet run against real data long enough to judge |
-| 3. Backtest harness | 🚫 Not started |
+| 3. Backtest harness | ✅ Built, math sanity-checked — **can't produce real numbers yet, blocked on historical odds data** |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
 
 **This repo does not produce live picks.** There is no Phase 4 code yet, and
@@ -211,6 +211,49 @@ before predicting `week`'s games — a prediction can never see the result of
 the game it's predicting, which matters as much for the Phase 3 backtest as
 it does for a real future week.
 
+## Phase 3: the backtest harness
+
+`src/backtest/run.ts` replays the rating model week by week across a season
+range and scores every completed game against its real opening line,
+closing line, and actual result — **it cannot produce a real number yet**,
+because it skips any game missing opening/closing odds data, and that's
+currently every game (the SBR historical importer isn't finished — see
+"Odds data" above). The harness itself is done and ready; it's waiting on
+data, not code.
+
+- **Anchoring is opening-line-only, deliberately separate from the live
+  path**: `generateBacktestPredictionsForWeek` (in `src/ratings/service.ts`)
+  calls `getOpeningLine`, never `getLatestMarketLine` — the function Phase
+  4's live polling uses. Reusing "latest line" for a backtest would
+  frequently return the closing line for a historical game, silently
+  handing the model information it wouldn't have had before kickoff. Kept
+  as two separate functions rather than one with a flag, so this can't
+  regress by accident.
+- **CLV definition** (`src/backtest/clv.ts`): the model's deviation from
+  the opening line decides which side it "picked" (`edgePoints` = that
+  deviation's size — the quantity the threshold sweep filters on); CLV is
+  then how far the closing line moved in that side's favor from the
+  opening line, signed positive for good. This is deliberately about the
+  *number* moving the model's way, not whether the bet would have won —
+  `covered` is tracked separately for that, from the actual final score
+  against the closing line.
+- **Reporting** (`src/backtest/report.ts`): overall CLV/beat-close-rate/
+  cover-rate; the same broken out by a sweep of deviation thresholds
+  (0 to 5 points) so a sane betting threshold can actually be chosen from
+  data instead of guessed; and broken out by sport and week, to find where
+  the model is weak instead of just an aggregate.
+
+```bash
+npm run backtest:run -- --sport nfl --seasonStart 2022 --seasonEnd 2024 --name v1
+npm run backtest:report -- --runId 1
+```
+
+CLV math was hand-verified with synthetic inputs (model favoring a side
+with the closing line moving that way scores positive CLV; moving away
+scores negative; an exact push reports `covered: null` rather than a wrong
+true/false) — correctness of the formula, not a real result, since there's
+no real odds data yet to run it against.
+
 ## Schema
 
 Everything joins through `games`:
@@ -253,19 +296,23 @@ src/
   ratings/                # Phase 2 — EPA-driven Elo, market-anchored
     config.ts              # tunable params per sport, flagged as uncalibrated defaults
     elo.ts                   # pure rating math (no DB) — computeSeasonRatings, predictSpread
-    service.ts                 # DB orchestration: computeAndStoreRatings, generatePredictionsForWeek
-  backtest/                # Phase 3 — not started
+    service.ts                 # DB orchestration: computeAndStoreRatings, generatePredictionsForWeek(+Backtest)
+  backtest/                # Phase 3 — built, blocked on historical odds data
+    clv.ts                   # pure math (no DB) — computeClv, computeCovered
+    run.ts                     # replays predictions across a season range, scores against real lines
+    report.ts                    # overall / by-threshold / by-sport-week aggregate CLV reporting
 ```
 
 ## What's next
 
 1. Finish `src/ingest/odds/sbrImport.ts` against a real downloaded
    SportsbookReviewsOnline file, so historical opening/closing lines exist
-   to backtest against.
-2. Phase 3: the backtest harness, run against 2-3 completed seasons —
-   replay `generatePredictionsForWeek` week by week through history, log
-   model line vs. opening vs. closing vs. actual result, and report CLV
-   overall / by deviation threshold / by sport-week. This is also where
-   `src/ratings/config.ts`'s constants actually get tuned, instead of left
-   as reasonable-guess defaults. **Live picks (Phase 4) do not get built
-   until this is done and reviewed.**
+   to backtest against — this is the only thing blocking Phase 3 from
+   producing a real result; everything else is built.
+2. Run `backtest:run` for 2-3 completed seasons once that data exists, and
+   use `backtest:report`'s threshold sweep to tune `src/ratings/config.ts`'s
+   currently-guessed constants (pointsPerEpa especially — the one real
+   finding so far, from the smoke test, is that unanchored predictions run
+   too hot: -25 point NFL spreads with no market line to blend toward).
+   **Live picks (Phase 4) do not get built until this is done and
+   reviewed together.**

@@ -24,6 +24,8 @@
     "ratings:compute": "tsx src/ratings/index.ts compute",
     "ratings:predict": "tsx src/ratings/index.ts predict",
     "smoke:ratings": "tsx src/smokeRatings.ts",
+    "backtest:run": "tsx src/backtest/index.ts run",
+    "backtest:report": "tsx src/backtest/index.ts report",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },

@@ -4,6 +4,7 @@ import {
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
+  getOpeningLine,
   insertModelPrediction,
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
@@ -52,15 +53,11 @@ export async function computeAndStoreRatings(
   return state;
 }
 
-/**
- * Generates model_predictions for every game in `week`, using ratings as of
- * the END of the prior week — never that week's own results, or the
- * prediction would be leaking the outcome it's supposed to be predicting.
- */
-export async function generatePredictionsForWeek(
+async function predictAndStoreWeek(
   sport: Sport,
   season: number,
   week: number,
+  getMarketLine: (gameId: number) => Promise<number | undefined>,
 ): Promise<{ predicted: number }> {
   const params = getRatingParams(sport);
   const ratingState = await computeAndStoreRatings(sport, season, week - 1);
@@ -71,7 +68,7 @@ export async function generatePredictionsForWeek(
   for (const game of games) {
     const home = ratingState.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0 };
     const away = ratingState.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0 };
-    const marketSpreadHome = (await getLatestMarketLine(game.id)) ?? null;
+    const marketSpreadHome = (await getMarketLine(game.id)) ?? null;
 
     const prediction = predictSpread(
       {
@@ -96,4 +93,29 @@ export async function generatePredictionsForWeek(
   }
 
   return { predicted };
+}
+
+/**
+ * Generates model_predictions for every game in `week`, using ratings as of
+ * the END of the prior week — never that week's own results, or the
+ * prediction would be leaking the outcome it's supposed to be predicting.
+ * Anchors to the most recently polled market line — correct for live use
+ * (Phase 4), where "latest" can never be later than right now.
+ */
+export function generatePredictionsForWeek(sport: Sport, season: number, week: number): Promise<{ predicted: number }> {
+  return predictAndStoreWeek(sport, season, week, getLatestMarketLine);
+}
+
+/**
+ * Same as generatePredictionsForWeek, but anchors to the opening line
+ * specifically — see getOpeningLine's doc comment for why this must be a
+ * separate path from the live version rather than reusing "latest line."
+ * This is what Phase 3's backtest harness calls.
+ */
+export function generateBacktestPredictionsForWeek(
+  sport: Sport,
+  season: number,
+  week: number,
+): Promise<{ predicted: number }> {
+  return predictAndStoreWeek(sport, season, week, getOpeningLine);
 }

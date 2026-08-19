@@ -459,3 +459,135 @@ export async function insertModelPrediction(input: UpsertModelPredictionInput): 
     [input.gameId, input.method, input.modelSpreadHome, input.modelTotal, input.confidence, input.marketSpreadHome],
   );
 }
+
+/**
+ * The opening line only — deliberately separate from getLatestMarketLine
+ * (which is fine for live polling, where "latest" can never be later than
+ * now). A backtest must anchor to the opening line specifically: taking
+ * the single latest snapshot for a historical game would frequently return
+ * the closing line, silently handing the model information it wouldn't
+ * have had at prediction time.
+ */
+export async function getOpeningLine(gameId: number): Promise<number | undefined> {
+  const result = await pool.query<{ spread_home: number }>(
+    `SELECT spread_home FROM odds_snapshots
+     WHERE game_id = $1 AND snapshot_type = 'opening' AND spread_home IS NOT NULL
+     ORDER BY captured_at ASC LIMIT 1`,
+    [gameId],
+  );
+  return result.rows[0]?.spread_home;
+}
+
+export async function getClosingLine(gameId: number): Promise<number | undefined> {
+  const result = await pool.query<{ spread_home: number }>(
+    `SELECT spread_home FROM odds_snapshots
+     WHERE game_id = $1 AND snapshot_type = 'closing' AND spread_home IS NOT NULL
+     ORDER BY captured_at DESC LIMIT 1`,
+    [gameId],
+  );
+  return result.rows[0]?.spread_home;
+}
+
+export async function getDistinctWeeks(sport: Sport, season: number): Promise<number[]> {
+  const result = await pool.query<{ week: number }>(
+    `SELECT DISTINCT week FROM games WHERE sport = $1 AND season = $2 AND status = 'final' ORDER BY week ASC`,
+    [sport, season],
+  );
+  return result.rows.map((r) => r.week);
+}
+
+export interface FinalGame {
+  id: number;
+  homeTeamId: number;
+  awayTeamId: number;
+  homeScore: number;
+  awayScore: number;
+}
+
+export async function getFinalGamesForWeek(sport: Sport, season: number, week: number): Promise<FinalGame[]> {
+  const result = await pool.query<{
+    id: number;
+    home_team_id: number;
+    away_team_id: number;
+    home_score: number;
+    away_score: number;
+  }>(
+    `SELECT id, home_team_id, away_team_id, home_score, away_score
+     FROM games
+     WHERE sport = $1 AND season = $2 AND week = $3 AND status = 'final'
+       AND home_score IS NOT NULL AND away_score IS NOT NULL
+     ORDER BY id ASC`,
+    [sport, season, week],
+  );
+  return result.rows.map((r) => ({
+    id: r.id,
+    homeTeamId: r.home_team_id,
+    awayTeamId: r.away_team_id,
+    homeScore: r.home_score,
+    awayScore: r.away_score,
+  }));
+}
+
+export async function getLatestPrediction(gameId: number, method: string): Promise<number | undefined> {
+  const result = await pool.query<{ model_spread_home: number }>(
+    `SELECT model_spread_home FROM model_predictions
+     WHERE game_id = $1 AND method = $2
+     ORDER BY predicted_at DESC LIMIT 1`,
+    [gameId, method],
+  );
+  return result.rows[0]?.model_spread_home;
+}
+
+export interface InsertBacktestRunInput {
+  name: string;
+  method: string;
+  seasonStart: number;
+  seasonEnd: number;
+  params: Record<string, unknown>;
+}
+
+export async function insertBacktestRun(input: InsertBacktestRunInput): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO backtest_runs (name, method, season_start, season_end, params)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [input.name, input.method, input.seasonStart, input.seasonEnd, JSON.stringify(input.params)],
+  );
+  return result.rows[0]!.id;
+}
+
+export interface InsertBacktestResultInput {
+  backtestRunId: number;
+  gameId: number;
+  modelSpreadHome: number;
+  openingSpreadHome: number;
+  closingSpreadHome: number;
+  actualMarginHome: number;
+  clv: number;
+  covered: boolean | null;
+  beatClose: boolean;
+}
+
+export async function insertBacktestResult(input: InsertBacktestResultInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO backtest_results (
+       backtest_run_id, game_id, model_spread_home, opening_spread_home, closing_spread_home,
+       actual_margin_home, clv, covered, beat_close
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (backtest_run_id, game_id)
+     DO UPDATE SET model_spread_home = EXCLUDED.model_spread_home, opening_spread_home = EXCLUDED.opening_spread_home,
+       closing_spread_home = EXCLUDED.closing_spread_home, actual_margin_home = EXCLUDED.actual_margin_home,
+       clv = EXCLUDED.clv, covered = EXCLUDED.covered, beat_close = EXCLUDED.beat_close`,
+    [
+      input.backtestRunId,
+      input.gameId,
+      input.modelSpreadHome,
+      input.openingSpreadHome,
+      input.closingSpreadHome,
+      input.actualMarginHome,
+      input.clv,
+      input.covered,
+      input.beatClose,
+    ],
+  );
+}

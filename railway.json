@@ -5,7 +5,7 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "npm run migrate",
+    "startCommand": "npm run migrate && npm run backtest:run -- --sport nfl --seasonStart 2025 --seasonEnd 2025 --name smoke",
     "restartPolicyType": "NEVER"
   }
 }
