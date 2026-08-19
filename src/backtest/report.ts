@@ -176,6 +176,156 @@ export async function getConfidenceReport(
   return results;
 }
 
+/** Which side the model picked — deviation from opening line where one exists, closing otherwise. Reused across every segment report below. */
+const PICK_SIDE_EXPR = `CASE WHEN (coalesce(br.opening_spread_home, br.closing_spread_home) - br.model_spread_home) >= 0 THEN 'home' ELSE 'away' END`;
+
+export interface ConferenceStats extends AggregateStats {
+  conference: string;
+}
+
+/**
+ * Cover rate/CLV grouped by the CONFERENCE OF THE PICKED TEAM (not the
+ * game's own conference matchup — see getInOutConferenceReport for that).
+ * Answers "does the model do better picking teams from some conferences
+ * than others" — real risk of overfitting to noise here given how many
+ * conferences there are relative to games per conference, so treat any
+ * single standout conference as a hypothesis to walk-forward test, not a
+ * proven edge (see README "Backtest results" for why that caveat matters).
+ */
+export async function getConferenceReport(backtestRunId: number): Promise<ConferenceStats[]> {
+  const rows = await query<AggregateRow & { picked_conference: string | null }>(
+    `SELECT
+       CASE WHEN ${PICK_SIDE_EXPR} = 'home' THEN ht.conference ELSE at.conference END AS picked_conference,
+       ${AGGREGATE_SELECT}
+     FROM backtest_results br
+     JOIN games g ON g.id = br.game_id
+     JOIN teams ht ON ht.id = g.home_team_id
+     JOIN teams at ON at.id = g.away_team_id
+     WHERE br.backtest_run_id = $1
+     GROUP BY picked_conference
+     ORDER BY cover_rate DESC NULLS LAST`,
+    [backtestRunId],
+  );
+  return rows.map((row) => ({ conference: row.picked_conference ?? "(unknown)", ...toAggregateStats(row) }));
+}
+
+export interface InOutConferenceStats extends AggregateStats {
+  matchupType: "in-conference" | "out-of-conference";
+}
+
+/** In-conference (rivalry-heavy, more familiar matchups) vs. cross-conference games — a different question than which conference the pick came from. */
+export async function getInOutConferenceReport(backtestRunId: number): Promise<InOutConferenceStats[]> {
+  const rows = await query<AggregateRow & { matchup_type: string }>(
+    `SELECT
+       CASE WHEN ht.conference = at.conference THEN 'in-conference' ELSE 'out-of-conference' END AS matchup_type,
+       ${AGGREGATE_SELECT}
+     FROM backtest_results br
+     JOIN games g ON g.id = br.game_id
+     JOIN teams ht ON ht.id = g.home_team_id
+     JOIN teams at ON at.id = g.away_team_id
+     WHERE br.backtest_run_id = $1 AND ht.conference IS NOT NULL AND at.conference IS NOT NULL
+     GROUP BY matchup_type`,
+    [backtestRunId],
+  );
+  return rows.map((row) => ({
+    matchupType: row.matchup_type as InOutConferenceStats["matchupType"],
+    ...toAggregateStats(row),
+  }));
+}
+
+export interface WeekBucketStats extends AggregateStats {
+  weekBucket: string;
+}
+
+const WEEK_BUCKETS: Array<{ label: string; min: number; max: number }> = [
+  { label: "weeks 1-2 (early, thin data)", min: 1, max: 2 },
+  { label: "weeks 3-4", min: 3, max: 4 },
+  { label: "weeks 5-8 (mid-season)", min: 5, max: 8 },
+  { label: "weeks 9-13 (late regular)", min: 9, max: 13 },
+  { label: "week 14+ (bowls/postseason)", min: 14, max: 99 },
+];
+
+/**
+ * Buckets by week number — the literal test of "early season, before the
+ * model has seen enough games, should be worse." Complements
+ * getConfidenceReport (which uses the model's own error estimate as a
+ * data-availability proxy) with the more direct, literal signal.
+ */
+export async function getWeekBucketReport(backtestRunId: number): Promise<WeekBucketStats[]> {
+  const results: WeekBucketStats[] = [];
+  for (const bucket of WEEK_BUCKETS) {
+    const rows = await query<AggregateRow>(
+      `SELECT ${AGGREGATE_SELECT}
+       FROM backtest_results br JOIN games g ON g.id = br.game_id
+       WHERE br.backtest_run_id = $1 AND g.week >= $2 AND g.week <= $3`,
+      [backtestRunId, bucket.min, bucket.max],
+    );
+    results.push({ weekBucket: bucket.label, ...toAggregateStats(rows[0]!) });
+  }
+  return results;
+}
+
+export interface HomeRoadSizeStats extends AggregateStats {
+  pickSide: "home" | "away";
+  sizeBucket: string;
+}
+
+const SPREAD_SIZE_BUCKETS: Array<{ label: string; min: number; max: number }> = [
+  { label: "0-3 (close)", min: 0, max: 3 },
+  { label: "3-7", min: 3, max: 7 },
+  { label: "7-14", min: 7, max: 14 },
+  { label: "14+ (blowout favorite)", min: 14, max: 999 },
+];
+
+/**
+ * Home/road pick side crossed with the SIZE OF THE ACTUAL CLOSING SPREAD
+ * (how lopsided the game itself is favored, not how much the model
+ * disagrees with the market — see getHomeRoadByDeviationReport for that
+ * question instead). A classic favorite/underdog-times-home/road angle.
+ */
+export async function getHomeRoadBySpreadSizeReport(backtestRunId: number): Promise<HomeRoadSizeStats[]> {
+  const results: HomeRoadSizeStats[] = [];
+  for (const pickSide of ["home", "away"] as const) {
+    for (const bucket of SPREAD_SIZE_BUCKETS) {
+      const rows = await query<AggregateRow>(
+        `SELECT ${AGGREGATE_SELECT}
+         FROM backtest_results br
+         WHERE br.backtest_run_id = $1
+           AND ${PICK_SIDE_EXPR} = $2
+           AND abs(br.closing_spread_home) >= $3 AND abs(br.closing_spread_home) < $4`,
+        [backtestRunId, pickSide, bucket.min, bucket.max],
+      );
+      results.push({ pickSide, sizeBucket: bucket.label, ...toAggregateStats(rows[0]!) });
+    }
+  }
+  return results;
+}
+
+/**
+ * Home/road pick side crossed with the size of the MODEL'S DEVIATION from
+ * market (reuses getThresholdReport's deviation definition) — a different
+ * question from spread size above: does the model's edge (when it
+ * disagrees a lot) hold up the same for home picks as away picks.
+ */
+export async function getHomeRoadByDeviationReport(backtestRunId: number): Promise<HomeRoadSizeStats[]> {
+  const results: HomeRoadSizeStats[] = [];
+  for (const pickSide of ["home", "away"] as const) {
+    for (const bucket of SPREAD_SIZE_BUCKETS) {
+      const rows = await query<AggregateRow>(
+        `SELECT ${AGGREGATE_SELECT}
+         FROM backtest_results br
+         WHERE br.backtest_run_id = $1
+           AND ${PICK_SIDE_EXPR} = $2
+           AND abs(br.model_spread_home - coalesce(br.opening_spread_home, br.closing_spread_home)) >= $3
+           AND abs(br.model_spread_home - coalesce(br.opening_spread_home, br.closing_spread_home)) < $4`,
+        [backtestRunId, pickSide, bucket.min, bucket.max],
+      );
+      results.push({ pickSide, sizeBucket: bucket.label, ...toAggregateStats(rows[0]!) });
+    }
+  }
+  return results;
+}
+
 export interface SportWeekStats extends AggregateStats {
   sport: string;
   season: number;

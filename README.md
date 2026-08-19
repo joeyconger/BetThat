@@ -17,7 +17,7 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
 | 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked. Fixed a real bug (unbounded SOS multiplier causing rating blowups, see "A real bug" below) |
 | 2. Rating model — external ratings (CFB) | ⚠️ Built and calibrated via sweep (spPriorWeight=0, eloSignalPoints=1.5 — SP+ prior hurt, weekly Elo signal helped), ingested data still **UNVERIFIED** against a real response — see "External ratings" below |
-| 3. Backtest harness | ✅ **Run for real** against 2023-2025, both sports. Two real bugs found and fixed (numeric-string coercion; unbounded SOS multiplier) — see "Backtest results" below. Best result so far: 52.78% cover rate vs. opening line (CFB), not yet walk-forward validated |
+| 3. Backtest harness | ✅ **Run for real** against 2023-2025, both sports, plus walk-forward validation and segment breakdowns. Three real bugs found and fixed (numeric-string coercion; unbounded SOS multiplier; computeInitialRating ignoring its own weight). **No cover-rate edge survived out-of-sample testing** — see "Backtest results" below. Avg CLV stayed positive in the true holdout; segment breakdowns are the current search for a narrower edge |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
 
 **Debug dashboard**: `src/server.ts` — backtest reports, team ratings, and raw
@@ -497,17 +497,48 @@ Fixed by blending against league-average (0) instead of skipping straight
 to the raw SP+ value when carryover is missing. Every external-ratings
 sweep result from before this fix should be disregarded.
 
-### Walk-forward validation (`cfb-walkforward` job)
+### Walk-forward validation (`cfb-walkforward` job) — result: no edge survives
 
 The 52.78% opening-line result above was found by sweeping
 `spPriorWeight`/`eloSignalPoints` against 2023-2025 and then *evaluating*
 the winning combo against that same 2023-2025 data — a real risk of fitting
 noise rather than finding a real edge. `src/adminJobs.ts`'s
-`startCfbWalkforwardJob` addresses this properly: calibrates using only
-2023-2024, then tests that winning combo purely on 2025 — data the
-calibration never saw. Reports cover rate vs. both closing and opening
-line for the 2025 holdout. Not yet run — this is the next real
-validation step before trusting the calibrated params at all.
+`startCfbWalkforwardJob` tests this properly: calibrates using only
+2023-2024 (best combo found: `spPriorWeight=0, eloSignalPoints=1.5`, 51.2%
+train cover), then tests that exact combo purely on 2025 — data the
+calibration never saw.
+
+**Run**: cover vs. close **47.1%** (worse than a coin flip), cover vs. open
+**50.0%** (dead coin flip, not 52.78%), avg CLV **+0.76** (held up,
+even higher than before). **Conclusion: no cover-rate edge survives honest
+out-of-sample testing, on either metric.** The earlier promising numbers
+were real in-sample but did not generalize — exactly the failure mode
+walk-forward validation exists to catch. The one thing that *has* held up
+across every test tonight, in-sample and out, is a small positive avg
+CLV — real, but not by itself something to bet on (see "Three metrics"
+above for why CLV alone isn't the same as a win-rate edge).
+
+### Segment breakdowns (`cfb-segments` job)
+
+Since no blanket edge survived, the next question is whether there's a
+*narrower* one — a specific conference, matchup type, week range, or
+spread size where the model does better than its ~48-50% average.
+`src/adminJobs.ts`'s `startCfbSegmentsJob` runs a fresh CFB backtest with
+today's validated defaults and breaks it down by: conference of the picked
+team (`getConferenceReport`), in- vs. out-of-conference games
+(`getInOutConferenceReport`), week-number buckets — the literal test of
+"early season, thin data, should be worse" (`getWeekBucketReport`), and
+home/road picks crossed with both the game's own spread size and the
+model's deviation size (`getHomeRoadBySpreadSizeReport`/
+`getHomeRoadByDeviationReport`). All five verified against real local
+Postgres with a hand-checked synthetic fixture before trusting them.
+
+**Same caveat as everything above, stated up front this time**: this runs
+on the full 2023-2025 sample, not a train/holdout split — searching many
+segments is exactly the kind of thing that can produce a standout-looking
+cell by chance (the same failure mode the walk-forward job just caught).
+Treat any single promising segment here as a hypothesis worth a dedicated
+holdout test, not a confirmed edge, before acting on it.
 
 ## Schema
 
@@ -565,16 +596,23 @@ src/
 
 ## What's next
 
-1. **Run `cfb-walkforward`** (calibrate on 2023-2024, test on 2025 alone) —
-   the immediate next step. The 52.78% opening-line result was found by
-   calibrating and evaluating on the same 2023-2025 data; this checks
-   whether it survives being tested on data the calibration never saw.
-2. If it holds up, look at whether the CFB pattern shows up independently
-   in NFL too (weaker without a real opening line to test against, but
-   still worth checking cover-rate-vs-deviation-threshold trends).
-3. **Live picks (Phase 4) do not get built until this is done and reviewed
-   together.**
-4. *(Later, once the model's edge — if any — is validated)*: a
+1. **Walk-forward validation is done — result: no cover-rate edge
+   survives out-of-sample.** See "Backtest results" above. Avg CLV is the
+   one number that held up in the true 2025 holdout.
+2. **Run `cfb-segments`** — the current search for a narrower edge
+   (conference, in/out-conference, week bucket, home/road x spread size,
+   home/road x deviation size) now that a blanket edge hasn't held up.
+   Remember the caveat: this runs on the full sample, not train/holdout —
+   any standout segment needs a dedicated holdout test before it's trusted,
+   same lesson `cfb-walkforward` already taught once tonight.
+3. Other directions discussed but not yet started: calibration
+   (Brier/log-loss on implied win probability, a different question than
+   ATS cover), totals instead of spreads (weather data is already
+   scaffolded and unused), line-shopping across books as a model-free
+   source of edge.
+4. **Live picks (Phase 4) do not get built until a real edge is found and
+   validated out-of-sample.**
+5. *(Later, once the model's edge — if any — is validated)*: a
    hypothetical-matchup tool — pick any two teams/weeks, not just ones on
    the real schedule, and see the model's implied line. `predictSpread`
    already supports this structurally (it only needs two ratings, not a

@@ -5,7 +5,15 @@ import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { runSweep, runExternalRatingsSweep } from "./backtest/sweep.js";
-import { getOverallReport, getOpeningCoverRate } from "./backtest/report.js";
+import {
+  getOverallReport,
+  getOpeningCoverRate,
+  getConferenceReport,
+  getInOutConferenceReport,
+  getWeekBucketReport,
+  getHomeRoadBySpreadSizeReport,
+  getHomeRoadByDeviationReport,
+} from "./backtest/report.js";
 import { getRatingParams } from "./ratings/config.js";
 import type { Sport } from "./db/repo.js";
 
@@ -216,6 +224,62 @@ export function startCfbWalkforwardJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Segment breakdowns (conference of the pick, in-vs-out-of-conference,
+ * early-season week buckets, home/road crossed with spread size and with
+ * model-deviation size) against a fresh CFB backtest using today's
+ * validated defaults (spPriorWeight=0, eloSignalPoints=1.5, pointsPerEpa=20
+ * — see README "Rating model / A real bug"). CFB only — conference
+ * structure doesn't map meaningfully onto NFL's four-team divisions.
+ *
+ * Important: this runs on the FULL 2023-2025 sample, not train/holdout
+ * split — the walk-forward job already showed a promising-looking number
+ * can evaporate out-of-sample. Treat any standout segment here as a
+ * hypothesis worth a dedicated holdout test, not a confirmed edge, same
+ * caveat as getConferenceReport's own doc comment.
+ */
+export function startCfbSegmentsJob(): Promise<JobStatus> {
+  return runJob("cfb-segments", async (job) => {
+    log(job, "running fresh CFB backtest 2023-2025 with validated defaults");
+    const summary = await runBacktest({ name: "cfb-segments-baseline", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
+    const runId = summary.backtestRunId;
+    log(job, `scored ${summary.scored}, skipped ${summary.skippedNoOdds}, run id ${runId}`);
+
+    const overall = await getOverallReport(runId);
+    const openingCover = await getOpeningCoverRate(runId);
+    log(
+      job,
+      `overall: cover vs close=${fmtPct(overall.coverRate)}, cover vs open=${fmtPct(openingCover.coverRateVsOpening)} ` +
+        `(${openingCover.games} games w/ opening line), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)}`,
+    );
+
+    log(job, "--- by conference of the picked team ---");
+    for (const r of await getConferenceReport(runId)) {
+      log(job, `${r.conference}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- in-conference vs out-of-conference ---");
+    for (const r of await getInOutConferenceReport(runId)) {
+      log(job, `${r.matchupType}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- by week bucket ---");
+    for (const r of await getWeekBucketReport(runId)) {
+      log(job, `${r.weekBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- home/road x spread size (game's own closing spread) ---");
+    for (const r of await getHomeRoadBySpreadSizeReport(runId)) {
+      log(job, `pick=${r.pickSide} spread=${r.sizeBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- home/road x model deviation size ---");
+    for (const r of await getHomeRoadByDeviationReport(runId)) {
+      log(job, `pick=${r.pickSide} deviation=${r.sizeBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -224,4 +288,5 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-external-ratings": startCfbExternalRatingsJob,
   "cfb-external-sweep": startCfbExternalSweepJob,
   "cfb-walkforward": startCfbWalkforwardJob,
+  "cfb-segments": startCfbSegmentsJob,
 };
