@@ -9,13 +9,13 @@ built to measure against the closing line, not the final score.
 | Phase | Status |
 |---|---|
 | 1. Data layer — schema | ✅ Migration written (`src/db/migrations/0001_init.sql`) |
-| 1. Data layer — CFBD (CFB teams/games/PPA stats) | ✅ Built, not yet run against a real DB |
-| 1. Data layer — nflverse (NFL schedules/EPA stats) | ✅ Built, not yet run against a real DB |
-| 1. Data layer — odds (current lines) | ✅ Built (The Odds API), not yet run |
+| 1. Data layer — CFBD (CFB teams/games/PPA stats) | ✅ **Verified live** — 2025 season synced to a real Railway Postgres instance, FBS-only after fixing an early bug that pulled every division |
+| 1. Data layer — nflverse (NFL schedules/EPA stats) | ✅ **Verified live** — 2025 season synced (285 games, 570 team-game rows, exact expected counts) |
+| 1. Data layer — odds (current lines) | ✅ Built (The Odds API), not yet run — no `ODDS_API_KEY` yet, not urgent until Phase 4 |
 | 1. Data layer — odds (historical, for backtesting) | ⚠️ Scaffolded only — see "Odds data" below, needs a real SBR file to finish |
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
 | 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
-| 2. Rating model | 🚫 Not started |
+| 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked, not yet run against real data long enough to judge |
 | 3. Backtest harness | 🚫 Not started |
 | 4. Weekly picks output | 🚫 **Gated — do not build until Phase 3 backtest results are reviewed together** |
 
@@ -154,6 +154,63 @@ rather than silently skipped.
 npm run ingest:weather
 ```
 
+## Phase 2: the rating model
+
+An incremental, EPA-driven Elo-like system (`src/ratings/`), not a batch
+regression — chosen because it updates naturally week to week, needs no
+linear-algebra dependency, and it's the standard way sports-analytics Elo
+variants already encode strength of schedule (see below), which the spec
+asked for explicitly.
+
+- **What updates the rating**: not final score, but each game's *net
+  EPA/play differential* (own offense EPA/play minus own defense EPA/play
+  allowed, home minus away), converted to a point-margin equivalent via a
+  `pointsPerEpa` constant. Final score has already happened by the time you
+  could bet on it; EPA-per-play form is closer to "how good was this team,"
+  which is what a rating meant to anchor a probability estimate should
+  track.
+- **SOS, stronger for CFB**: every rating update is scaled by the
+  opponent's own current rating (`sosWeight` in `src/ratings/config.ts`) —
+  beating a good team moves your rating more than beating a bad one, the
+  standard Elo-family mechanism for strength of schedule. CFB's `sosWeight`
+  (0.4) is set noticeably higher than NFL's (0.15), since CFB schedules
+  vary far more in difficulty than NFL's (division/conference-balanced)
+  schedules do.
+- **Anchored to market, not built from zero**: `predictSpread()` in
+  `src/ratings/elo.ts` blends the model's own rating-implied spread with
+  the current market line, weighted by how many games have been observed
+  (`marketShrinkageK`) — at 0 games played the output *is* the market line
+  (weight 0), and the model's own signal only earns more say as evidence
+  accumulates. This is what "deviation from market, not an independent
+  power ranking" means concretely: early and in small samples, the model
+  can't out-argue the market yet.
+- **Season carryover**: a team's rating at the start of a new season is
+  its previous season's final rating regressed 40% toward league-average
+  (`seasonCarryover = 0.6`) — enough memory to not restart blind, not so
+  much that roster turnover gets ignored.
+- **Confidence/error estimate**: `baseErrorPoints / sqrt(games played + 1)`
+  — starts wide, narrows as the season goes on. A heuristic, not a fitted
+  quantity yet.
+
+**All of the constants above are defaults, not calibrated values** — there's
+no real backtest result yet to fit them against. `src/ratings/config.ts`
+says this explicitly; Phase 3 is where they actually get tuned (sweep each
+one, keep whatever beats the closing line). The core math was sanity-checked
+by hand (a team with consistently better EPA gains rating in the right
+direction; the market-shrinkage weight hits exactly 0 at zero games and 0.5
+at `marketShrinkageK` combined games played, as designed) — that's
+correctness, not validation that the *values* are good ones.
+
+```bash
+npm run ratings:compute -- --sport nfl --season 2025 --week 10   # writes team_ratings
+npm run ratings:predict -- --sport nfl --season 2025 --week 11   # writes model_predictions, using ratings through week 10
+```
+
+`generatePredictionsForWeek` always computes ratings through `week - 1`
+before predicting `week`'s games — a prediction can never see the result of
+the game it's predicting, which matters as much for the Phase 3 backtest as
+it does for a real future week.
+
 ## Schema
 
 Everything joins through `games`:
@@ -193,20 +250,22 @@ src/
     odds/                       # current lines (Odds API) + historical archive import (scaffold)
     injuries/                    # ESPN unofficial injuries (unverified)
     weather/                      # Open-Meteo, NFL stadiums
-  ratings/                # Phase 2 — not started
+  ratings/                # Phase 2 — EPA-driven Elo, market-anchored
+    config.ts              # tunable params per sport, flagged as uncalibrated defaults
+    elo.ts                   # pure rating math (no DB) — computeSeasonRatings, predictSpread
+    service.ts                 # DB orchestration: computeAndStoreRatings, generatePredictionsForWeek
   backtest/                # Phase 3 — not started
 ```
 
 ## What's next
 
-1. Provision a Postgres instance (Railway or local), run `npm run migrate`,
-   run the CFBD + nflverse ingestion for a couple of recent seasons to
-   sanity-check real data lands correctly.
-2. Finish `src/ingest/odds/sbrImport.ts` against a real downloaded
-   SportsbookReviewsOnline file.
-3. Phase 2: the rating model (Elo-like or ridge regression — TBD which fits
-   better once real data is in hand), anchored to market lines, with a
-   stronger SOS adjustment for CFB than NFL.
-4. Phase 3: the backtest harness, run against 2-3 completed seasons, with
-   CLV reporting by threshold and by sport/week. **Live picks (Phase 4) do
-   not get built until this is done and reviewed.**
+1. Finish `src/ingest/odds/sbrImport.ts` against a real downloaded
+   SportsbookReviewsOnline file, so historical opening/closing lines exist
+   to backtest against.
+2. Phase 3: the backtest harness, run against 2-3 completed seasons —
+   replay `generatePredictionsForWeek` week by week through history, log
+   model line vs. opening vs. closing vs. actual result, and report CLV
+   overall / by deviation threshold / by sport-week. This is also where
+   `src/ratings/config.ts`'s constants actually get tuned, instead of left
+   as reasonable-guess defaults. **Live picks (Phase 4) do not get built
+   until this is done and reviewed.**

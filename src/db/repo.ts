@@ -327,3 +327,135 @@ export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Prom
     ],
   );
 }
+
+export interface GameForRating {
+  gameId: number;
+  week: number;
+  homeTeamId: number;
+  awayTeamId: number;
+  homeOffEpa: number;
+  homeDefEpa: number;
+  awayOffEpa: number;
+  awayDefEpa: number;
+}
+
+/** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
+export async function getSeasonGamesForRating(
+  sport: Sport,
+  season: number,
+  throughWeek: number,
+): Promise<GameForRating[]> {
+  const result = await pool.query<{
+    game_id: number;
+    week: number;
+    home_team_id: number;
+    away_team_id: number;
+    home_off_epa: number;
+    home_def_epa: number;
+    away_off_epa: number;
+    away_def_epa: number;
+  }>(
+    `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
+            home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
+            away_stats.off_epa_play AS away_off_epa, away_stats.def_epa_play AS away_def_epa
+     FROM games g
+     JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
+     JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
+     WHERE g.sport = $1 AND g.season = $2 AND g.week <= $3 AND g.status = 'final'
+       AND home_stats.off_epa_play IS NOT NULL AND home_stats.def_epa_play IS NOT NULL
+       AND away_stats.off_epa_play IS NOT NULL AND away_stats.def_epa_play IS NOT NULL
+     ORDER BY g.week ASC, g.id ASC`,
+    [sport, season, throughWeek],
+  );
+  return result.rows.map((r) => ({
+    gameId: r.game_id,
+    week: r.week,
+    homeTeamId: r.home_team_id,
+    awayTeamId: r.away_team_id,
+    homeOffEpa: r.home_off_epa,
+    homeDefEpa: r.home_def_epa,
+    awayOffEpa: r.away_off_epa,
+    awayDefEpa: r.away_def_epa,
+  }));
+}
+
+export async function getPriorSeasonFinalRating(
+  teamId: number,
+  sport: Sport,
+  priorSeason: number,
+  method: "elo" | "ridge",
+): Promise<number | undefined> {
+  const result = await pool.query<{ rating: number }>(
+    `SELECT rating FROM team_ratings
+     WHERE team_id = $1 AND sport = $2 AND season = $3 AND method = $4
+     ORDER BY through_week DESC LIMIT 1`,
+    [teamId, sport, priorSeason, method],
+  );
+  return result.rows[0]?.rating;
+}
+
+export interface UpsertTeamRatingInput {
+  teamId: number;
+  sport: Sport;
+  season: number;
+  throughWeek: number;
+  rating: number;
+  ratingError: number | null;
+  method: "elo" | "ridge";
+}
+
+export async function upsertTeamRating(input: UpsertTeamRatingInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO team_ratings (team_id, sport, season, through_week, rating, rating_error, method, computed_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+     ON CONFLICT (team_id, season, through_week, method)
+     DO UPDATE SET rating = EXCLUDED.rating, rating_error = EXCLUDED.rating_error, computed_at = now()`,
+    [input.teamId, input.sport, input.season, input.throughWeek, input.rating, input.ratingError, input.method],
+  );
+}
+
+/** Most recent line pulled for a game, any book — the "market line at run time" the model anchors to. */
+export async function getLatestMarketLine(gameId: number): Promise<number | undefined> {
+  const result = await pool.query<{ spread_home: number }>(
+    `SELECT spread_home FROM odds_snapshots
+     WHERE game_id = $1 AND spread_home IS NOT NULL
+     ORDER BY captured_at DESC LIMIT 1`,
+    [gameId],
+  );
+  return result.rows[0]?.spread_home;
+}
+
+export interface GameSummary {
+  id: number;
+  homeTeamId: number;
+  awayTeamId: number;
+  status: "scheduled" | "in_progress" | "final";
+}
+
+export async function getGamesForWeek(sport: Sport, season: number, week: number): Promise<GameSummary[]> {
+  const result = await pool.query<{ id: number; home_team_id: number; away_team_id: number; status: GameSummary["status"] }>(
+    `SELECT id, home_team_id, away_team_id, status FROM games
+     WHERE sport = $1 AND season = $2 AND week = $3
+     ORDER BY id ASC`,
+    [sport, season, week],
+  );
+  return result.rows.map((r) => ({ id: r.id, homeTeamId: r.home_team_id, awayTeamId: r.away_team_id, status: r.status }));
+}
+
+export interface UpsertModelPredictionInput {
+  gameId: number;
+  method: string;
+  modelSpreadHome: number;
+  modelTotal: number | null;
+  confidence: number | null;
+  marketSpreadHome: number | null;
+}
+
+export async function insertModelPrediction(input: UpsertModelPredictionInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO model_predictions (game_id, method, model_spread_home, model_total, confidence, market_spread_home, predicted_at)
+     VALUES ($1,$2,$3,$4,$5,$6,now())
+     ON CONFLICT (game_id, method, predicted_at) DO NOTHING`,
+    [input.gameId, input.method, input.modelSpreadHome, input.modelTotal, input.confidence, input.marketSpreadHome],
+  );
+}

@@ -21,6 +21,9 @@
     "smoke:cfb": "tsx src/smokeCfb.ts",
     "cleanup:cfb": "tsx src/cleanupCfb.ts",
     "verify": "tsx src/verify.ts",
+    "ratings:compute": "tsx src/ratings/index.ts compute",
+    "ratings:predict": "tsx src/ratings/index.ts predict",
+    "smoke:ratings": "tsx src/smokeRatings.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
