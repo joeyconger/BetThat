@@ -1,0 +1,34 @@
+{
+  "name": "betthat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal NFL/CFB betting picks model — optimizes for closing line value (CLV), not win prediction. Backtest-only until validated; see README.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "migrate": "tsx src/db/migrate.ts",
+    "ingest:cfbd:teams": "tsx src/ingest/cfbd/index.ts teams",
+    "ingest:cfbd:games": "tsx src/ingest/cfbd/index.ts games",
+    "ingest:cfbd:stats": "tsx src/ingest/cfbd/index.ts stats",
+    "ingest:nfl:schedules": "tsx src/ingest/nflverse/index.ts schedules",
+    "ingest:nfl:stats": "tsx src/ingest/nflverse/index.ts stats",
+    "ingest:odds:current": "tsx src/ingest/odds/index.ts current",
+    "ingest:injuries:current": "tsx src/ingest/injuries/index.ts current",
+    "ingest:weather": "tsx src/ingest/weather/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
