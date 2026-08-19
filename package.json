@@ -17,6 +17,7 @@
     "ingest:odds:current": "tsx src/ingest/odds/index.ts current",
     "ingest:injuries:current": "tsx src/ingest/injuries/index.ts current",
     "ingest:weather": "tsx src/ingest/weather/index.ts",
+    "smoke": "tsx src/smoke.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
