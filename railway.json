@@ -5,7 +5,7 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "npm run migrate",
+    "startCommand": "npm run migrate && npm run ingest:nfl:schedules -- --season 2023 && npm run ingest:nfl:stats -- --season 2023 && npm run ingest:nfl:historicalOdds -- --season 2023 && npm run ingest:nfl:schedules -- --season 2024 && npm run ingest:nfl:stats -- --season 2024 && npm run ingest:nfl:historicalOdds -- --season 2024 && npm run ingest:nfl:historicalOdds -- --season 2025 && npm run backtest:run -- --sport nfl --seasonStart 2023 --seasonEnd 2025 --name v1",
     "restartPolicyType": "NEVER"
   }
 }

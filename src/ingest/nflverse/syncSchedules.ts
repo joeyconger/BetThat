@@ -6,7 +6,7 @@ function toSeasonType(gameType: string): "regular" | "postseason" {
   return gameType === "REG" ? "regular" : "postseason";
 }
 
-function toGameDate(gameday: string, gametime: string): string | null {
+export function toGameDate(gameday: string, gametime: string): string | null {
   if (!gameday) return null;
   return gametime ? `${gameday}T${gametime}:00` : gameday;
 }

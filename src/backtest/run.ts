@@ -9,7 +9,7 @@ import {
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
 import { generateBacktestPredictionsForWeek } from "../ratings/service.js";
-import { computeClv, computeCovered } from "./clv.js";
+import { computeClv, computeCovered, pickSideFromDeviation } from "./clv.js";
 
 const METHOD = "elo" as const;
 
@@ -28,13 +28,26 @@ export interface BacktestSummary {
 
 /**
  * Replays the rating model week by week across [seasonStart, seasonEnd],
- * predicting each week from an opening-line anchor only (never leaking the
- * closing line or that week's own results — see generateBacktestPredictionsForWeek),
- * then scores every completed game against its real opening/closing lines
- * and actual result. Games missing opening or closing odds data are
- * skipped, not guessed at — right now that's every game, since the SBR
- * historical odds importer isn't finished yet (see README "Odds data").
- * This harness is ready to produce real numbers the moment that data exists.
+ * predicting each week from an opening-line anchor when one exists (never
+ * leaking the closing line or that week's own results — see
+ * generateBacktestPredictionsForWeek), then scores every completed game
+ * against its real line(s) and actual result.
+ *
+ * An opening line is the exception, not the rule, in the data this project
+ * has free access to (nflverse's historical odds are closing-only, back to
+ * 1999; only SBR's older 2019-21 seasons have both — see README "Odds
+ * data"). So this treats the closing line as the required minimum and the
+ * opening line as optional:
+ *   - Both exist: real CLV is computed (computeClv), and the pick side
+ *     comes from the model's deviation from the OPENING line.
+ *   - Only closing exists: clv is left null (there's no bet price to
+ *     compare against), and the pick side instead comes from the model's
+ *     deviation from the CLOSING line — `covered` (did that pick actually
+ *     beat the closing number, using the real final score) becomes the
+ *     primary signal-quality metric for these games, which needs no
+ *     opening line at all.
+ * A game with no closing line either is skipped outright — there's nothing
+ * to score it against.
  */
 export async function runBacktest(input: BacktestParams): Promise<BacktestSummary> {
   const backtestRunId = await insertBacktestRun({
@@ -56,16 +69,21 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
 
       for (const game of games) {
         const modelSpreadHome = await getLatestPrediction(game.id, METHOD);
-        const openingSpreadHome = await getOpeningLine(game.id);
+        const openingSpreadHome = (await getOpeningLine(game.id)) ?? null;
         const closingSpreadHome = await getClosingLine(game.id);
 
-        if (modelSpreadHome === undefined || openingSpreadHome === undefined || closingSpreadHome === undefined) {
+        if (modelSpreadHome === undefined || closingSpreadHome === undefined) {
           skippedNoOdds += 1;
           continue;
         }
 
         const actualMarginHome = game.homeScore - game.awayScore;
-        const { pickSide, clv } = computeClv({ modelSpreadHome, openingSpreadHome, closingSpreadHome });
+
+        const { pickSide, clv } =
+          openingSpreadHome !== null
+            ? computeClv({ modelSpreadHome, openingSpreadHome, closingSpreadHome })
+            : { ...pickSideFromDeviation(modelSpreadHome, closingSpreadHome), clv: null };
+
         const covered = computeCovered(pickSide, actualMarginHome, closingSpreadHome);
 
         await insertBacktestResult({
@@ -77,7 +95,7 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
           actualMarginHome,
           clv,
           covered,
-          beatClose: clv > 0,
+          beatClose: clv === null ? null : clv > 0,
         });
         scored += 1;
       }

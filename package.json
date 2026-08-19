@@ -14,6 +14,7 @@
     "ingest:cfbd:stats": "tsx src/ingest/cfbd/index.ts stats",
     "ingest:nfl:schedules": "tsx src/ingest/nflverse/index.ts schedules",
     "ingest:nfl:stats": "tsx src/ingest/nflverse/index.ts stats",
+    "ingest:nfl:historicalOdds": "tsx src/ingest/nflverse/index.ts historicalOdds",
     "ingest:odds:current": "tsx src/ingest/odds/index.ts current",
     "ingest:injuries:current": "tsx src/ingest/injuries/index.ts current",
     "ingest:weather": "tsx src/ingest/weather/index.ts",

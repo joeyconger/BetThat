@@ -559,12 +559,14 @@ export interface InsertBacktestResultInput {
   backtestRunId: number;
   gameId: number;
   modelSpreadHome: number;
-  openingSpreadHome: number;
+  /** Null when no opening line exists for this game — see clv's doc. */
+  openingSpreadHome: number | null;
   closingSpreadHome: number;
   actualMarginHome: number;
-  clv: number;
+  /** Null when openingSpreadHome is null — true CLV needs an opening price to compare against. */
+  clv: number | null;
   covered: boolean | null;
-  beatClose: boolean;
+  beatClose: boolean | null;
 }
 
 export async function insertBacktestResult(input: InsertBacktestResultInput): Promise<void> {

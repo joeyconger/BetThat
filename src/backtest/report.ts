@@ -46,9 +46,12 @@ export interface ThresholdStats extends AggregateStats {
 const DEFAULT_THRESHOLDS = [0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5];
 
 /**
- * CLV performance when only "betting" games where the model deviated from
- * the opening line by at least `threshold` points — this is how a sane
- * betting threshold gets picked, by comparing across the sweep.
+ * CLV/cover-rate performance when only "betting" games where the model
+ * deviated from the market by at least `threshold` points — this is how a
+ * sane betting threshold gets picked, by comparing across the sweep.
+ * Deviation is measured from the opening line where one exists, the
+ * closing line otherwise (matches run.ts's pick-side logic — most games
+ * only have a closing line; see README "Odds data").
  */
 export async function getThresholdReport(
   backtestRunId: number,
@@ -58,7 +61,8 @@ export async function getThresholdReport(
   for (const threshold of thresholds) {
     const rows = await query<AggregateRow>(
       `SELECT ${AGGREGATE_SELECT} FROM backtest_results
-       WHERE backtest_run_id = $1 AND abs(model_spread_home - opening_spread_home) >= $2`,
+       WHERE backtest_run_id = $1
+         AND abs(model_spread_home - coalesce(opening_spread_home, closing_spread_home)) >= $2`,
       [backtestRunId, threshold],
     );
     results.push({ threshold, ...toAggregateStats(rows[0]!) });

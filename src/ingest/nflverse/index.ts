@@ -1,6 +1,7 @@
 import { parseArgs, requireFlag } from "../cliArgs.js";
 import { syncNflSchedules } from "./syncSchedules.js";
 import { syncNflPbpStats } from "./syncPbpStats.js";
+import { syncNflHistoricalOdds } from "./syncHistoricalOdds.js";
 import { pool } from "../../db/pool.js";
 
 async function main() {
@@ -18,8 +19,13 @@ async function main() {
       console.log(`synced ${synced} NFL team-game stat rows for ${season}, skipped ${skipped} (run 'schedules' first if this is high)`);
       break;
     }
+    case "historicalOdds": {
+      const { synced, skipped } = await syncNflHistoricalOdds(season);
+      console.log(`synced ${synced} NFL closing-line snapshots for ${season}, skipped ${skipped}`);
+      break;
+    }
     default:
-      console.error("usage: tsx src/ingest/nflverse/index.ts <schedules|stats> --season 2023");
+      console.error("usage: tsx src/ingest/nflverse/index.ts <schedules|stats|historicalOdds> --season 2023");
       process.exitCode = 1;
   }
 

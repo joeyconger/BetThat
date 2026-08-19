@@ -28,6 +28,25 @@ export function computeClv(input: ClvInput): ClvResult {
   return { pickSide, edgePoints, clv };
 }
 
+export interface PickResult {
+  pickSide: "home" | "away";
+  edgePoints: number;
+}
+
+/**
+ * Picks a side from the model's deviation against whatever market
+ * reference is available — the opening line when there is one, the
+ * closing line otherwise (nflverse's historical data only has closing;
+ * see README "Odds data"). True CLV can't be computed without an opening
+ * price, so this only decides direction/edge size; the caller still needs
+ * computeClv (and a real opening line) for an actual CLV number.
+ */
+export function pickSideFromDeviation(modelSpreadHome: number, referenceSpreadHome: number): PickResult {
+  const deviation = referenceSpreadHome - modelSpreadHome;
+  const pickSide: "home" | "away" = deviation >= 0 ? "home" : "away";
+  return { pickSide, edgePoints: Math.abs(deviation) };
+}
+
 /**
  * Whether the picked side would have covered the CLOSING line given the
  * actual result — a separate question from CLV (which only asks whether
