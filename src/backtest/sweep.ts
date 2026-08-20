@@ -102,6 +102,7 @@ export async function runExternalRatingsSweep(
   fixedBaseK: number,
   spPriorWeightGrid: number[] = DEFAULT_SP_PRIOR_WEIGHT,
   eloSignalPointsGrid: number[] = DEFAULT_ELO_SIGNAL_POINTS,
+  excludeFromWeek?: number,
 ): Promise<ExternalRatingsSweepResult[]> {
   const base = getRatingParams(sport);
   const results: ExternalRatingsSweepResult[] = [];
@@ -122,6 +123,7 @@ export async function runExternalRatingsSweep(
         seasonStart,
         seasonEnd,
         paramsOverride,
+        excludeFromWeek,
       });
       const overall = await getOverallReport(backtestRunId);
       results.push({

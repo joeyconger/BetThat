@@ -225,6 +225,54 @@ export function startCfbWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Same walk-forward validation as startCfbWalkforwardJob, but with week 14+
+ * (rivalry week / conference championships — see cfb-no-rivalry-week's doc)
+ * excluded from BOTH the training sweep and the 2025 holdout. Answers the
+ * question cfb-no-rivalry-week's in-sample result couldn't: does excluding
+ * that segment actually generalize, or was the improvement just an artifact
+ * of removing a chunk we identified by looking at this same 2023-2025 pool
+ * in the first place (near-circular, not independent evidence).
+ */
+export function startCfbWalkforwardNoRivalryJob(): Promise<JobStatus> {
+  return runJob("cfb-walkforward-no-rivalry", async (job) => {
+    log(job, "training: sweeping spPriorWeight x eloSignalPoints on 2023-2024 only, excluding week 14+");
+    const trainResults = await runExternalRatingsSweep("cfb", 2023, 2024, 20, 0.25, undefined, undefined, 14);
+    for (const r of trainResults) {
+      log(job, `train: spPriorWeight=${r.spPriorWeight} eloSignalPoints=${r.eloSignalPoints}: cover=${fmtPct(r.coverRate)} (run ${r.runId})`);
+    }
+    const best = trainResults[0]!;
+    log(job, `best training combo: spPriorWeight=${best.spPriorWeight} eloSignalPoints=${best.eloSignalPoints} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected params, excluding week 14+");
+    const base = getRatingParams("cfb");
+    const paramsOverride = {
+      ...base,
+      pointsPerEpa: 20,
+      baseK: 0.25,
+      spPriorWeight: best.spPriorWeight,
+      eloSignalPoints: best.eloSignalPoints,
+    };
+    const holdout = await runBacktest({
+      name: "cfb-walkforward-holdout-2025-no-rivalry",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+      excludeFromWeek: 14,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025 (no rivalry week): ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+    log(job, "compare against original cfb-walkforward holdout (all weeks): cover vs close=47.1%, cover vs open=50.0%, avgClv=0.76");
+  });
+}
+
+/**
  * Segment breakdowns (conference of the pick, in-vs-out-of-conference,
  * early-season week buckets, home/road crossed with spread size and with
  * model-deviation size) against a fresh CFB backtest using today's
@@ -335,6 +383,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-external-ratings": startCfbExternalRatingsJob,
   "cfb-external-sweep": startCfbExternalSweepJob,
   "cfb-walkforward": startCfbWalkforwardJob,
+  "cfb-walkforward-no-rivalry": startCfbWalkforwardNoRivalryJob,
   "cfb-segments": startCfbSegmentsJob,
   "cfb-sos-sweep": startCfbSosSweepJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
