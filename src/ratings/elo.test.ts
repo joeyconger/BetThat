@@ -346,3 +346,44 @@ test("computeSeasonRatings does not opponent-adjust when the opponent has fewer 
     "opponent with < MIN_SUCCESS_CONTEXT_GAMES produces no adjustment, identical to opponentAdjustWeight=0",
   );
 });
+
+test("predictSpread's restSignal moves the prediction when pointsPerRestDay > 0", () => {
+  const params = { ...CFB, pointsPerRestDay: 0.3 };
+  const result = predictSpread(
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, restDaysDiff: 7 },
+    params,
+  );
+  // restSignal = 0.3 * 7 = 2.1; predictedMargin = 0 - 0 + homeFieldAdvantage + 2.1
+  const expectedMargin = CFB.homeFieldAdvantage + 2.1;
+  assert.ok(Math.abs(result.eloSpreadHome - -expectedMargin) < 1e-9);
+});
+
+test("predictSpread treats a missing restDaysDiff as zero differential, not zero rest for either side", () => {
+  const params = { ...CFB, pointsPerRestDay: 0.3 };
+  const withUndefined = predictSpread(
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    params,
+  );
+  const withNull = predictSpread(
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: null },
+    params,
+  );
+  const withZero = predictSpread(
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: 0 },
+    params,
+  );
+  assert.equal(withUndefined.eloSpreadHome, withNull.eloSpreadHome);
+  assert.equal(withUndefined.eloSpreadHome, withZero.eloSpreadHome);
+});
+
+test("pointsPerRestDay=0 (today's default) makes restDaysDiff a complete no-op, even with a large differential", () => {
+  const withRest = predictSpread(
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: 14 },
+    CFB,
+  );
+  const withoutRest = predictSpread(
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    CFB,
+  );
+  assert.equal(withRest.eloSpreadHome, withoutRest.eloSpreadHome);
+});

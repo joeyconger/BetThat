@@ -15,6 +15,7 @@ import {
   runSuccessRateSweep,
   runGarbageTimeSweep,
   runOpponentAdjustSweep,
+  runRestDaySweep,
 } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -569,6 +570,58 @@ export function startCfbOpponentAdjustWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Sweeps pointsPerRestDay -- rest/bye-week advantage (see
+ * backtest/sweep.ts's runRestDaySweep and RatingParams doc). No ingestion
+ * job needed first: game_date already exists for every game.
+ */
+export function startCfbRestDaySweepJob(): Promise<JobStatus> {
+  return runJob("cfb-restday-sweep", async (job) => {
+    log(job, "sweeping cfb pointsPerRestDay, 2023-2025");
+    const results = await runRestDaySweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `pointsPerRestDay=${r.pointsPerRestDay}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
+ * Walk-forward validation for pointsPerRestDay, same discipline as every
+ * other rating-param change tonight: train (sweep) on 2023-2024 only, then
+ * score the winning value on the untouched 2025 season.
+ */
+export function startCfbRestDayWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-restday-walkforward", async (job) => {
+    log(job, "training: sweeping pointsPerRestDay on 2023-2024 only");
+    const trainResults = await runRestDaySweep("cfb", 2023, 2024);
+    for (const r of trainResults) {
+      log(job, `train: pointsPerRestDay=${r.pointsPerRestDay}: cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+    const best = trainResults[0]!; // runRestDaySweep sorts desc by coverRate
+    log(job, `best training value: pointsPerRestDay=${best.pointsPerRestDay} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected value");
+    const base = getRatingParams("cfb");
+    const paramsOverride = { ...base, pointsPerRestDay: best.pointsPerRestDay };
+    const holdout = await runBacktest({
+      name: "cfb-restday-walkforward-holdout-2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025: ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+    log(job, "compare against cfb-successrate-walkforward's holdout for the equivalent number without this signal: cover vs close=48.7%, cover vs open=50.7%, avgClv=0.87.");
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -691,6 +744,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
   "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
   "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
+  "cfb-restday-sweep": startCfbRestDaySweepJob,
+  "cfb-restday-walkforward": startCfbRestDayWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,

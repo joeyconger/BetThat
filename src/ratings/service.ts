@@ -123,6 +123,7 @@ async function predictAndStoreWeek(
         awayEloZ,
         homeSpZ,
         awaySpZ,
+        restDaysDiff: game.restDaysDiff,
       },
       params,
     );

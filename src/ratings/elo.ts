@@ -275,6 +275,17 @@ export interface PredictionInput {
    */
   homeSpZ?: number;
   awaySpZ?: number;
+  /**
+   * (home team's days since their prior game) - (away team's days since
+   * theirs), from db/repo.ts's getGamesForWeek — a real, well-documented
+   * rest-advantage effect (extra rest, especially a bye week, is a genuine
+   * predictive edge) that nothing in this model used before. Undefined/
+   * null (both treated the same, see params.pointsPerRestDay's doc) when
+   * either team has no prior game this season yet — falls back to no
+   * adjustment rather than guessing which side is "more rested" off
+   * incomplete data.
+   */
+  restDaysDiff?: number | null;
 }
 
 export interface Prediction {
@@ -300,7 +311,13 @@ export interface Prediction {
 export function predictSpread(input: PredictionInput, params: RatingParams): Prediction {
   const eloSignal = params.eloSignalPoints * ((input.homeEloZ ?? 0) - (input.awayEloZ ?? 0));
   const spSignal = params.spSignalPoints * ((input.homeSpZ ?? 0) - (input.awaySpZ ?? 0));
-  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal + spSignal;
+  // ?? 0 on the WHOLE differential (not each side separately, unlike
+  // homeEloZ/awaySpZ above) -- restDaysDiff is already a single combined
+  // number, and defaulting a missing differential to 0 means "no rest
+  // advantage either way," not "assume 0 days rest," which is the correct
+  // neutral fallback rather than reading as maximally fatigued.
+  const restSignal = params.pointsPerRestDay * (input.restDaysDiff ?? 0);
+  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal + spSignal + restSignal;
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;

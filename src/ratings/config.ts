@@ -58,6 +58,20 @@ export interface RatingParams {
    */
   spSignalPoints: number;
   /**
+   * Points added to the predicted margin per day of rest-advantage
+   * differential (home team's days since their prior game minus away
+   * team's) — same additive-signal shape as eloSignalPoints/spSignalPoints,
+   * applied in ratings/elo.ts's predictSpread, not the rating update
+   * itself (this is situational to a specific matchup, not a change in
+   * either team's underlying strength). A real, well-documented effect in
+   * both NFL and CFB (extra rest, especially a bye week, is a genuine
+   * predictive edge) that nothing in this model used before. Both sports —
+   * unlike eloSignalPoints/spSignalPoints, this doesn't depend on CFBD-only
+   * data (game_date already exists for every game). Defaults to 0 (no-op)
+   * — untested, needs a real sweep.
+   */
+  pointsPerRestDay: number;
+  /**
    * Weight (0-1) given to success-rate differential vs. EPA differential
    * when computing a game's "how it went" performance signal in
    * computeSeasonRatings — 0 uses pure EPA (today's behavior), 1 uses pure
@@ -134,6 +148,7 @@ const NFL_PARAMS: RatingParams = {
   spPriorWeight: 0, // no SP+ for NFL
   eloSignalPoints: 0, // no CFBD Elo for NFL
   spSignalPoints: 0, // no CFBD SP+ for NFL
+  pointsPerRestDay: 0, // untested — needs a real sweep. Applies to both sports (game_date is universal), unlike the CFBD-only signals above.
   successRateWeight: 0, // untested — see RatingParams doc; 0 = today's pure-EPA behavior
   pointsPerSuccessRate: 90, // untested placeholder — see RatingParams doc
   bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
@@ -204,6 +219,9 @@ const CFB_PARAMS: RatingParams = {
   // already exists for every 2023-2025 CFB game (no new ingestion needed,
   // unlike excludeGarbageTime), so this can be swept immediately.
   opponentAdjustWeight: 0,
+  // Inherited 0 from NFL_PARAMS — no-op until swept. game_date already
+  // exists for every game, so this can be swept immediately too.
+  pointsPerRestDay: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

@@ -468,3 +468,53 @@ export async function runOpponentAdjustSweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
+
+/**
+ * Sweeps pointsPerRestDay -- rest/bye-week advantage as an additive signal
+ * in predictSpread (see RatingParams doc). No new ingestion: game_date
+ * already exists for every game. Includes negative values in the default
+ * grid too, as a sanity check -- if the model is well-specified, a
+ * negative pointsPerRestDay (extra rest HURTING the home team) should
+ * clearly underperform 0 and the positive values, not come out on top.
+ */
+const DEFAULT_POINTS_PER_REST_DAY = [-0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.5];
+
+export interface RestDaySweepResult {
+  pointsPerRestDay: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runRestDaySweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  weightGrid: number[] = DEFAULT_POINTS_PER_REST_DAY,
+): Promise<RestDaySweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: RestDaySweepResult[] = [];
+
+  for (const pointsPerRestDay of weightGrid) {
+    const paramsOverride: RatingParams = { ...base, pointsPerRestDay };
+    const name = `sweep-restday-${sport}-p${pointsPerRestDay}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      pointsPerRestDay,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `pointsPerRestDay=${pointsPerRestDay}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}

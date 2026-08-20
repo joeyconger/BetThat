@@ -622,16 +622,59 @@ export interface GameSummary {
   homeTeamId: number;
   awayTeamId: number;
   status: "scheduled" | "in_progress" | "final";
+  /**
+   * (home team's days since their prior game) - (away team's days since
+   * theirs), within the same sport/season — the ratings/elo.ts
+   * predictSpread pointsPerRestDay input. Null when either team has no
+   * prior game this season yet (week 1, or a scheduling gap the data
+   * doesn't cover) rather than guessing a value — predictSpread treats
+   * null as "no adjustment," not "0 days rest" for one side, since the
+   * latter would read as maximally fatigued rather than unknown.
+   */
+  restDaysDiff: number | null;
 }
 
 export async function getGamesForWeek(sport: Sport, season: number, week: number): Promise<GameSummary[]> {
-  const result = await pool.query<{ id: number; home_team_id: number; away_team_id: number; status: GameSummary["status"] }>(
-    `SELECT id, home_team_id, away_team_id, status FROM games
-     WHERE sport = $1 AND season = $2 AND week = $3
-     ORDER BY id ASC`,
+  const result = await pool.query<{
+    id: number;
+    home_team_id: number;
+    away_team_id: number;
+    status: GameSummary["status"];
+    rest_days_diff: number | null;
+  }>(
+    `SELECT g.id, g.home_team_id, g.away_team_id, g.status,
+            -- (home's days since their last game) - (away's days since theirs). g.game_date
+            -- cancels algebraically ((g - home_prior) - (g - away_prior) = away_prior - home_prior),
+            -- so this is computed directly rather than as two separately-truncated intervals.
+            CASE WHEN home_prior.game_date IS NULL OR away_prior.game_date IS NULL THEN NULL
+                 ELSE ROUND((EXTRACT(EPOCH FROM (away_prior.game_date - home_prior.game_date)) / 86400)::numeric)
+            END AS rest_days_diff
+     FROM games g
+     LEFT JOIN LATERAL (
+       SELECT g2.game_date FROM games g2
+       WHERE g2.sport = g.sport AND g2.season = g.season AND g2.status = 'final'
+         AND (g2.home_team_id = g.home_team_id OR g2.away_team_id = g.home_team_id)
+         AND g2.game_date < g.game_date
+       ORDER BY g2.game_date DESC LIMIT 1
+     ) home_prior ON true
+     LEFT JOIN LATERAL (
+       SELECT g2.game_date FROM games g2
+       WHERE g2.sport = g.sport AND g2.season = g.season AND g2.status = 'final'
+         AND (g2.home_team_id = g.away_team_id OR g2.away_team_id = g.away_team_id)
+         AND g2.game_date < g.game_date
+       ORDER BY g2.game_date DESC LIMIT 1
+     ) away_prior ON true
+     WHERE g.sport = $1 AND g.season = $2 AND g.week = $3
+     ORDER BY g.id ASC`,
     [sport, season, week],
   );
-  return result.rows.map((r) => ({ id: r.id, homeTeamId: r.home_team_id, awayTeamId: r.away_team_id, status: r.status }));
+  return result.rows.map((r) => ({
+    id: r.id,
+    homeTeamId: r.home_team_id,
+    awayTeamId: r.away_team_id,
+    status: r.status,
+    restDaysDiff: r.rest_days_diff,
+  }));
 }
 
 export interface UpsertModelPredictionInput {
