@@ -540,6 +540,31 @@ cell by chance (the same failure mode the walk-forward job just caught).
 Treat any single promising segment here as a hypothesis worth a dedicated
 holdout test, not a confirmed edge, before acting on it.
 
+**Two follow-ups from the segment results**, both landed:
+
+- **Excluding week 14+** (rivalry week / conference championships — this
+  project has never actually ingested real postseason/bowl games, CFBD's
+  endpoints were only ever called with `seasonType: 'regular'`) improved
+  cover rate in-sample (49.9%→50.6% close, 52.8%→53.4% open) *and*, more
+  importantly, in a true 2025 holdout the calibration never saw
+  (47.1%→48.5% close, 50.0%→51.5% open) — `cfb-walkforward-no-rivalry`.
+  That's the first thing all session to improve in both the training data
+  and an untouched holdout the same way — real evidence of generalizing,
+  not overfitting, even though the holdout number still sits under the
+  52.4% breakeven line (wide CI at this sample size, n=650).
+- **Big-spread deviation**: pulling the top games by model-vs-market
+  deviation size showed a clear, mechanistic pattern — whenever the market
+  itself posted an extreme spread (20-40+ points), the model consistently
+  predicted something noticeably smaller, and lost more often than not
+  (real blowouts tended to be at least as extreme as market, not less).
+  Root cause: `predictSpread`'s market-blend weight (`modelWeight`) only
+  ever depended on games played, never on how extreme the market spread
+  itself was — so by mid-season the model trusted its own (rating-scale-
+  compressed) number just as much in a 40-point mismatch as a 3-point game.
+  Fixed with a new `bigSpreadShrinkRef` param that also defers to market as
+  `|marketSpreadHome|` grows (`cfb-bigspread-sweep` job to calibrate it —
+  the default of 25 is a reasoned starting point, not yet swept).
+
 ## Schema
 
 Everything joins through `games`:

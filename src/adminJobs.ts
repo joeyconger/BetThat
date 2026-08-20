@@ -4,7 +4,7 @@ import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
-import { runSweep, runExternalRatingsSweep, runSosSweep } from "./backtest/sweep.js";
+import { runSweep, runExternalRatingsSweep, runSosSweep, runBigSpreadShrinkSweep } from "./backtest/sweep.js";
 import {
   getOverallReport,
   getOpeningCoverRate,
@@ -345,6 +345,23 @@ export function startCfbSosSweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
+ * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
+ * extreme spreads" fix added after backtest data showed the model
+ * systematically under-predicting real blowouts. ref=1000 in the grid is
+ * effectively the pre-fix, no-damping baseline for direct comparison.
+ */
+export function startCfbBigSpreadShrinkSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-bigspread-sweep", async (job) => {
+    log(job, "sweeping cfb bigSpreadShrinkRef, 2023-2025");
+    const results = await runBigSpreadShrinkSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `bigSpreadShrinkRef=${r.bigSpreadShrinkRef}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
  * Re-runs the CFB baseline excluding week 14+ (rivalry week / conference
  * championships — NOT real bowl games, this project has never ingested
  * postseason data, see README "Segment breakdowns") and reports overall
@@ -386,5 +403,6 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-walkforward-no-rivalry": startCfbWalkforwardNoRivalryJob,
   "cfb-segments": startCfbSegmentsJob,
   "cfb-sos-sweep": startCfbSosSweepJob,
+  "cfb-bigspread-sweep": startCfbBigSpreadShrinkSweepJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
 };

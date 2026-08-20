@@ -196,3 +196,54 @@ export async function runSosSweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
+
+/**
+ * Sweeps bigSpreadShrinkRef (see ratings/elo.ts's predictSpread doc) — the
+ * new "defer to market more on extreme spreads" knob added after backtest
+ * data showed the model losing when it predicted a noticeably smaller
+ * spread than a big market number. Includes a very large value (1000,
+ * effectively a no-op — matches pre-fix behavior) as the baseline to
+ * compare every other value against. Holds other params fixed at CFB's
+ * current validated defaults.
+ */
+const DEFAULT_BIG_SPREAD_SHRINK_REF = [1000, 60, 40, 25, 15, 10, 5];
+
+export interface BigSpreadShrinkSweepResult {
+  bigSpreadShrinkRef: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runBigSpreadShrinkSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  refGrid: number[] = DEFAULT_BIG_SPREAD_SHRINK_REF,
+): Promise<BigSpreadShrinkSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: BigSpreadShrinkSweepResult[] = [];
+
+  for (const bigSpreadShrinkRef of refGrid) {
+    const paramsOverride: RatingParams = { ...base, bigSpreadShrinkRef };
+    const name = `sweep-bigspread-${sport}-ref${bigSpreadShrinkRef}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      bigSpreadShrinkRef,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `bigSpreadShrinkRef=${bigSpreadShrinkRef}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      } (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}

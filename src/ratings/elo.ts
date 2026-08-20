@@ -168,7 +168,24 @@ export function predictSpread(input: PredictionInput, params: RatingParams): Pre
     return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence, modelWeight: 1 };
   }
 
-  const modelWeight = combinedGames / (combinedGames + params.marketShrinkageK);
+  // Real CFB mismatches regularly hit 30-50+ point market spreads, but this
+  // rating system's incremental, regression-heavy updates (season carryover,
+  // bounded SOS multiplier) can't accumulate that much separation within a
+  // season — so the model's own number is systematically LESS extreme than
+  // reality whenever the market itself is already extreme. Confirmed against
+  // real backtest data: games with big deviation from a big market spread
+  // (e.g. model=-27 vs market=-40) lost more often than they should have,
+  // because actual blowouts tended to be at least as extreme as the market,
+  // not less. bigSpreadShrinkRef defers more to market as |marketSpreadHome|
+  // grows, on top of the existing games-played shrinkage — e.g. at a
+  // reference of 25, model weight is roughly halved at a 25-point spread and
+  // cut to a third at 40. The falloff is gradual, not a threshold — even a
+  // 3-point spread sees a real (~11% at ref=25) reduction, not "no effect
+  // below some cutoff" — so this needs a real sweep to find a value that
+  // fixes the big-spread cases without needlessly discounting the model in
+  // normal games, not just a plausible-sounding default.
+  const spreadDamping = params.bigSpreadShrinkRef / (params.bigSpreadShrinkRef + Math.abs(input.marketSpreadHome));
+  const modelWeight = (combinedGames / (combinedGames + params.marketShrinkageK)) * spreadDamping;
   const modelSpreadHome = modelWeight * eloSpreadHome + (1 - modelWeight) * input.marketSpreadHome;
   return { eloSpreadHome, modelSpreadHome, confidence, modelWeight };
 }

@@ -41,6 +41,8 @@ export interface RatingParams {
   spPriorWeight: number;
   /** Points of predicted-margin adjustment per unit z-score gap in CFBD's weekly Elo (see ratings/elo.ts's predictSpread). CFB-only — 0 for NFL, which CFBD doesn't cover. */
   eloSignalPoints: number;
+  /** Defers more to market as |marketSpreadHome| grows, on top of the existing games-played shrinkage (see ratings/elo.ts's predictSpread). Smaller = defers to market sooner/harder at a given spread size. */
+  bigSpreadShrinkRef: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -56,6 +58,7 @@ const NFL_PARAMS: RatingParams = {
   marketShrinkageK: 8,
   spPriorWeight: 0, // no SP+ for NFL
   eloSignalPoints: 0, // no CFBD Elo for NFL
+  bigSpreadShrinkRef: 40, // fairly inert at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -73,6 +76,13 @@ const CFB_PARAMS: RatingParams = {
   pointsPerEpa: 20,
   spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
   eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
+  // Uncalibrated starting point — real CFB mismatches routinely hit 30-50+
+  // point market spreads, and backtest data showed the model losing when it
+  // predicted a noticeably SMALLER spread than a big market number (real
+  // blowouts tended to be at least as extreme as market, not less — see
+  // README "Big-spread deviation"). Needs a real sweep before trusting this
+  // specific value, same as everything else in this file originally was.
+  bigSpreadShrinkRef: 25,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {
