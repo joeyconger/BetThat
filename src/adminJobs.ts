@@ -393,6 +393,53 @@ export function startCfbSuccessRateSweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Walk-forward validation for the success-rate blend, same discipline as
+ * startCfbWalkforwardJob: pick the best successRateWeight/
+ * pointsPerSuccessRate combo by training ONLY on 2023-2024, then score that
+ * exact combo on 2025 alone — data the training sweep never saw. The full
+ * 2023-2025 sweep (cfb-successrate-sweep) found successRateWeight=0.75-1.0
+ * with pointsPerSuccessRate=90-120 beating the EPA-only baseline (49.9% ->
+ * 50.5% cover), but that shift is inside one standard error at ~2268 games
+ * (SE~1.05pp) and the grid wasn't picked out-of-sample — this is the actual
+ * test of whether it's signal or noise, not the in-sample sweep itself.
+ */
+export function startCfbSuccessRateWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-successrate-walkforward", async (job) => {
+    log(job, "training: sweeping successRateWeight x pointsPerSuccessRate on 2023-2024 only");
+    const trainResults = await runSuccessRateSweep("cfb", 2023, 2024);
+    for (const r of trainResults) {
+      log(job, `train: successRateWeight=${r.successRateWeight} pointsPerSuccessRate=${r.pointsPerSuccessRate}: cover=${fmtPct(r.coverRate)} (run ${r.runId})`);
+    }
+    const best = trainResults[0]!; // runSuccessRateSweep sorts desc by coverRate
+    log(job, `best training combo: successRateWeight=${best.successRateWeight} pointsPerSuccessRate=${best.pointsPerSuccessRate} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected params");
+    const base = getRatingParams("cfb");
+    const paramsOverride = {
+      ...base,
+      successRateWeight: best.successRateWeight,
+      pointsPerSuccessRate: best.pointsPerSuccessRate,
+    };
+    const holdout = await runBacktest({
+      name: "cfb-successrate-walkforward-holdout-2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025: ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+    log(job, "compare against EPA-only baseline (successRateWeight=0) 2025 holdout for context -- see cfb-walkforward's holdout run for the equivalent number without this blend.");
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -509,6 +556,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-bigspread-sweep": startCfbBigSpreadShrinkSweepJob,
   "cfb-spsignal-sweep": startCfbSpSignalSweepJob,
   "cfb-successrate-sweep": startCfbSuccessRateSweepJob,
+  "cfb-successrate-walkforward": startCfbSuccessRateWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,
