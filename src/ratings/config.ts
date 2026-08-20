@@ -121,9 +121,33 @@ const CFB_PARAMS: RatingParams = {
   pointsPerEpa: 20,
   spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
   eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
-  spSignalPoints: 0, // NOT swept yet — a distinct hypothesis from spPriorWeight above (see RatingParams doc); worth sweeping given eloSignalPoints' additive treatment worked where spPriorWeight's carryover-blend treatment of a similar external rating didn't
-  successRateWeight: 0, // NOT swept yet — see RatingParams doc
-  pointsPerSuccessRate: 90, // NOT swept yet — untested placeholder, only matters once successRateWeight > 0
+  // spSignalPoints: swept 0-3 (cfb-spsignal-sweep, run 210-215) — unlike
+  // eloSignalPoints, this one did NOT replicate the "additive treatment of
+  // an external rating helps" pattern: 0 was the best value on both cover
+  // rate (49.9%) and avgClv (0.62), and both metrics degraded monotonically
+  // as the signal got stronger (48.9%/0.55 at spSignalPoints=3). Left at 0.
+  // Best guess why eloSignalPoints helped and this doesn't: CFBD's weekly
+  // Elo updates within-season (fresh info every week); SP+ here is frozen
+  // at last year's final value for the whole season, so it's likely just
+  // adding stale noise on top of what the model's own rating + market
+  // blend already has, not new information.
+  spSignalPoints: 0,
+  // successRateWeight/pointsPerSuccessRate: swept 0-1 x 60-120
+  // (cfb-successrate-sweep, run 216-228), then walk-forward validated
+  // (cfb-successrate-walkforward, run 229-242: train on 2023-2024 only,
+  // score the winning combo on the untouched 2025 season). In-sample sweep
+  // found successRateWeight=0.75-1.0 with pointsPerSuccessRate=90-120
+  // beating the EPA-only baseline (49.9% -> 50.5% cover), and the walk-
+  // forward holdout, while showing the usual in-sample-to-holdout
+  // shrinkage (train cover 51.5% -> holdout cover-vs-close 48.7%), still
+  // beat the existing baseline's OWN 2025 holdout on the two metrics that
+  // matter most: avg CLV (0.87 vs. 0.76) and cover-vs-opening-line (50.7%
+  // vs. 50.0%, still short of the ~52.4% breakeven line). A real, modest
+  // improvement, not a validated edge — n=762 on the holdout, SE~1.8pp, so
+  // none of these shifts are individually conclusive on their own, but the
+  // direction held across both the full sweep and an independent holdout.
+  successRateWeight: 0.75,
+  pointsPerSuccessRate: 120,
   // Uncalibrated starting point — widens confidence for predictions
   // fighting an extreme market spread, since backtest data showed those
   // losing more often than not (real CFB mismatches routinely hit 30-50+
