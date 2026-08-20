@@ -14,7 +14,8 @@ built to measure against the closing line, not the final score.
 | 1. Data layer — odds (current lines) | ✅ **Verified live** — full 2026 NFL schedule (272/272 games) matched and synced from The Odds API, real sane spread/moneyline values confirmed |
 | 1. Data layer — odds (historical, for backtesting) | ✅ **Verified live** — nflverse's games.csv carries closing lines back to 1999 (NFL, closing only); CFBD's `/lines` carries both opening and closing for CFB, spot-checked against real 2024 outcomes (see "Odds data" below). SBR's opening-line archive is still an unfinished scaffold, only relevant for real CLV rather than the cover-rate metric currently in use |
 | 1. Data layer — injuries | ⚠️ Built against ESPN's unofficial endpoint, **UNVERIFIED** — see "Injuries" below |
-| 1. Data layer — weather | ✅ Built (Open-Meteo), NFL only — CFB stadiums not yet mapped |
+| 1. Data layer — weather | ⚠️ Live forecast built for NFL (Open-Meteo). Historical backfill added for both sports (CFB via CFBD's own `venue_id`, correctly handles neutral-site games), **UNVERIFIED**, not yet run — see "New scaffolds" below |
+| 1. Data layer — public/sharp betting splits | 🚫 Schema-only — no verified free data source found (see "New scaffolds" below) |
 | 2. Rating model | ✅ Built (EPA-driven Elo, market-anchored) — math sanity-checked. Fixed a real bug (unbounded SOS multiplier causing rating blowups, see "A real bug" below) |
 | 2. Rating model — external ratings (CFB) | ⚠️ Built and calibrated via sweep (spPriorWeight=0, eloSignalPoints=1.5 — SP+ prior hurt, weekly Elo signal helped), ingested data still **UNVERIFIED** against a real response — see "External ratings" below |
 | 3. Backtest harness | ✅ **Run for real** against 2023-2025, both sports, plus walk-forward validation and segment breakdowns. Three real bugs found and fixed (numeric-string coercion; unbounded SOS multiplier; computeInitialRating ignoring its own weight). **No cover-rate edge survived out-of-sample testing** — see "Backtest results" below. Avg CLV stayed positive in the true holdout; segment breakdowns are the current search for a narrower edge |
@@ -587,8 +588,67 @@ holdout test, not a confirmed edge, before acting on it.
   rivalry week already validated. Because confidence doesn't touch
   `pickSide` either, the metric that can actually move is cover rate
   *filtered by confidence* (`getConfidenceReport`), not the overall rate —
-  `cfb-bigspread-sweep` was updated to report that. Not yet run against the
-  corrected version.
+  `cfb-bigspread-sweep` was updated to report that.
+
+  **Second attempt, also inconclusive.** The re-run sweep showed no clean
+  win: at the tightest, most-targeted confidence bucket (≤2), a mild
+  widening (`ref=60`) bumped cover rate from 51.1% to 53.4%, but on a small
+  sample (286 games, ~±6pp 95% CI, well overlapping the baseline) — and
+  cover rate got *worse*, not better, as the widening got more aggressive
+  (46.4% at `ref=10`), the opposite of the hypothesis. The broader buckets
+  (≤6, ≤4, ≤3) were flat across every value tested. **Root-cause diagnosis
+  (the model under-predicts real blowout magnitudes) still stands as a
+  real, mechanistically sound finding** — but neither fix tried for it
+  (blend-weight damping, confidence-widening) has shown clean empirical
+  support. `bigSpreadShrinkRef` stays at 25 (not reverted to the no-op
+  1000) since neither value clearly beat the other, but treat this as an
+  open problem, not a resolved one, until a real fix is found or this gets
+  properly walk-forward tested.
+
+## New scaffolds: key numbers, weather, public/sharp splits
+
+Three new investigation angles, in different states of readiness:
+
+- **Key numbers** (`getKeyNumberReport`, `src/backtest/report.ts`) — fully
+  built and ready to run, no new data needed (uses odds already ingested).
+  Buckets by *distance* from the nearest key number (3, 4, 6, 7, 10, 13,
+  14, 17, 20, 21 — where NFL/CFB final margins cluster), not exact-integer
+  match: an exact-match version was tried first and caught its own bug via
+  a synthetic test — books routinely shade lines to X.5 right next to a key
+  number specifically to avoid a push, and naive rounding sends -3.5 *away*
+  from 3, misclassifying the single most common real-world case. Included
+  in the `cfb-more-segments` job.
+- **Weather** — historical backfill added for both sports
+  (`src/ingest/weather/syncWeather.ts`'s `syncNflHistoricalWeather`,
+  `src/ingest/cfbd/syncHistoricalWeather.ts`). CFB joins via CFBD's own
+  `venue_id` per game (`/venues` has lat/lon + dome status) rather than a
+  team-to-home-stadium map, so it correctly handles neutral-site games —
+  the NFL version still uses a stadium map and doesn't. Both call
+  Open-Meteo's historical archive API (`archive-api.open-meteo.com`,
+  separate product/domain from the live forecast endpoint already used),
+  **UNVERIFIED** — this sandbox can't reach open-meteo.com to check a real
+  response, same posture as CFBD's other endpoints before they were
+  verified. Reports actual precipitation, not a probability (that's a
+  forecast-only concept — new `precipitation_actual` column, migration
+  0004). Run `weather-backfill` before `cfb-more-segments`'s wind/
+  precipitation breakdowns will show anything — the weather table starts
+  empty for historical games (the existing live sync only ever covered
+  upcoming games via a 16-day forecast window).
+- **Public vs. sharp betting data** — schema-only
+  (`public_betting_splits`, migration 0005). Researched but **no verified
+  free API found**: Action Network, ScoresAndOdds, SportsBettingDime, and
+  CLEATZ all display bet%/handle% splits on their own websites, not via a
+  documented free API. "SharpAPI" claims a free-tier NFL odds API but its
+  actual coverage of these specific fields is unverified. The table exists
+  so the shape is ready whenever a real source is confirmed — do not build
+  ingestion against any of the above without verifying their actual terms
+  and field coverage first.
+
+No new CLI scripts — trigger via the admin jobs below.
+
+New background jobs (`src/adminJobs.ts`): `weather-backfill` (both sports,
+2023-2025), `cfb-more-segments` (key number + wind + precipitation
+breakdowns against a fresh baseline backtest).
 
 ## Schema
 

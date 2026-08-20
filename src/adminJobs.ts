@@ -4,6 +4,8 @@ import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
+import { syncCfbdHistoricalWeather } from "./ingest/cfbd/syncHistoricalWeather.js";
+import { syncNflHistoricalWeather } from "./ingest/weather/syncWeather.js";
 import { runSweep, runExternalRatingsSweep, runSosSweep, runBigSpreadShrinkSweep } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -13,6 +15,9 @@ import {
   getWeekBucketReport,
   getHomeRoadBySpreadSizeReport,
   getHomeRoadByDeviationReport,
+  getKeyNumberReport,
+  getWeatherReport,
+  getPrecipitationReport,
 } from "./backtest/report.js";
 import { getRatingParams } from "./ratings/config.js";
 import type { Sport } from "./db/repo.js";
@@ -395,6 +400,58 @@ export function startCfbNoRivalryWeekJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Historical weather backfill for both sports (NFL via team-to-stadium map,
+ * CFB via CFBD's own venue_id per game — see ingest/weather/syncWeather.ts
+ * and ingest/cfbd/syncHistoricalWeather.ts docs). Both UNVERIFIED — check
+ * ingested temp/wind/precip values land in a plausible range before
+ * trusting the weather segment reports. Needed before cfb-weather-segments
+ * or an NFL equivalent will show anything (weather table starts empty for
+ * historical games — the live sync only ever covered upcoming games).
+ */
+export function startWeatherBackfillJob(): Promise<JobStatus> {
+  return runJob("weather-backfill", async (job) => {
+    log(job, "NFL: historical weather 2023-2025");
+    const nfl = await syncNflHistoricalWeather(2023, 2025);
+    log(job, `NFL: synced ${nfl.synced}, skipped ${nfl.skipped}`);
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `CFB ${year}: historical weather`);
+      const cfb = await syncCfbdHistoricalWeather(year);
+      log(job, `CFB ${year}: synced ${cfb.synced}, skipped ${cfb.skipped}`);
+    }
+  });
+}
+
+/**
+ * Key-number and weather/precipitation breakdowns against a fresh CFB
+ * backtest with today's validated defaults. Weather buckets will be empty
+ * (0 games) until weather-backfill has actually run — key numbers don't
+ * need any new data, they're computed from odds already ingested.
+ */
+export function startCfbMoreSegmentsJob(): Promise<JobStatus> {
+  return runJob("cfb-more-segments", async (job) => {
+    log(job, "running fresh CFB backtest 2023-2025 with validated defaults");
+    const summary = await runBacktest({ name: "cfb-more-segments-baseline", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
+    const runId = summary.backtestRunId;
+    log(job, `scored ${summary.scored}, skipped ${summary.skippedNoOdds}, run id ${runId}`);
+
+    log(job, "--- by key number ---");
+    for (const r of await getKeyNumberReport(runId)) {
+      log(job, `${r.keyNumberBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- by wind ---");
+    for (const r of await getWeatherReport(runId)) {
+      log(job, `${r.weatherBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+
+    log(job, "--- by precipitation ---");
+    for (const r of await getPrecipitationReport(runId)) {
+      log(job, `${r.weatherBucket}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)}`);
+    }
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -408,4 +465,6 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-sos-sweep": startCfbSosSweepJob,
   "cfb-bigspread-sweep": startCfbBigSpreadShrinkSweepJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
+  "weather-backfill": startWeatherBackfillJob,
+  "cfb-more-segments": startCfbMoreSegmentsJob,
 };

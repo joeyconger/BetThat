@@ -171,17 +171,20 @@ export interface UpsertWeatherInput {
   tempF: number | null;
   windMph: number | null;
   precipitationProbability: number | null;
+  /** Actual precipitation (not a probability) — only ever set by historical/archive weather, never the live forecast path. See migration 0004. */
+  precipitationActual?: number | null;
   isDome: boolean;
   source: string;
 }
 
 export async function upsertWeather(input: UpsertWeatherInput): Promise<void> {
   await pool.query(
-    `INSERT INTO weather (game_id, forecast_at, temp_f, wind_mph, precipitation_probability, is_dome, source)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+    `INSERT INTO weather (game_id, forecast_at, temp_f, wind_mph, precipitation_probability, precipitation_actual, is_dome, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (game_id)
      DO UPDATE SET forecast_at = EXCLUDED.forecast_at, temp_f = EXCLUDED.temp_f,
        wind_mph = EXCLUDED.wind_mph, precipitation_probability = EXCLUDED.precipitation_probability,
+       precipitation_actual = EXCLUDED.precipitation_actual,
        is_dome = EXCLUDED.is_dome, source = EXCLUDED.source`,
     [
       input.gameId,
@@ -189,10 +192,39 @@ export async function upsertWeather(input: UpsertWeatherInput): Promise<void> {
       input.tempF,
       input.windMph,
       input.precipitationProbability,
+      input.precipitationActual ?? null,
       input.isDome,
       input.source,
     ],
   );
+}
+
+export interface CompletedGameForWeather {
+  id: number;
+  gameDate: Date;
+  homeTeamSourceId: string;
+  /** This game's own CFBD/nflverse source_id — used to re-look-up CFBD venue data for CFB. */
+  sourceId: string;
+}
+
+/** Completed games needing a historical weather backfill — unlike getUpcomingGames, no date-range filter (any past completed game). */
+export async function getCompletedGamesForWeather(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+): Promise<CompletedGameForWeather[]> {
+  const result = await pool.query<{ id: number; game_date: Date; source_id: string; game_source_id: string }>(
+    `SELECT g.id, g.game_date, t.source_id, g.source_id AS game_source_id
+     FROM games g JOIN teams t ON t.id = g.home_team_id
+     WHERE g.sport = $1 AND g.season BETWEEN $2 AND $3 AND g.status = 'final' AND g.game_date IS NOT NULL`,
+    [sport, seasonStart, seasonEnd],
+  );
+  return result.rows.map((r) => ({
+    id: r.id,
+    gameDate: r.game_date,
+    homeTeamSourceId: r.source_id,
+    sourceId: r.game_source_id,
+  }));
 }
 
 export interface InsertInjuryInput {
@@ -747,4 +779,40 @@ export async function getPredictionsForWeek(sport: Sport, season: number, week: 
     marketSpreadHome: r.market_spread_home,
     confidence: r.confidence,
   }));
+}
+
+export interface InsertPublicBettingSplitInput {
+  gameId: number;
+  book: string;
+  capturedAt: string;
+  betPctHome: number | null;
+  betPctAway: number | null;
+  moneyPctHome: number | null;
+  moneyPctAway: number | null;
+  source: string;
+}
+
+/**
+ * Schema-ready, no real source wired up yet — see migration
+ * 0005_public_betting_splits.sql's doc for what was researched and why
+ * nothing was confirmed free/reliable enough to ingest from tonight.
+ */
+export async function insertPublicBettingSplit(input: InsertPublicBettingSplitInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO public_betting_splits (game_id, book, captured_at, bet_pct_home, bet_pct_away, money_pct_home, money_pct_away, source)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (game_id, book, captured_at)
+     DO UPDATE SET bet_pct_home = EXCLUDED.bet_pct_home, bet_pct_away = EXCLUDED.bet_pct_away,
+       money_pct_home = EXCLUDED.money_pct_home, money_pct_away = EXCLUDED.money_pct_away`,
+    [
+      input.gameId,
+      input.book,
+      input.capturedAt,
+      input.betPctHome,
+      input.betPctAway,
+      input.moneyPctHome,
+      input.moneyPctAway,
+      input.source,
+    ],
+  );
 }

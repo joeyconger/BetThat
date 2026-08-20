@@ -42,10 +42,31 @@ export interface CfbdGame {
   awayId: number;
   awayTeam: string;
   awayPoints: number | null;
+  venueId: number | null;
 }
 
 export function getGames(year: number, seasonType: "regular" | "postseason" = "regular"): Promise<CfbdGame[]> {
   return cfbdGet<CfbdGame[]>("/games", { year, seasonType, division: "fbs" });
+}
+
+export interface CfbdVenue {
+  id: number;
+  name: string;
+  latitude: number | null;
+  longitude: number | null;
+  dome: boolean | null;
+}
+
+/**
+ * Verified field names against CFBD's own Python client docs (id, name,
+ * latitude, longitude, dome) — not yet checked against a real live
+ * response from this sandbox (collegefootballdata.com is blocked here,
+ * same as CFBD's other endpoints). No team-linking field on Venue itself;
+ * join via CfbdGame.venueId instead, which correctly handles neutral-site
+ * games too (a team-to-home-stadium map, the approach used for NFL, can't).
+ */
+export function getVenues(): Promise<CfbdVenue[]> {
+  return cfbdGet<CfbdVenue[]>("/venues", {});
 }
 
 interface CfbdAdvancedSplit {

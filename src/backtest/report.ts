@@ -344,3 +344,101 @@ export async function getSportWeekReport(backtestRunId: number): Promise<SportWe
   );
   return rows.map((row) => ({ sport: row.sport, season: row.season, week: row.week, ...toAggregateStats(row) }));
 }
+
+export interface KeyNumberStats extends AggregateStats {
+  keyNumberBucket: string;
+}
+
+/**
+ * Points where NFL/CFB final margins cluster disproportionately (3 for a
+ * field goal, 7 for a touchdown, 6/10/14/17/20/21 for common combinations)
+ * — a real, well-known betting concept distinct from everything else
+ * tonight, since it's about the market's OWN number, not the model.
+ *
+ * Buckets by DISTANCE from the nearest key number, not exact-integer match
+ * after rounding — an exact-match version was tried first and caught its
+ * own bug via a synthetic test: books routinely shade lines to X.5 right
+ * next to a key number specifically to avoid a push (e.g. -3.5, not -3),
+ * and naive rounding sends -3.5 AWAY from 3 (rounds to 4) or -10.5 away
+ * from 10 (rounds to 11 under Postgres's round-half-away-from-zero), so
+ * exact-match bucketing was classifying the most common real-world case
+ * (a half-point shade off a key number) as "off-number" — the opposite of
+ * what the bucket name means.
+ */
+const KEY_NUMBERS = [3, 4, 6, 7, 10, 13, 14, 17, 20, 21];
+
+export async function getKeyNumberReport(backtestRunId: number): Promise<KeyNumberStats[]> {
+  const rows = await query<AggregateRow & { key_number_bucket: string }>(
+    `SELECT
+       CASE
+         WHEN min_dist = 0 THEN 'on a key number'
+         WHEN min_dist <= 0.5 THEN 'within 0.5 of a key number'
+         WHEN min_dist <= 1 THEN 'within 1 of a key number'
+         ELSE 'off-number'
+       END AS key_number_bucket,
+       ${AGGREGATE_SELECT}
+     FROM (
+       SELECT br.*, (SELECT min(abs(abs(br.closing_spread_home) - k)) FROM unnest($2::int[]) AS k) AS min_dist
+       FROM backtest_results br
+       WHERE br.backtest_run_id = $1
+     ) br
+     GROUP BY key_number_bucket
+     ORDER BY key_number_bucket`,
+    [backtestRunId, KEY_NUMBERS],
+  );
+  return rows.map((row) => ({ keyNumberBucket: row.key_number_bucket, ...toAggregateStats(row) }));
+}
+
+export interface WeatherStats extends AggregateStats {
+  weatherBucket: string;
+}
+
+/**
+ * Cover rate/CLV broken down by wind speed and precipitation, from the
+ * `weather` table (see ingest/weather and ingest/cfbd/syncHistoricalWeather
+ * — both UNVERIFIED, historical backfill only, not yet run against real
+ * data). Dome games are their own bucket (weather can't matter there).
+ * Games with no weather row at all are excluded, not bucketed as "calm" —
+ * see `weather IS NOT NULL` filters below.
+ */
+export async function getWeatherReport(backtestRunId: number): Promise<WeatherStats[]> {
+  const rows = await query<AggregateRow & { weather_bucket: string }>(
+    `SELECT
+       CASE
+         WHEN w.is_dome THEN 'dome'
+         WHEN w.wind_mph >= 20 THEN 'wind 20+'
+         WHEN w.wind_mph >= 15 THEN 'wind 15-20'
+         WHEN w.wind_mph >= 10 THEN 'wind 10-15'
+         ELSE 'wind <10'
+       END AS weather_bucket,
+       ${AGGREGATE_SELECT}
+     FROM backtest_results br
+     JOIN weather w ON w.game_id = br.game_id
+     WHERE br.backtest_run_id = $1 AND w.wind_mph IS NOT NULL
+     GROUP BY weather_bucket
+     ORDER BY weather_bucket`,
+    [backtestRunId],
+  );
+  return rows.map((row) => ({ weatherBucket: row.weather_bucket, ...toAggregateStats(row) }));
+}
+
+/** Same idea as getWeatherReport, but bucketed by precipitation instead of wind. Uses precipitation_actual (historical) — see migration 0004. */
+export async function getPrecipitationReport(backtestRunId: number): Promise<WeatherStats[]> {
+  const rows = await query<AggregateRow & { weather_bucket: string }>(
+    `SELECT
+       CASE
+         WHEN w.is_dome THEN 'dome'
+         WHEN w.precipitation_actual >= 0.1 THEN 'rain/snow (0.1in+)'
+         WHEN w.precipitation_actual > 0 THEN 'trace precipitation'
+         ELSE 'dry'
+       END AS weather_bucket,
+       ${AGGREGATE_SELECT}
+     FROM backtest_results br
+     JOIN weather w ON w.game_id = br.game_id
+     WHERE br.backtest_run_id = $1 AND w.precipitation_actual IS NOT NULL
+     GROUP BY weather_bucket
+     ORDER BY weather_bucket`,
+    [backtestRunId],
+  );
+  return rows.map((row) => ({ weatherBucket: row.weather_bucket, ...toAggregateStats(row) }));
+}
