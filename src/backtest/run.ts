@@ -21,6 +21,18 @@ export interface BacktestParams {
   seasonEnd: number;
   /** Overrides ratings/config.ts's defaults for this run — see backtest/sweep.ts. */
   paramsOverride?: RatingParams;
+  /**
+   * Skip weeks >= this number entirely (no prediction, no scoring) — e.g.
+   * excluding CFB's week 14+ (rivalry week / conference championships;
+   * this project has never ingested true postseason/bowl games, see
+   * README "Segment breakdowns"). Doesn't affect predictions for earlier,
+   * included weeks (those only ever look at prior weeks). Does mean the
+   * "final" rating stored for a season stops at the last included week,
+   * not the true end of season — a minor, consistent side effect of
+   * treating the excluded weeks as untrusted for carryover into the next
+   * season too, not just for betting on directly.
+   */
+  excludeFromWeek?: number;
 }
 
 export interface BacktestSummary {
@@ -67,6 +79,7 @@ export async function runBacktest(input: BacktestParams): Promise<BacktestSummar
   for (let season = input.seasonStart; season <= input.seasonEnd; season++) {
     const weeks = await getDistinctWeeks(input.sport, season);
     for (const week of weeks) {
+      if (input.excludeFromWeek !== undefined && week >= input.excludeFromWeek) continue;
       await generateBacktestPredictionsForWeek(input.sport, season, week, input.paramsOverride);
       const games = await getFinalGamesForWeek(input.sport, season, week);
 

@@ -296,6 +296,37 @@ export function startCfbSosSweepJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Re-runs the CFB baseline excluding week 14+ (rivalry week / conference
+ * championships — NOT real bowl games, this project has never ingested
+ * postseason data, see README "Segment breakdowns") and reports overall
+ * stats for direct comparison against run 152 (the all-weeks-included
+ * baseline: 49.9% cover vs. close, 52.8% vs. open, 2051 games w/ opening
+ * line, avgClv 0.62).
+ */
+export function startCfbNoRivalryWeekJob(): Promise<JobStatus> {
+  return runJob("cfb-no-rivalry-week", async (job) => {
+    log(job, "running CFB backtest 2023-2025, excluding week 14+");
+    const summary = await runBacktest({
+      name: "cfb-exclude-week14plus",
+      sport: "cfb",
+      seasonStart: 2023,
+      seasonEnd: 2025,
+      excludeFromWeek: 14,
+    });
+    const runId = summary.backtestRunId;
+    log(job, `scored ${summary.scored}, skipped ${summary.skippedNoOdds}, run id ${runId}`);
+    const overall = await getOverallReport(runId);
+    const openingCover = await getOpeningCoverRate(runId);
+    log(
+      job,
+      `excluding week 14+: cover vs close=${fmtPct(overall.coverRate)}, cover vs open=${fmtPct(openingCover.coverRateVsOpening)} ` +
+        `(${openingCover.games} games w/ opening line), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)}`,
+    );
+    log(job, "compare against run 152 (all weeks): cover vs close=49.9%, cover vs open=52.8% (2051 games), avgClv=0.62");
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -306,4 +337,5 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-walkforward": startCfbWalkforwardJob,
   "cfb-segments": startCfbSegmentsJob,
   "cfb-sos-sweep": startCfbSosSweepJob,
+  "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
 };
