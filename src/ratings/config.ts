@@ -41,6 +41,48 @@ export interface RatingParams {
   spPriorWeight: number;
   /** Points of predicted-margin adjustment per unit z-score gap in CFBD's weekly Elo (see ratings/elo.ts's predictSpread). CFB-only — 0 for NFL, which CFBD doesn't cover. */
   eloSignalPoints: number;
+  /**
+   * Points of predicted-margin adjustment per unit z-score gap in the prior
+   * season's CFBD SP+ (see ratings/elo.ts's predictSpread) — same mechanism
+   * as eloSignalPoints, deliberately NOT the same mechanism as
+   * spPriorWeight above. spPriorWeight blends SP+ into the one-time initial
+   * carryover rating, where a real sweep found it consistently HURT cover
+   * rate once weighted above ~0.3 (see spPriorWeight's history in
+   * CFB_PARAMS below); eloSignalPoints' additive-every-week treatment of a
+   * *different* external rating had "a genuine, fairly clean positive
+   * effect" in the same sweep. This applies that same additive treatment
+   * to SP+ instead, as a distinct hypothesis to test — not a replacement
+   * for spPriorWeight, a second lever alongside it. CFB-only. Defaults to
+   * 0 (no-op) — untested, needs a real sweep against production data
+   * before trusting any nonzero value.
+   */
+  spSignalPoints: number;
+  /**
+   * Weight (0-1) given to success-rate differential vs. EPA differential
+   * when computing a game's "how it went" performance signal in
+   * computeSeasonRatings — 0 uses pure EPA (today's behavior), 1 uses pure
+   * success rate. EPA/points-per-play is itself already closer to "the
+   * result" than a box score (see computeSeasonRatings' doc), but it's
+   * still dominated by a handful of explosive or garbage-time plays the
+   * same way raw scoring margin is. Success rate (did this play move the
+   * chains, regardless of how many yards it was worth) is the more
+   * execution-focused, lower-variance signal — this is the same reasoning
+   * SP+ itself uses to weight "efficiency" (success rate) and
+   * "explosiveness" (a PPP/EPA-like measure) as separate components rather
+   * than collapsing them into one number. Defaults to 0 (no-op, identical
+   * to today's EPA-only behavior) — untested, needs a real sweep.
+   */
+  successRateWeight: number;
+  /**
+   * Scales a success-rate differential (typically -0.2 to 0.2 in practice)
+   * into a point-margin equivalent, the same role pointsPerEpa plays for
+   * EPA. Unlike pointsPerEpa (calibrated via a real sweep), this is a
+   * first-guess placeholder — success rate differentials run roughly 3-5x
+   * smaller in magnitude than the EPA differentials pointsPerEpa was tuned
+   * against, so this starts at a proportionally larger multiplier, but it
+   * has not itself been swept. Only takes effect when successRateWeight > 0.
+   */
+  pointsPerSuccessRate: number;
   /** Widens `confidence` as |marketSpreadHome| grows — a big market spread is a signal the prediction is less trustworthy (see ratings/elo.ts's predictSpread), for a confidence-based filter to screen out, NOT a lever on modelWeight (a modelWeight-only version was tried and proven to be a no-op, see predictSpread's doc). Smaller = widens confidence faster at a given spread size. */
   bigSpreadShrinkRef: number;
 }
@@ -58,6 +100,9 @@ const NFL_PARAMS: RatingParams = {
   marketShrinkageK: 8,
   spPriorWeight: 0, // no SP+ for NFL
   eloSignalPoints: 0, // no CFBD Elo for NFL
+  spSignalPoints: 0, // no CFBD SP+ for NFL
+  successRateWeight: 0, // untested — see RatingParams doc; 0 = today's pure-EPA behavior
+  pointsPerSuccessRate: 90, // untested placeholder — see RatingParams doc
   bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
 };
 
@@ -76,6 +121,9 @@ const CFB_PARAMS: RatingParams = {
   pointsPerEpa: 20,
   spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
   eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
+  spSignalPoints: 0, // NOT swept yet — a distinct hypothesis from spPriorWeight above (see RatingParams doc); worth sweeping given eloSignalPoints' additive treatment worked where spPriorWeight's carryover-blend treatment of a similar external rating didn't
+  successRateWeight: 0, // NOT swept yet — see RatingParams doc
+  pointsPerSuccessRate: 90, // NOT swept yet — untested placeholder, only matters once successRateWeight > 0
   // Uncalibrated starting point — widens confidence for predictions
   // fighting an extreme market spread, since backtest data showed those
   // losing more often than not (real CFB mismatches routinely hit 30-50+

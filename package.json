@@ -26,6 +26,7 @@
     "backtest:sweep": "tsx src/backtest/sweepCli.ts",
     "server": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
     "build": "tsc"
   },
   "dependencies": {

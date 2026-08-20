@@ -198,6 +198,121 @@ export async function runSosSweep(
 }
 
 /**
+ * Sweeps spSignalPoints — the additive, every-week SP+ signal (see
+ * RatingParams.spSignalPoints' doc for why this is a DIFFERENT mechanism
+ * from spPriorWeight, which a real sweep already found actively hurt cover
+ * rate once weighted above ~0.3). eloSignalPoints' identical additive
+ * treatment of a similar external rating (CFBD's weekly Elo) had "a
+ * genuine, fairly clean positive effect" in that same sweep — this checks
+ * whether SP+ behaves the same way once given the same treatment, rather
+ * than assuming the spPriorWeight finding rules SP+ out entirely. Holds
+ * eloSignalPoints fixed at its own already-swept value so this isolates
+ * SP+'s effect specifically.
+ */
+const DEFAULT_SP_SIGNAL_POINTS = [0, 0.5, 1, 1.5, 2, 3];
+
+export interface SpSignalSweepResult {
+  spSignalPoints: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runSpSignalSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  spSignalPointsGrid: number[] = DEFAULT_SP_SIGNAL_POINTS,
+): Promise<SpSignalSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: SpSignalSweepResult[] = [];
+
+  for (const spSignalPoints of spSignalPointsGrid) {
+    const paramsOverride: RatingParams = { ...base, spSignalPoints };
+    const name = `sweep-spsignal-${sport}-sp${spSignalPoints}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      spSignalPoints,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `spSignalPoints=${spSignalPoints}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      } (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}
+
+/**
+ * Sweeps successRateWeight x pointsPerSuccessRate (see
+ * RatingParams.successRateWeight's doc) — the "how the game went vs. the
+ * result" hypothesis: success rate is a lower-variance, more
+ * execution-focused signal than EPA/points-per-play, which is itself
+ * closer to "the result" (still dominated by a handful of explosive or
+ * garbage-time plays). weight=0 is the current pure-EPA baseline, always
+ * included so the grid shows whether blending in success rate helps,
+ * hurts, or does nothing relative to today's behavior.
+ */
+const DEFAULT_SUCCESS_RATE_WEIGHT = [0, 0.25, 0.5, 0.75, 1];
+const DEFAULT_POINTS_PER_SUCCESS_RATE = [60, 90, 120];
+
+export interface SuccessRateSweepResult {
+  successRateWeight: number;
+  pointsPerSuccessRate: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runSuccessRateSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  successRateWeightGrid: number[] = DEFAULT_SUCCESS_RATE_WEIGHT,
+  pointsPerSuccessRateGrid: number[] = DEFAULT_POINTS_PER_SUCCESS_RATE,
+): Promise<SuccessRateSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: SuccessRateSweepResult[] = [];
+
+  for (const successRateWeight of successRateWeightGrid) {
+    // weight=0 makes pointsPerSuccessRate irrelevant (see elo.ts's blend) --
+    // don't waste full backtest re-runs on redundant combos.
+    const ppsrGrid = successRateWeight === 0 ? [pointsPerSuccessRateGrid[0]!] : pointsPerSuccessRateGrid;
+    for (const pointsPerSuccessRate of ppsrGrid) {
+      const paramsOverride: RatingParams = { ...base, successRateWeight, pointsPerSuccessRate };
+      const name = `sweep-successrate-${sport}-w${successRateWeight}-p${pointsPerSuccessRate}`;
+      const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+      const overall = await getOverallReport(backtestRunId);
+      results.push({
+        successRateWeight,
+        pointsPerSuccessRate,
+        runId: backtestRunId,
+        games: scored,
+        coverRate: overall.coverRate,
+        avgClv: overall.avgClv,
+      });
+      console.log(
+        `successRateWeight=${successRateWeight} pointsPerSuccessRate=${pointsPerSuccessRate}: ${scored} games, cover=${
+          overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+        } (run ${backtestRunId})`,
+      );
+    }
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see ratings/elo.ts's predictSpread doc) — a
  * CONFIDENCE-widening knob, not a modelWeight one (a modelWeight-based
  * version was tried first and proven mathematically incapable of changing

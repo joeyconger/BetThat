@@ -9,6 +9,18 @@ export interface GameForRating {
   homeDefEpa: number;
   awayOffEpa: number;
   awayDefEpa: number;
+  /**
+   * Success rate (0-1 scale) alongside EPA — only used when
+   * params.successRateWeight > 0 (see RatingParams doc), and only when all
+   * four are present for a given game; missing any one silently falls back
+   * to pure-EPA for that game rather than guessing, same as EPA itself
+   * being required for a game to be included at all (see
+   * getSeasonGamesForRating).
+   */
+  homeOffSuccess?: number | null;
+  homeDefSuccess?: number | null;
+  awayOffSuccess?: number | null;
+  awayDefSuccess?: number | null;
 }
 
 export interface TeamRatingState {
@@ -52,7 +64,29 @@ export function computeSeasonRatings(
     const predictedMargin = home.rating - away.rating + params.homeFieldAdvantage;
     const homeNetEpa = game.homeOffEpa - game.homeDefEpa;
     const awayNetEpa = game.awayOffEpa - game.awayDefEpa;
-    const actualMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
+    const epaMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
+
+    // Blends in success rate as a second "how the game went" signal,
+    // alongside EPA — see RatingParams.successRateWeight's doc for why.
+    // successRateWeight === 0 (today's default) skips this block entirely,
+    // so existing behavior is untouched bit-for-bit.
+    let actualMargin = epaMargin;
+    if (
+      params.successRateWeight > 0 &&
+      game.homeOffSuccess !== undefined &&
+      game.homeOffSuccess !== null &&
+      game.homeDefSuccess !== undefined &&
+      game.homeDefSuccess !== null &&
+      game.awayOffSuccess !== undefined &&
+      game.awayOffSuccess !== null &&
+      game.awayDefSuccess !== undefined &&
+      game.awayDefSuccess !== null
+    ) {
+      const homeNetSuccess = game.homeOffSuccess - game.homeDefSuccess;
+      const awayNetSuccess = game.awayOffSuccess - game.awayDefSuccess;
+      const successMargin = params.pointsPerSuccessRate * (homeNetSuccess - awayNetSuccess);
+      actualMargin = (1 - params.successRateWeight) * epaMargin + params.successRateWeight * successMargin;
+    }
     const error = actualMargin - predictedMargin;
 
     const homeSosMultiplier = Math.min(
@@ -134,6 +168,18 @@ export interface PredictionInput {
    */
   homeEloZ?: number;
   awayEloZ?: number;
+  /**
+   * z-scores of each team's prior-season CFBD SP+ (overall) against that
+   * prior season's full FBS distribution — see ratings/service.ts and
+   * RatingParams.spSignalPoints' doc for why this is a distinct lever from
+   * spPriorWeight, not the same one reused. Prior season only (SP+ has no
+   * in-season week granularity — see ingest/cfbd/client.ts's getSpRatings
+   * doc), so this is constant across a whole season for a given team,
+   * unlike homeEloZ/awayEloZ which update weekly. Undefined when no SP+
+   * data exists for that team (e.g. NFL, or a team's first FBS season).
+   */
+  homeSpZ?: number;
+  awaySpZ?: number;
 }
 
 export interface Prediction {
@@ -158,7 +204,8 @@ export interface Prediction {
  */
 export function predictSpread(input: PredictionInput, params: RatingParams): Prediction {
   const eloSignal = params.eloSignalPoints * ((input.homeEloZ ?? 0) - (input.awayEloZ ?? 0));
-  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal;
+  const spSignal = params.spSignalPoints * ((input.homeSpZ ?? 0) - (input.awaySpZ ?? 0));
+  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal + spSignal;
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;

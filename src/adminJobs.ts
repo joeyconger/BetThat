@@ -6,7 +6,14 @@ import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { syncCfbdHistoricalWeather } from "./ingest/cfbd/syncHistoricalWeather.js";
 import { syncNflHistoricalWeather } from "./ingest/weather/syncWeather.js";
-import { runSweep, runExternalRatingsSweep, runSosSweep, runBigSpreadShrinkSweep } from "./backtest/sweep.js";
+import {
+  runSweep,
+  runExternalRatingsSweep,
+  runSosSweep,
+  runBigSpreadShrinkSweep,
+  runSpSignalSweep,
+  runSuccessRateSweep,
+} from "./backtest/sweep.js";
 import {
   getOverallReport,
   getOpeningCoverRate,
@@ -350,6 +357,42 @@ export function startCfbSosSweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Sweeps spSignalPoints (see backtest/sweep.ts's runSpSignalSweep doc) —
+ * the additive, every-week SP+ signal, a deliberately different mechanism
+ * from spPriorWeight (which a real sweep already found hurt cover rate
+ * once weighted above ~0.3 as a one-time carryover blend). Requires
+ * cfb-external-ratings to have run first (needs external_ratings SP+ data
+ * present for the prior season).
+ */
+export function startCfbSpSignalSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-spsignal-sweep", async (job) => {
+    log(job, "sweeping cfb spSignalPoints, 2023-2025");
+    const results = await runSpSignalSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `spSignalPoints=${r.spSignalPoints}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
+ * Sweeps successRateWeight x pointsPerSuccessRate (see backtest/sweep.ts's
+ * runSuccessRateSweep doc) — the "how the game went vs. the result"
+ * hypothesis: blending success rate (lower-variance, execution-focused)
+ * alongside EPA (closer to the result, dominated by a few explosive or
+ * garbage-time plays) into the rating engine's per-game performance
+ * signal. weight=0 in the grid is the current pure-EPA baseline.
+ */
+export function startCfbSuccessRateSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-successrate-sweep", async (job) => {
+    log(job, "sweeping cfb successRateWeight x pointsPerSuccessRate, 2023-2025");
+    const results = await runSuccessRateSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `successRateWeight=${r.successRateWeight} pointsPerSuccessRate=${r.pointsPerSuccessRate}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -464,6 +507,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-segments": startCfbSegmentsJob,
   "cfb-sos-sweep": startCfbSosSweepJob,
   "cfb-bigspread-sweep": startCfbBigSpreadShrinkSweepJob,
+  "cfb-spsignal-sweep": startCfbSpSignalSweepJob,
+  "cfb-successrate-sweep": startCfbSuccessRateSweepJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,

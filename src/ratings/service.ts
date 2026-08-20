@@ -3,6 +3,7 @@ import {
   getPriorSeasonFinalRating,
   getPriorSeasonSpRating,
   getCfbdEloDistributionForWeek,
+  getCfbdSpDistributionForSeason,
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
@@ -17,6 +18,8 @@ const METHOD = "elo" as const;
 
 /** Below this many rated teams, a week's CFBD Elo z-score isn't a meaningful population to compare against — skip the signal rather than compute a noisy one. */
 const MIN_ELO_SAMPLE = 20;
+/** Same reasoning as MIN_ELO_SAMPLE, for the prior season's SP+ distribution. */
+const MIN_SP_SAMPLE = 20;
 
 /**
  * Computes each team's rating as of the end of `throughWeek` and persists
@@ -84,6 +87,14 @@ async function predictAndStoreWeek(
   const eloValues = [...eloDistribution.values()];
   const hasEloSample = eloValues.length >= MIN_ELO_SAMPLE;
 
+  // SP+ has no week granularity, so this is the PRIOR season's full
+  // distribution, not "as of last week" — see getCfbdSpDistributionForSeason's
+  // doc. Constant across every week of `season` for a given team.
+  const spDistribution =
+    sport === "cfb" ? await getCfbdSpDistributionForSeason(sport, season - 1) : new Map<number, number>();
+  const spValues = [...spDistribution.values()];
+  const hasSpSample = spValues.length >= MIN_SP_SAMPLE;
+
   let predicted = 0;
 
   for (const game of games) {
@@ -96,6 +107,11 @@ async function predictAndStoreWeek(
     const homeEloZ = hasEloSample && homeElo !== undefined ? zScore(homeElo, eloValues) : undefined;
     const awayEloZ = hasEloSample && awayElo !== undefined ? zScore(awayElo, eloValues) : undefined;
 
+    const homeSp = spDistribution.get(game.homeTeamId);
+    const awaySp = spDistribution.get(game.awayTeamId);
+    const homeSpZ = hasSpSample && homeSp !== undefined ? zScore(homeSp, spValues) : undefined;
+    const awaySpZ = hasSpSample && awaySp !== undefined ? zScore(awaySp, spValues) : undefined;
+
     const prediction = predictSpread(
       {
         homeRating: home.rating,
@@ -105,6 +121,8 @@ async function predictAndStoreWeek(
         marketSpreadHome,
         homeEloZ,
         awayEloZ,
+        homeSpZ,
+        awaySpZ,
       },
       params,
     );

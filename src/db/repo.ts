@@ -374,6 +374,11 @@ export interface GameForRating {
   homeDefEpa: number;
   awayOffEpa: number;
   awayDefEpa: number;
+  /** Success rate alongside EPA — see ratings/elo.ts's GameForRating doc. Nullable: not required for a game to be included (only EPA is), so ratings/elo.ts's successRateWeight blend falls back to pure EPA when any of these four is missing. */
+  homeOffSuccess: number | null;
+  homeDefSuccess: number | null;
+  awayOffSuccess: number | null;
+  awayDefSuccess: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -391,10 +396,16 @@ export async function getSeasonGamesForRating(
     home_def_epa: number;
     away_off_epa: number;
     away_def_epa: number;
+    home_off_success: number | null;
+    home_def_success: number | null;
+    away_off_success: number | null;
+    away_def_success: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
-            away_stats.off_epa_play AS away_off_epa, away_stats.def_epa_play AS away_def_epa
+            away_stats.off_epa_play AS away_off_epa, away_stats.def_epa_play AS away_def_epa,
+            home_stats.off_success_rate AS home_off_success, home_stats.def_success_rate AS home_def_success,
+            away_stats.off_success_rate AS away_off_success, away_stats.def_success_rate AS away_def_success
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -413,6 +424,10 @@ export async function getSeasonGamesForRating(
     homeDefEpa: r.home_def_epa,
     awayOffEpa: r.away_off_epa,
     awayDefEpa: r.away_def_epa,
+    homeOffSuccess: r.home_off_success,
+    homeDefSuccess: r.home_def_success,
+    awayOffSuccess: r.away_off_success,
+    awayDefSuccess: r.away_def_success,
   }));
 }
 
@@ -468,6 +483,26 @@ export async function getPriorSeasonSpRating(teamId: number, priorSeason: number
     [teamId, priorSeason],
   );
   return result.rows[0]?.rating;
+}
+
+/**
+ * Every team's CFBD SP+ (overall) for a given season — the population a
+ * single team's z-score is computed against for RatingParams.spSignalPoints
+ * (see ratings/elo.ts's predictSpread doc). SP+ has no week granularity
+ * (see ingest/cfbd/client.ts's getSpRatings doc), so unlike
+ * getCfbdEloDistributionForWeek this is one distribution per season, not
+ * per week — callers pass the PRIOR season (the only "safe use" this
+ * project has found for SP+, see getPriorSeasonSpRating's doc).
+ */
+export async function getCfbdSpDistributionForSeason(sport: Sport, season: number): Promise<Map<number, number>> {
+  const result = await pool.query<{ team_id: number; rating: number }>(
+    `SELECT er.team_id, er.rating
+     FROM external_ratings er
+     JOIN teams t ON t.id = er.team_id
+     WHERE t.sport = $1 AND er.season = $2 AND er.week IS NULL AND er.source = 'cfbd_sp'`,
+    [sport, season],
+  );
+  return new Map(result.rows.map((r) => [r.team_id, r.rating]));
 }
 
 /** Every team's CFBD Elo as of a given week — the population a single team's z-score is computed against. */
@@ -727,20 +762,109 @@ export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
 }
 
 export interface TeamRatingRow {
+  teamId: number;
   teamName: string;
   rating: number;
   ratingError: number | null;
 }
 
 export async function getTeamRatingsForWeek(sport: Sport, season: number, throughWeek: number): Promise<TeamRatingRow[]> {
-  const result = await pool.query<{ name: string; rating: number; rating_error: number | null }>(
-    `SELECT t.name, tr.rating, tr.rating_error
+  const result = await pool.query<{ team_id: number; name: string; rating: number; rating_error: number | null }>(
+    `SELECT t.id AS team_id, t.name, tr.rating, tr.rating_error
      FROM team_ratings tr JOIN teams t ON t.id = tr.team_id
      WHERE tr.sport = $1 AND tr.season = $2 AND tr.through_week = $3 AND tr.method = 'elo'
      ORDER BY tr.rating DESC`,
     [sport, season, throughWeek],
   );
-  return result.rows.map((r) => ({ teamName: r.name, rating: r.rating, ratingError: r.rating_error }));
+  return result.rows.map((r) => ({ teamId: r.team_id, teamName: r.name, rating: r.rating, ratingError: r.rating_error }));
+}
+
+export interface TeamInfo {
+  id: number;
+  name: string;
+  sport: Sport;
+  conference: string | null;
+}
+
+export async function getTeamById(teamId: number): Promise<TeamInfo | undefined> {
+  const result = await pool.query<{ id: number; name: string; sport: Sport; conference: string | null }>(
+    `SELECT id, name, sport, conference FROM teams WHERE id = $1`,
+    [teamId],
+  );
+  return result.rows[0];
+}
+
+export interface RatingHistoryPoint {
+  season: number;
+  throughWeek: number;
+  rating: number;
+}
+
+/** A team's full rating trajectory across every season/week checkpoint it's been rated at, oldest first. */
+export async function getRatingHistoryForTeam(teamId: number, sport: Sport): Promise<RatingHistoryPoint[]> {
+  const result = await pool.query<{ season: number; through_week: number; rating: number }>(
+    `SELECT season, through_week, rating FROM team_ratings
+     WHERE team_id = $1 AND sport = $2 AND method = 'elo'
+     ORDER BY season ASC, through_week ASC`,
+    [teamId, sport],
+  );
+  return result.rows.map((r) => ({ season: r.season, throughWeek: r.through_week, rating: r.rating }));
+}
+
+export interface GameHistoryRow {
+  gameId: number;
+  week: number;
+  gameDate: Date | null;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  status: string;
+  openingSpreadHome: number | null;
+  closingSpreadHome: number | null;
+}
+
+/** Every game in a sport/season (any week, any status) with team names and opening/closing lines -- the raw historical-data browser behind /games. */
+export async function getGameHistoryForSeason(sport: Sport, season: number): Promise<GameHistoryRow[]> {
+  const result = await pool.query<{
+    game_id: number;
+    week: number;
+    game_date: Date | null;
+    home: string;
+    away: string;
+    home_score: number | null;
+    away_score: number | null;
+    status: string;
+    opening_spread_home: number | null;
+    closing_spread_home: number | null;
+  }>(
+    `SELECT g.id AS game_id, g.week, g.game_date, ht.name AS home, at.name AS away,
+            g.home_score, g.away_score, g.status,
+            (SELECT os.spread_home FROM odds_snapshots os
+             WHERE os.game_id = g.id AND os.snapshot_type = 'opening' AND os.spread_home IS NOT NULL
+             ORDER BY os.captured_at ASC LIMIT 1) AS opening_spread_home,
+            (SELECT os.spread_home FROM odds_snapshots os
+             WHERE os.game_id = g.id AND os.snapshot_type = 'closing' AND os.spread_home IS NOT NULL
+             ORDER BY os.captured_at DESC LIMIT 1) AS closing_spread_home
+     FROM games g
+     JOIN teams ht ON ht.id = g.home_team_id
+     JOIN teams at ON at.id = g.away_team_id
+     WHERE g.sport = $1 AND g.season = $2
+     ORDER BY g.week ASC, g.game_date ASC NULLS LAST, g.id ASC`,
+    [sport, season],
+  );
+  return result.rows.map((r) => ({
+    gameId: r.game_id,
+    week: r.week,
+    gameDate: r.game_date,
+    homeTeam: r.home,
+    awayTeam: r.away,
+    homeScore: r.home_score,
+    awayScore: r.away_score,
+    status: r.status,
+    openingSpreadHome: r.opening_spread_home,
+    closingSpreadHome: r.closing_spread_home,
+  }));
 }
 
 export interface PredictionRow {
