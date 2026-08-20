@@ -62,6 +62,17 @@ export interface TeamRatingState {
  * close to their preseason prior) — a reasonable v1 scope, and one Phase 3
  * can compare against a multi-pass version if the single pass underperforms.
  */
+/** Running per-team success-rate context (achieved on offense, allowed on defense) — the opponentAdjustWeight input. Season-to-date only, updated after each game so a team's own upcoming game is never included in its opponents' context. */
+interface SuccessRateContext {
+  offSum: number;
+  offN: number;
+  defSum: number;
+  defN: number;
+}
+
+/** A team's own success-rate sample needs at least this many games before its season-to-date average is trusted as an opponent-quality signal — below it, opponentAdjustWeight has no effect for games against that team (falls back to raw, unadjusted success rate), same as the whole codebase's "degrade to the broader signal rather than guess off a tiny sample" rule. */
+const MIN_SUCCESS_CONTEXT_GAMES = 3;
+
 export function computeSeasonRatings(
   games: GameForRating[],
   initialRatings: Map<number, number>,
@@ -70,6 +81,22 @@ export function computeSeasonRatings(
   const state = new Map<number, TeamRatingState>();
   for (const [teamId, rating] of initialRatings) {
     state.set(teamId, { rating, gamesPlayed: 0 });
+  }
+
+  const successCtx = new Map<number, SuccessRateContext>();
+  let leagueSuccessSum = 0;
+  let leagueSuccessN = 0;
+  function getSuccessCtx(teamId: number): SuccessRateContext {
+    return successCtx.get(teamId) ?? { offSum: 0, offN: 0, defSum: 0, defN: 0 };
+  }
+  /** Opponent-adjusts a raw success rate against the opponent's season-to-date tendency on the OTHER side of the ball — a defense's raw allowed-rate for offense adjustment, an offense's raw generated-rate for defense adjustment. Both directions use the identical "add (league avg - opponent's avg)" shape; see RatingParams.opponentAdjustWeight's doc for why the sign is the same for both. Returns the raw value unadjusted if the opponent doesn't have enough of a sample yet. */
+  function opponentAdjust(raw: number, opponentCtxSum: number, opponentCtxN: number): number {
+    if (params.opponentAdjustWeight === 0 || opponentCtxN < MIN_SUCCESS_CONTEXT_GAMES || leagueSuccessN === 0) {
+      return raw;
+    }
+    const leagueAvg = leagueSuccessSum / leagueSuccessN;
+    const opponentAvg = opponentCtxSum / opponentCtxN;
+    return raw + params.opponentAdjustWeight * (leagueAvg - opponentAvg);
   }
 
   const sorted = [...games].sort((a, b) => a.week - b.week || a.gameId - b.gameId);
@@ -99,13 +126,9 @@ export function computeSeasonRatings(
     const awayNetEpa = awayOffEpa - awayDefEpa;
     const epaMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
 
-    // Blends in success rate as a second "how the game went" signal,
-    // alongside EPA — see RatingParams.successRateWeight's doc for why.
-    // successRateWeight === 0 (today's default) skips this block entirely,
-    // so existing behavior is untouched bit-for-bit.
-    let actualMargin = epaMargin;
-    if (
-      params.successRateWeight > 0 &&
+    const homeCtx = getSuccessCtx(game.homeTeamId);
+    const awayCtx = getSuccessCtx(game.awayTeamId);
+    const haveAllFourSuccess =
       homeOffSuccess !== undefined &&
       homeOffSuccess !== null &&
       homeDefSuccess !== undefined &&
@@ -113,14 +136,53 @@ export function computeSeasonRatings(
       awayOffSuccess !== undefined &&
       awayOffSuccess !== null &&
       awayDefSuccess !== undefined &&
-      awayDefSuccess !== null
-    ) {
-      const homeNetSuccess = homeOffSuccess - homeDefSuccess;
-      const awayNetSuccess = awayOffSuccess - awayDefSuccess;
+      awayDefSuccess !== null;
+
+    // Opponent-adjusts success rate against the opponent's season-to-date
+    // tendency on the other side of the ball, BEFORE it feeds the
+    // successRateWeight blend below — see RatingParams.opponentAdjustWeight's
+    // doc. opponentAdjustWeight === 0 (today's default) makes opponentAdjust
+    // a no-op passthrough, so this is bit-for-bit the pre-existing behavior
+    // until swept on.
+    const adjHomeOffSuccess = haveAllFourSuccess ? opponentAdjust(homeOffSuccess!, awayCtx.defSum, awayCtx.defN) : homeOffSuccess;
+    const adjAwayOffSuccess = haveAllFourSuccess ? opponentAdjust(awayOffSuccess!, homeCtx.defSum, homeCtx.defN) : awayOffSuccess;
+    const adjHomeDefSuccess = haveAllFourSuccess ? opponentAdjust(homeDefSuccess!, awayCtx.offSum, awayCtx.offN) : homeDefSuccess;
+    const adjAwayDefSuccess = haveAllFourSuccess ? opponentAdjust(awayDefSuccess!, homeCtx.offSum, homeCtx.offN) : awayDefSuccess;
+
+    // Blends in success rate as a second "how the game went" signal,
+    // alongside EPA — see RatingParams.successRateWeight's doc for why.
+    // successRateWeight === 0 (today's default) skips this block entirely,
+    // so existing behavior is untouched bit-for-bit.
+    let actualMargin = epaMargin;
+    if (params.successRateWeight > 0 && haveAllFourSuccess) {
+      const homeNetSuccess = adjHomeOffSuccess! - adjHomeDefSuccess!;
+      const awayNetSuccess = adjAwayOffSuccess! - adjAwayDefSuccess!;
       const successMargin = params.pointsPerSuccessRate * (homeNetSuccess - awayNetSuccess);
       actualMargin = (1 - params.successRateWeight) * epaMargin + params.successRateWeight * successMargin;
     }
     const error = actualMargin - predictedMargin;
+
+    // Update each team's success-rate context with this game's RAW (not
+    // opponent-adjusted) achieved/allowed rates, so a team's own context is
+    // always measured on the same unadjusted basis regardless of who they
+    // played -- adjusting it recursively against ITS OWN opponents would
+    // make the whole system's reference frame drift game to game.
+    if (haveAllFourSuccess) {
+      successCtx.set(game.homeTeamId, {
+        offSum: homeCtx.offSum + homeOffSuccess!,
+        offN: homeCtx.offN + 1,
+        defSum: homeCtx.defSum + homeDefSuccess!,
+        defN: homeCtx.defN + 1,
+      });
+      successCtx.set(game.awayTeamId, {
+        offSum: awayCtx.offSum + awayOffSuccess!,
+        offN: awayCtx.offN + 1,
+        defSum: awayCtx.defSum + awayDefSuccess!,
+        defN: awayCtx.defN + 1,
+      });
+      leagueSuccessSum += homeOffSuccess! + homeDefSuccess! + awayOffSuccess! + awayDefSuccess!;
+      leagueSuccessN += 4;
+    }
 
     const homeSosMultiplier = Math.min(
       params.maxSosMultiplier,

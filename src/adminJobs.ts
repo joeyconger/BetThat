@@ -14,6 +14,7 @@ import {
   runSpSignalSweep,
   runSuccessRateSweep,
   runGarbageTimeSweep,
+  runOpponentAdjustSweep,
 } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -515,6 +516,59 @@ export function startCfbGarbageTimeWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Sweeps opponentAdjustWeight -- opponent-adjusted success rate (see
+ * backtest/sweep.ts's runOpponentAdjustSweep and RatingParams doc). No
+ * ingestion job needed first: unlike excludeGarbageTime, this only
+ * reinterprets success rate already ingested for every 2023-2025 game.
+ */
+export function startCfbOpponentAdjustSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-oppadjust-sweep", async (job) => {
+    log(job, "sweeping cfb opponentAdjustWeight, 2023-2025");
+    const results = await runOpponentAdjustSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `opponentAdjustWeight=${r.opponentAdjustWeight}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
+ * Walk-forward validation for opponentAdjustWeight, same discipline as
+ * every other rating-param change tonight: train (sweep) on 2023-2024
+ * only, then score the winning weight on the untouched 2025 season.
+ */
+export function startCfbOpponentAdjustWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-oppadjust-walkforward", async (job) => {
+    log(job, "training: sweeping opponentAdjustWeight on 2023-2024 only");
+    const trainResults = await runOpponentAdjustSweep("cfb", 2023, 2024);
+    for (const r of trainResults) {
+      log(job, `train: opponentAdjustWeight=${r.opponentAdjustWeight}: cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+    const best = trainResults[0]!; // runOpponentAdjustSweep sorts desc by coverRate
+    log(job, `best training weight: opponentAdjustWeight=${best.opponentAdjustWeight} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected weight");
+    const base = getRatingParams("cfb");
+    const paramsOverride = { ...base, opponentAdjustWeight: best.opponentAdjustWeight };
+    const holdout = await runBacktest({
+      name: "cfb-oppadjust-walkforward-holdout-2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025: ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+    log(job, "compare against cfb-successrate-walkforward's holdout for the equivalent number without this adjustment: cover vs close=48.7%, cover vs open=50.7%, avgClv=0.87.");
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -635,6 +689,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbage-time-ingest": startCfbGarbageTimeIngestJob,
   "cfb-garbagetime-sweep": startCfbGarbageTimeSweepJob,
   "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
+  "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
+  "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,

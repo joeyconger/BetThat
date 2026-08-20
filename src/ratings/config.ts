@@ -100,6 +100,24 @@ export interface RatingParams {
    * sweep once the no-garbage columns are actually ingested for a season.
    */
   excludeGarbageTime: boolean;
+  /**
+   * Opponent-adjusts each side's success rate against the opponent's
+   * season-to-date tendency on the other side of the ball, before it feeds
+   * the successRateWeight blend — succeeding against a defense that
+   * normally suppresses success rate should count for more than the same
+   * raw number against a defense that allows it to everyone (and
+   * symmetrically for what a defense allows, against how good the
+   * opponent's offense generally is). 0 = today's behavior (raw success
+   * rate, no opponent adjustment) — a team's own rating already gets an
+   * analogous adjustment via sosWeight, but that only scales the UPDATE
+   * size, not the raw input number itself; this is the input-level
+   * counterpart, for success rate specifically (not EPA — see
+   * ratings/elo.ts's computeSeasonRatings doc). Only takes effect once a
+   * team has at least MIN_SUCCESS_CONTEXT_GAMES of its own season-to-date
+   * sample; before that, falls back to unadjusted raw success rate for
+   * games against that team. Untested — needs a real sweep.
+   */
+  opponentAdjustWeight: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -120,6 +138,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerSuccessRate: 90, // untested placeholder — see RatingParams doc
   bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
   excludeGarbageTime: false, // untested — no-garbage columns not ingested for NFL yet (nflverse-based, not CFBD)
+  opponentAdjustWeight: 0, // untested — no-op until swept
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -181,6 +200,10 @@ const CFB_PARAMS: RatingParams = {
   // sweep + walk-forward validation before this is worth trusting, same
   // process successRateWeight just went through.
   excludeGarbageTime: false,
+  // Inherited 0 from NFL_PARAMS — no-op until swept. Success-rate data
+  // already exists for every 2023-2025 CFB game (no new ingestion needed,
+  // unlike excludeGarbageTime), so this can be swept immediately.
+  opponentAdjustWeight: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

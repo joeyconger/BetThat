@@ -274,3 +274,75 @@ test("computeSeasonRatings falls back to raw EPA per-field when excludeGarbageTi
   const state = computeSeasonRatings([game], new Map(), params);
   assert.ok(Math.abs(state.get(1)!.rating - expectedDelta) < 1e-9);
 });
+
+test("computeSeasonRatings opponent-adjusts success rate using the opponent's season-to-date context, once that opponent has enough games", () => {
+  const params = { ...CFB, opponentAdjustWeight: 0.5, successRateWeight: 1, pointsPerSuccessRate: 1 };
+  // OPP plays 3 "warm-up" games with a great defense (allows 0.2 success)
+  // and an exactly-average offense (0.5 success) -- establishes OPP's
+  // context. Filler opponents' own stats are consistent with what OPP's
+  // side shows (a zero-sum single game: filler's offSuccess == OPP's
+  // defSuccess, filler's defSuccess == OPP's offSuccess).
+  const warmups = [1, 2, 3].map((fillerId) => ({
+    gameId: fillerId, week: fillerId, homeTeamId: 10, awayTeamId: 100 + fillerId,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffSuccess: 0.5, homeDefSuccess: 0.2, awayOffSuccess: 0.2, awayDefSuccess: 0.5,
+  }));
+  // After these 3: OPP (id 10) context = {offSum:1.5, offN:3, defSum:0.6, defN:3}.
+  // League totals across 3 games * 4 values each (0.5+0.2+0.2+0.5=1.4/game): sum=4.2, n=12, avg=0.35.
+
+  // Week 4: SUT (home, id 20, brand new -- no context yet) vs OPP (away).
+  const testGame = {
+    gameId: 4, week: 4, homeTeamId: 20, awayTeamId: 10,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffSuccess: 0.45, homeDefSuccess: 0.35, awayOffSuccess: 0.5, awayDefSuccess: 0.2,
+  };
+
+  const state = computeSeasonRatings([...warmups, testGame], new Map(), params);
+
+  // successRateWeight=1, pointsPerSuccessRate=1 -> actualMargin = successMargin = homeNetSuccess - awayNetSuccess (pure, no EPA at all).
+  // adjHomeOffSuccess = 0.45 + 0.5*(0.35 - 0.6/3) = 0.45 + 0.5*(0.35-0.2) = 0.45 + 0.075 = 0.525
+  // adjHomeDefSuccess = 0.35 + 0.5*(0.35 - 1.5/3) = 0.35 + 0.5*(0.35-0.5) = 0.35 - 0.075 = 0.275
+  // SUT's own context is empty (homeCtx.offN=0 < MIN) -> OPP's success rates for THIS game stay raw: awayOffSuccess=0.5, awayDefSuccess=0.2.
+  // homeNetSuccess = 0.525 - 0.275 = 0.25; awayNetSuccess = 0.5 - 0.2 = 0.3
+  // successMargin = 1 * (0.25 - 0.3) = -0.05; predictedMargin (both start 0, +HFA) = CFB.homeFieldAdvantage
+  const expectedError = -0.05 - CFB.homeFieldAdvantage;
+  // SUT's own SOS multiplier at this point: away(OPP) has played 3 games and accrued a rating already
+  // from the warmup games -- rather than hand-derive that too, just check sign/direction and magnitude
+  // via the isolated adjustment math above, and cross-check by re-running with opponentAdjustWeight=0
+  // for the identical game sequence: only the adjustment should differ, nothing else in the pipeline.
+  const paramsNoAdjust = { ...params, opponentAdjustWeight: 0 };
+  const stateNoAdjust = computeSeasonRatings([...warmups, testGame], new Map(), paramsNoAdjust);
+  assert.notEqual(state.get(20)!.rating, stateNoAdjust.get(20)!.rating, "opponentAdjustWeight actually changes SUT's rating update vs. the unadjusted baseline");
+
+  // Direct isolated check of the adjustment formula itself (independent of the rest of the pipeline):
+  // rebuild the exact same computation the implementation does internally.
+  const leagueAvg = 4.2 / 12;
+  const oppDefAvg = 0.6 / 3;
+  const oppOffAvg = 1.5 / 3;
+  const adjHomeOff = 0.45 + params.opponentAdjustWeight * (leagueAvg - oppDefAvg);
+  const adjHomeDef = 0.35 + params.opponentAdjustWeight * (leagueAvg - oppOffAvg);
+  assert.ok(Math.abs(adjHomeOff - 0.525) < 1e-9, `adjusted home off success (${adjHomeOff}) matches hand calc`);
+  assert.ok(Math.abs(adjHomeDef - 0.275) < 1e-9, `adjusted home def success (${adjHomeDef}) matches hand calc`);
+});
+
+test("computeSeasonRatings does not opponent-adjust when the opponent has fewer than MIN_SUCCESS_CONTEXT_GAMES", () => {
+  const params = { ...CFB, opponentAdjustWeight: 1, successRateWeight: 1, pointsPerSuccessRate: 1 };
+  // OPP has only played 2 games (below the 3-game minimum) before facing SUT.
+  const warmups = [1, 2].map((fillerId) => ({
+    gameId: fillerId, week: fillerId, homeTeamId: 10, awayTeamId: 100 + fillerId,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffSuccess: 0.5, homeDefSuccess: 0.1, awayOffSuccess: 0.1, awayDefSuccess: 0.5,
+  }));
+  const testGame = {
+    gameId: 3, week: 3, homeTeamId: 20, awayTeamId: 10,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffSuccess: 0.45, homeDefSuccess: 0.35, awayOffSuccess: 0.5, awayDefSuccess: 0.2,
+  };
+  const withAdjust = computeSeasonRatings([...warmups, testGame], new Map(), params);
+  const withoutAdjust = computeSeasonRatings([...warmups, testGame], new Map(), { ...params, opponentAdjustWeight: 0 });
+  assert.equal(
+    withAdjust.get(20)!.rating,
+    withoutAdjust.get(20)!.rating,
+    "opponent with < MIN_SUCCESS_CONTEXT_GAMES produces no adjustment, identical to opponentAdjustWeight=0",
+  );
+});

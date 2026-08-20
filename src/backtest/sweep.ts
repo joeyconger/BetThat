@@ -418,3 +418,53 @@ export async function runGarbageTimeSweep(
 
   return results;
 }
+
+/**
+ * Sweeps opponentAdjustWeight -- opponent-adjusted success rate, on top of
+ * today's CFB defaults (which already include successRateWeight=0.75/
+ * pointsPerSuccessRate=120). No new ingestion needed: success rate is
+ * already in team_game_stats for every 2023-2025 game, this only changes
+ * how it's interpreted (see RatingParams.opponentAdjustWeight's doc).
+ * Includes 0 as the true no-adjustment baseline for direct comparison.
+ */
+const DEFAULT_OPPONENT_ADJUST_WEIGHT = [0, 0.25, 0.5, 0.75, 1, 1.5, 2];
+
+export interface OpponentAdjustSweepResult {
+  opponentAdjustWeight: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runOpponentAdjustSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  weightGrid: number[] = DEFAULT_OPPONENT_ADJUST_WEIGHT,
+): Promise<OpponentAdjustSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: OpponentAdjustSweepResult[] = [];
+
+  for (const opponentAdjustWeight of weightGrid) {
+    const paramsOverride: RatingParams = { ...base, opponentAdjustWeight };
+    const name = `sweep-oppadjust-${sport}-w${opponentAdjustWeight}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      opponentAdjustWeight,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `opponentAdjustWeight=${opponentAdjustWeight}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}
