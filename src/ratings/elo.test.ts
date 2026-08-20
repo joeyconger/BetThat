@@ -387,3 +387,66 @@ test("pointsPerRestDay=0 (today's default) makes restDaysDiff a complete no-op, 
   );
   assert.equal(withRest.eloSpreadHome, withoutRest.eloSpreadHome);
 });
+
+test("turnoverLuckWeight=0 (today's default) makes turnover-stats fields a complete no-op, even when present", () => {
+  const gameBase = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.3, homeDefEpa: 0.1, awayOffEpa: 0.05, awayDefEpa: 0.2,
+  };
+  const gameWithTurnovers = {
+    ...gameBase,
+    homeOffPlays: 20, homeDefPlays: 15, awayOffPlays: 18, awayDefPlays: 22,
+    homeOffTurnoverPpaSum: -4, homeOffTurnoverPlays: 2,
+    homeDefTurnoverPpaSum: 1, homeDefTurnoverPlays: 1,
+    awayOffTurnoverPpaSum: -2, awayOffTurnoverPlays: 1,
+    awayDefTurnoverPpaSum: 3, awayDefTurnoverPlays: 3,
+  };
+  const withTurnovers = computeSeasonRatings([gameWithTurnovers], new Map(), CFB);
+  const withoutTurnovers = computeSeasonRatings([gameBase], new Map(), CFB);
+  assert.equal(withTurnovers.get(1)!.rating, withoutTurnovers.get(1)!.rating, "home rating identical with turnoverLuckWeight=0");
+  assert.equal(withTurnovers.get(2)!.rating, withoutTurnovers.get(2)!.rating, "away rating identical with turnoverLuckWeight=0");
+});
+
+test("computeSeasonRatings strips turnover-play PPA via a reweighted average, matching the hand-computed formula", () => {
+  const params = { ...CFB, turnoverLuckWeight: 1, successRateWeight: 0, pointsPerEpa: 10 };
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.3, homeDefEpa: 0.1, awayOffEpa: 0.05, awayDefEpa: 0.2,
+    homeOffPlays: 20, homeDefPlays: 15, awayOffPlays: 18, awayDefPlays: 22,
+    homeOffTurnoverPpaSum: -4, homeOffTurnoverPlays: 2,
+    homeDefTurnoverPpaSum: 1, homeDefTurnoverPlays: 1,
+    awayOffTurnoverPpaSum: -2, awayOffTurnoverPlays: 1,
+    awayDefTurnoverPpaSum: 3, awayDefTurnoverPlays: 3,
+  };
+  const state = computeSeasonRatings([game], new Map(), params);
+
+  // strippedEpa = (rawEpa*totalPlays - turnoverPpaSum) / (totalPlays - turnoverPlays), turnoverLuckWeight=1 -> pure stripped.
+  const strippedHomeOff = (game.homeOffEpa * game.homeOffPlays - game.homeOffTurnoverPpaSum) / (game.homeOffPlays - game.homeOffTurnoverPlays);
+  const strippedHomeDef = (game.homeDefEpa * game.homeDefPlays - game.homeDefTurnoverPpaSum) / (game.homeDefPlays - game.homeDefTurnoverPlays);
+  const strippedAwayOff = (game.awayOffEpa * game.awayOffPlays - game.awayOffTurnoverPpaSum) / (game.awayOffPlays - game.awayOffTurnoverPlays);
+  const strippedAwayDef = (game.awayDefEpa * game.awayDefPlays - game.awayDefTurnoverPpaSum) / (game.awayDefPlays - game.awayDefTurnoverPlays);
+  const homeNetEpa = strippedHomeOff - strippedHomeDef;
+  const awayNetEpa = strippedAwayOff - strippedAwayDef;
+  const epaMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
+  // Both teams start at rating 0 (no initial ratings) -> predictedMargin is just HFA, and each side's SOS
+  // multiplier is exactly 1 (opponent rating 0 -> the `1 + sosWeight*(0/ratingScaleRef)` clamp is a no-op).
+  const predictedMargin = params.homeFieldAdvantage;
+  const error = epaMargin - predictedMargin;
+  const expectedHomeRating = params.baseK * error;
+  const expectedAwayRating = -params.baseK * error;
+
+  assert.ok(Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9, `home rating (${state.get(1)!.rating}) matches hand-computed turnover-stripped formula (${expectedHomeRating})`);
+  assert.ok(Math.abs(state.get(2)!.rating - expectedAwayRating) < 1e-9, `away rating (${state.get(2)!.rating}) matches hand-computed turnover-stripped formula (${expectedAwayRating})`);
+});
+
+test("computeSeasonRatings falls back to raw EPA when turnover-stats fields are missing, even with turnoverLuckWeight > 0", () => {
+  const params = { ...CFB, turnoverLuckWeight: 1 };
+  const gameNoTurnoverData = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.3, homeDefEpa: 0.1, awayOffEpa: 0.05, awayDefEpa: 0.2,
+  };
+  const withWeight = computeSeasonRatings([gameNoTurnoverData], new Map(), params);
+  const withoutWeight = computeSeasonRatings([gameNoTurnoverData], new Map(), { ...params, turnoverLuckWeight: 0 });
+  assert.equal(withWeight.get(1)!.rating, withoutWeight.get(1)!.rating, "missing turnover-stats fields fall back to raw EPA, identical to turnoverLuckWeight=0");
+  assert.equal(withWeight.get(2)!.rating, withoutWeight.get(2)!.rating, "missing turnover-stats fields fall back to raw EPA, identical to turnoverLuckWeight=0");
+});

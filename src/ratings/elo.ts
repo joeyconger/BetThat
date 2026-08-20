@@ -38,6 +38,32 @@ export interface GameForRating {
   homeDefSuccessNoGarbage?: number | null;
   awayOffSuccessNoGarbage?: number | null;
   awayDefSuccessNoGarbage?: number | null;
+  /**
+   * Total offensive/defensive plays each side's EPA average was computed
+   * over (from CFBD's /stats/game/advanced, the same source as
+   * homeOffEpa/etc.) — the reweighting denominator for
+   * params.turnoverLuckWeight (see RatingParams doc and
+   * blendTurnoverStrip below). Only used when turnoverLuckWeight > 0.
+   */
+  homeOffPlays?: number | null;
+  homeDefPlays?: number | null;
+  awayOffPlays?: number | null;
+  awayDefPlays?: number | null;
+  /**
+   * Turnover-play PPA sums + counts, from a separate CFBD /plays ingestion
+   * pass (see ingest/cfbd/syncTurnoverStats.ts) — only used when
+   * params.turnoverLuckWeight > 0, and only per-field where actually
+   * present; missing any one falls back to that field's raw (un-stripped)
+   * EPA, same degrade-don't-guess pattern as the garbage-time fields above.
+   */
+  homeOffTurnoverPpaSum?: number | null;
+  homeOffTurnoverPlays?: number | null;
+  homeDefTurnoverPpaSum?: number | null;
+  homeDefTurnoverPlays?: number | null;
+  awayOffTurnoverPpaSum?: number | null;
+  awayOffTurnoverPlays?: number | null;
+  awayDefTurnoverPpaSum?: number | null;
+  awayDefTurnoverPlays?: number | null;
 }
 
 export interface TeamRatingState {
@@ -72,6 +98,38 @@ interface SuccessRateContext {
 
 /** A team's own success-rate sample needs at least this many games before its season-to-date average is trusted as an opponent-quality signal — below it, opponentAdjustWeight has no effect for games against that team (falls back to raw, unadjusted success rate), same as the whole codebase's "degrade to the broader signal rather than guess off a tiny sample" rule. */
 const MIN_SUCCESS_CONTEXT_GAMES = 3;
+
+/**
+ * Strips turnover-play PPA out of a raw EPA/play average via a true
+ * reweighted mean, then blends the result back with the raw value by
+ * `weight` — see RatingParams.turnoverLuckWeight's doc for why this is NOT
+ * a flat subtraction of turnoverPpaSum from rawEpa (that would ignore the
+ * play-count reweighting a correct trimmed average requires). Falls back
+ * to the raw value untouched if any input is missing (that specific
+ * field's turnover stats not yet ingested) or the reweighting denominator
+ * (plays remaining after removing turnover plays) would be non-positive.
+ */
+function blendTurnoverStrip(
+  rawEpa: number,
+  totalPlays: number | null | undefined,
+  turnoverPpaSum: number | null | undefined,
+  turnoverPlays: number | null | undefined,
+  weight: number,
+): number {
+  if (
+    totalPlays === null ||
+    totalPlays === undefined ||
+    turnoverPpaSum === null ||
+    turnoverPpaSum === undefined ||
+    turnoverPlays === null ||
+    turnoverPlays === undefined ||
+    totalPlays - turnoverPlays <= 0
+  ) {
+    return rawEpa;
+  }
+  const strippedEpa = (rawEpa * totalPlays - turnoverPpaSum) / (totalPlays - turnoverPlays);
+  return (1 - weight) * rawEpa + weight * strippedEpa;
+}
 
 export function computeSeasonRatings(
   games: GameForRating[],
@@ -121,9 +179,34 @@ export function computeSeasonRatings(
     const awayOffSuccess = (useNoGarbage ? game.awayOffSuccessNoGarbage : undefined) ?? game.awayOffSuccess;
     const awayDefSuccess = (useNoGarbage ? game.awayDefSuccessNoGarbage : undefined) ?? game.awayDefSuccess;
 
+    // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
+    // doc. Applied AFTER the garbage-time resolution above, on top of
+    // whichever EPA source (raw or no-garbage) was just selected, always
+    // against the ALL-PLAYS play count (there's no separate no-garbage
+    // play count column, so combining both toggles is approximate — see
+    // blendTurnoverStrip's doc). turnoverLuckWeight === 0 (today's
+    // default) makes this a no-op, so existing behavior is untouched
+    // bit-for-bit.
+    const strippedHomeOffEpa =
+      params.turnoverLuckWeight > 0
+        ? blendTurnoverStrip(homeOffEpa, game.homeOffPlays, game.homeOffTurnoverPpaSum, game.homeOffTurnoverPlays, params.turnoverLuckWeight)
+        : homeOffEpa;
+    const strippedHomeDefEpa =
+      params.turnoverLuckWeight > 0
+        ? blendTurnoverStrip(homeDefEpa, game.homeDefPlays, game.homeDefTurnoverPpaSum, game.homeDefTurnoverPlays, params.turnoverLuckWeight)
+        : homeDefEpa;
+    const strippedAwayOffEpa =
+      params.turnoverLuckWeight > 0
+        ? blendTurnoverStrip(awayOffEpa, game.awayOffPlays, game.awayOffTurnoverPpaSum, game.awayOffTurnoverPlays, params.turnoverLuckWeight)
+        : awayOffEpa;
+    const strippedAwayDefEpa =
+      params.turnoverLuckWeight > 0
+        ? blendTurnoverStrip(awayDefEpa, game.awayDefPlays, game.awayDefTurnoverPpaSum, game.awayDefTurnoverPlays, params.turnoverLuckWeight)
+        : awayDefEpa;
+
     const predictedMargin = home.rating - away.rating + params.homeFieldAdvantage;
-    const homeNetEpa = homeOffEpa - homeDefEpa;
-    const awayNetEpa = awayOffEpa - awayDefEpa;
+    const homeNetEpa = strippedHomeOffEpa - strippedHomeDefEpa;
+    const awayNetEpa = strippedAwayOffEpa - strippedAwayDefEpa;
     const epaMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
 
     const homeCtx = getSuccessCtx(game.homeTeamId);

@@ -518,3 +518,53 @@ export async function runRestDaySweep(
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
   return results;
 }
+
+/**
+ * Sweeps turnoverLuckWeight -- turnover-play PPA stripped out of each
+ * side's EPA average via a reweighted mean (see RatingParams doc). Requires
+ * the turnover-stats ingestion pass to have run first (cfb-turnover-ingest
+ * / syncCfbdTurnoverStats) -- any game missing that data makes
+ * turnoverLuckWeight a silent per-field no-op, same as excludeGarbageTime's
+ * sweep. Includes 0 as the true raw-EPA baseline for direct comparison.
+ */
+const DEFAULT_TURNOVER_LUCK_WEIGHT = [0, 0.25, 0.5, 0.75, 1];
+
+export interface TurnoverLuckSweepResult {
+  turnoverLuckWeight: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runTurnoverLuckSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  weightGrid: number[] = DEFAULT_TURNOVER_LUCK_WEIGHT,
+): Promise<TurnoverLuckSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: TurnoverLuckSweepResult[] = [];
+
+  for (const turnoverLuckWeight of weightGrid) {
+    const paramsOverride: RatingParams = { ...base, turnoverLuckWeight };
+    const name = `sweep-turnoverluck-${sport}-w${turnoverLuckWeight}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      turnoverLuckWeight,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `turnoverLuckWeight=${turnoverLuckWeight}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}

@@ -132,6 +132,27 @@ export interface RatingParams {
    * games against that team. Untested — needs a real sweep.
    */
   opponentAdjustWeight: number;
+  /**
+   * Weight (0-1) given to a "turnover-luck-stripped" EPA vs. raw EPA when
+   * computing a game's performance signal in computeSeasonRatings — 0 uses
+   * raw EPA (today's behavior, includes turnover plays' PPA), 1 uses EPA
+   * with all turnover plays (interceptions, forced/lost fumbles — see
+   * ingest/cfbd/syncTurnoverStats.ts for the exact CFBD play_type set)
+   * removed from the average entirely. Turnovers are the most
+   * variance-heavy, least repeatable events in football — a tipped pass
+   * that happens to land in a defender's hands isn't a real skill signal
+   * the way a sustained third-down conversion is — so this is an attempt
+   * at the same "care about how the game went, not the result" goal as
+   * successRateWeight, applied to a different source of noise. The
+   * stripped value is NOT a flat subtraction of turnover PPA from the raw
+   * average (that would ignore the play-count reweighting a true trimmed
+   * average requires and over-correct) — see computeSeasonRatings for the
+   * actual reweighted-average formula. Only takes effect for games with
+   * turnover-stats ingested (falls back to raw EPA otherwise, same
+   * degrade-don't-guess pattern as excludeGarbageTime). Defaults to 0
+   * (no-op) — untested, needs ingestion + a real sweep.
+   */
+  turnoverLuckWeight: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -154,6 +175,7 @@ const NFL_PARAMS: RatingParams = {
   bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
   excludeGarbageTime: false, // untested — no-garbage columns not ingested for NFL yet (nflverse-based, not CFBD)
   opponentAdjustWeight: 0, // untested — no-op until swept
+  turnoverLuckWeight: 0, // untested — turnover stats not ingested for NFL yet (would need an nflverse play-by-play source, not CFBD)
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -215,13 +237,22 @@ const CFB_PARAMS: RatingParams = {
   // sweep + walk-forward validation before this is worth trusting, same
   // process successRateWeight just went through.
   excludeGarbageTime: false,
-  // Inherited 0 from NFL_PARAMS — no-op until swept. Success-rate data
-  // already exists for every 2023-2025 CFB game (no new ingestion needed,
-  // unlike excludeGarbageTime), so this can be swept immediately.
+  // Swept 0-2 (cfb-oppadjust-sweep): a clean, monotonic NEGATIVE trend on
+  // cover rate as weight increases past ~0.25. Likely double-counting with
+  // sosWeight, which already adjusts each team's RATING UPDATE by opponent
+  // strength — this adjusts the raw success-rate INPUT by the same
+  // opponent's tendency, and stacking both seems to over-correct. Left at 0.
   opponentAdjustWeight: 0,
-  // Inherited 0 from NFL_PARAMS — no-op until swept. game_date already
-  // exists for every game, so this can be swept immediately too.
+  // Swept -0.2 to 0.5 (cfb-restday-sweep): genuinely flat, no signal in
+  // either direction (confirmed via the negative-value sanity check too).
+  // Most likely explanation: the market already prices rest/bye
+  // differential in efficiently, so there's nothing incremental left to
+  // extract from an additive signal on top of the closing line. Left at 0.
   pointsPerRestDay: 0,
+  // Inherited 0 from NFL_PARAMS — no-op until swept. Needs a real turnover-
+  // stats ingestion pass (cfb-turnover-ingest) before it's worth trusting,
+  // same process excludeGarbageTime and successRateWeight went through.
+  turnoverLuckWeight: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

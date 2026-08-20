@@ -401,6 +401,38 @@ export async function upsertGarbageTimeStats(input: UpsertGarbageTimeStatsInput)
   );
 }
 
+export interface UpsertTurnoverStatsInput {
+  gameId: number;
+  teamId: number;
+  offTurnoverPpaSum: number;
+  offTurnoverPlays: number;
+  defTurnoverPpaSum: number;
+  defTurnoverPlays: number;
+}
+
+/**
+ * Same shape as upsertGarbageTimeStats: a targeted UPDATE onto an existing
+ * team_game_stats row, not an upsert (there's nothing sensible to INSERT
+ * here on its own). A game with no prior row is a no-op, same as the
+ * garbage-time pass. offTurnoverPpaSum/offTurnoverPlays are turnovers this
+ * team's OFFENSE committed; defTurnoverPpaSum/defTurnoverPlays are
+ * turnovers this team's DEFENSE forced — see
+ * ingest/cfbd/syncTurnoverStats.ts for how these are aggregated from
+ * /plays. A team with zero turnovers on a side still gets a real row here
+ * (sum=0, plays=0), which is a meaningfully different fact from "not yet
+ * ingested" (both null) — ratings/elo.ts's turnoverLuckWeight blend treats
+ * only the latter as missing data to fall back from.
+ */
+export async function upsertTurnoverStats(input: UpsertTurnoverStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats
+     SET off_turnover_ppa_sum = $3, off_turnover_plays = $4,
+         def_turnover_ppa_sum = $5, def_turnover_plays = $6
+     WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offTurnoverPpaSum, input.offTurnoverPlays, input.defTurnoverPpaSum, input.defTurnoverPlays],
+  );
+}
+
 export interface GameForRating {
   gameId: number;
   week: number;
@@ -424,6 +456,20 @@ export interface GameForRating {
   homeDefSuccessNoGarbage: number | null;
   awayOffSuccessNoGarbage: number | null;
   awayDefSuccessNoGarbage: number | null;
+  /** Total offensive/defensive plays each side's off_epa_play/def_epa_play average was computed over — needed to reweight the average when RatingParams.turnoverLuckWeight strips turnover plays out (see ratings/elo.ts's computeSeasonRatings). Nullable only in the sense that the underlying column is nullable for very old rows; treated the same as a missing turnover-stats row (falls back to raw EPA) when null. */
+  homeOffPlays: number | null;
+  homeDefPlays: number | null;
+  awayOffPlays: number | null;
+  awayDefPlays: number | null;
+  /** Turnover-play PPA sums + counts, from a separate CFBD /plays ingestion pass (see ingest/cfbd/syncTurnoverStats.ts). off_* = turnovers this team's OFFENSE committed (lost the ball); def_* = turnovers this team's DEFENSE forced. Nullable: only populated where that ingestion pass has run; ratings/elo.ts falls back to raw EPA (turnoverLuckWeight has no effect) when any of these four is null for a game. */
+  homeOffTurnoverPpaSum: number | null;
+  homeOffTurnoverPlays: number | null;
+  homeDefTurnoverPpaSum: number | null;
+  homeDefTurnoverPlays: number | null;
+  awayOffTurnoverPpaSum: number | null;
+  awayOffTurnoverPlays: number | null;
+  awayDefTurnoverPpaSum: number | null;
+  awayDefTurnoverPlays: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -453,6 +499,18 @@ export async function getSeasonGamesForRating(
     home_def_success_no_garbage: number | null;
     away_off_success_no_garbage: number | null;
     away_def_success_no_garbage: number | null;
+    home_off_plays: number | null;
+    home_def_plays: number | null;
+    away_off_plays: number | null;
+    away_def_plays: number | null;
+    home_off_turnover_ppa_sum: number | null;
+    home_off_turnover_plays: number | null;
+    home_def_turnover_ppa_sum: number | null;
+    home_def_turnover_plays: number | null;
+    away_off_turnover_ppa_sum: number | null;
+    away_off_turnover_plays: number | null;
+    away_def_turnover_ppa_sum: number | null;
+    away_def_turnover_plays: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -462,7 +520,13 @@ export async function getSeasonGamesForRating(
             home_stats.off_epa_play_no_garbage AS home_off_epa_no_garbage, home_stats.def_epa_play_no_garbage AS home_def_epa_no_garbage,
             away_stats.off_epa_play_no_garbage AS away_off_epa_no_garbage, away_stats.def_epa_play_no_garbage AS away_def_epa_no_garbage,
             home_stats.off_success_rate_no_garbage AS home_off_success_no_garbage, home_stats.def_success_rate_no_garbage AS home_def_success_no_garbage,
-            away_stats.off_success_rate_no_garbage AS away_off_success_no_garbage, away_stats.def_success_rate_no_garbage AS away_def_success_no_garbage
+            away_stats.off_success_rate_no_garbage AS away_off_success_no_garbage, away_stats.def_success_rate_no_garbage AS away_def_success_no_garbage,
+            home_stats.plays_offense AS home_off_plays, home_stats.plays_defense AS home_def_plays,
+            away_stats.plays_offense AS away_off_plays, away_stats.plays_defense AS away_def_plays,
+            home_stats.off_turnover_ppa_sum AS home_off_turnover_ppa_sum, home_stats.off_turnover_plays AS home_off_turnover_plays,
+            home_stats.def_turnover_ppa_sum AS home_def_turnover_ppa_sum, home_stats.def_turnover_plays AS home_def_turnover_plays,
+            away_stats.off_turnover_ppa_sum AS away_off_turnover_ppa_sum, away_stats.off_turnover_plays AS away_off_turnover_plays,
+            away_stats.def_turnover_ppa_sum AS away_def_turnover_ppa_sum, away_stats.def_turnover_plays AS away_def_turnover_plays
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -493,6 +557,18 @@ export async function getSeasonGamesForRating(
     homeDefSuccessNoGarbage: r.home_def_success_no_garbage,
     awayOffSuccessNoGarbage: r.away_off_success_no_garbage,
     awayDefSuccessNoGarbage: r.away_def_success_no_garbage,
+    homeOffPlays: r.home_off_plays,
+    homeDefPlays: r.home_def_plays,
+    awayOffPlays: r.away_off_plays,
+    awayDefPlays: r.away_def_plays,
+    homeOffTurnoverPpaSum: r.home_off_turnover_ppa_sum,
+    homeOffTurnoverPlays: r.home_off_turnover_plays,
+    homeDefTurnoverPpaSum: r.home_def_turnover_ppa_sum,
+    homeDefTurnoverPlays: r.home_def_turnover_plays,
+    awayOffTurnoverPpaSum: r.away_off_turnover_ppa_sum,
+    awayOffTurnoverPlays: r.away_off_turnover_plays,
+    awayDefTurnoverPpaSum: r.away_def_turnover_ppa_sum,
+    awayDefTurnoverPlays: r.away_def_turnover_plays,
   }));
 }
 
