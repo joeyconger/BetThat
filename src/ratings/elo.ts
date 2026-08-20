@@ -162,30 +162,41 @@ export function predictSpread(input: PredictionInput, params: RatingParams): Pre
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;
-  const confidence = params.baseErrorPoints / Math.sqrt(combinedGames + 1);
+  const baseConfidence = params.baseErrorPoints / Math.sqrt(combinedGames + 1);
 
   if (input.marketSpreadHome === null) {
-    return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence, modelWeight: 1 };
+    return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence: baseConfidence, modelWeight: 1 };
   }
 
-  // Real CFB mismatches regularly hit 30-50+ point market spreads, but this
-  // rating system's incremental, regression-heavy updates (season carryover,
-  // bounded SOS multiplier) can't accumulate that much separation within a
-  // season — so the model's own number is systematically LESS extreme than
-  // reality whenever the market itself is already extreme. Confirmed against
-  // real backtest data: games with big deviation from a big market spread
-  // (e.g. model=-27 vs market=-40) lost more often than they should have,
-  // because actual blowouts tended to be at least as extreme as the market,
-  // not less. bigSpreadShrinkRef defers more to market as |marketSpreadHome|
-  // grows, on top of the existing games-played shrinkage — e.g. at a
-  // reference of 25, model weight is roughly halved at a 25-point spread and
-  // cut to a third at 40. The falloff is gradual, not a threshold — even a
-  // 3-point spread sees a real (~11% at ref=25) reduction, not "no effect
-  // below some cutoff" — so this needs a real sweep to find a value that
-  // fixes the big-spread cases without needlessly discounting the model in
-  // normal games, not just a plausible-sounding default.
-  const spreadDamping = params.bigSpreadShrinkRef / (params.bigSpreadShrinkRef + Math.abs(input.marketSpreadHome));
-  const modelWeight = (combinedGames / (combinedGames + params.marketShrinkageK)) * spreadDamping;
+  // First attempt at fixing this (shrinking modelWeight toward market as
+  // |marketSpreadHome| grows) was a no-op that never should have shipped
+  // without checking it against how covered/clv actually get computed:
+  // both (clv.ts) depend ONLY on pickSide, a binary home/away choice from
+  // the SIGN of (market - modelSpreadHome) — never its magnitude.
+  // modelSpreadHome is a weighted average of eloSpreadHome and market, and
+  // a weighted average can never cross past either endpoint — so shrinking
+  // modelWeight can only ever move modelSpreadHome closer to market, never
+  // to the other side of it, meaning pickSide (and therefore cover rate
+  // and CLV) is PROVABLY unaffected by any modelWeight-only fix, no matter
+  // how strong the damping. Confirmed empirically: a real sweep of
+  // bigSpreadShrinkRef from 5 to 1000 produced bit-for-bit identical cover
+  // rate and avgClv every time.
+  //
+  // Real fix: since the model's rating scale is demonstrably compressed
+  // relative to true blowout magnitudes (real CFB mismatches routinely hit
+  // 30-50+ points; this incremental, regression-heavy rating system can't
+  // accumulate that much separation within a season), a big disagreement
+  // with an already-extreme market spread is a signal the prediction is
+  // LESS trustworthy, not a reason to change which side gets picked.
+  // bigSpreadShrinkRef widens `confidence` (not modelWeight) as
+  // |marketSpreadHome| grows, so a confidence-based filter (getConfidenceReport,
+  // or a future live threshold) naturally screens these out — same
+  // "recognize and exclude the untrustworthy segment" pattern that
+  // excluding rivalry week already validated, rather than trying to
+  // out-guess the market's own number.
+  const modelWeight = combinedGames / (combinedGames + params.marketShrinkageK);
   const modelSpreadHome = modelWeight * eloSpreadHome + (1 - modelWeight) * input.marketSpreadHome;
+  const spreadUncertainty = Math.abs(input.marketSpreadHome) / params.bigSpreadShrinkRef;
+  const confidence = baseConfidence * (1 + spreadUncertainty);
   return { eloSpreadHome, modelSpreadHome, confidence, modelWeight };
 }

@@ -556,14 +556,39 @@ holdout test, not a confirmed edge, before acting on it.
   deviation size showed a clear, mechanistic pattern — whenever the market
   itself posted an extreme spread (20-40+ points), the model consistently
   predicted something noticeably smaller, and lost more often than not
-  (real blowouts tended to be at least as extreme as market, not less).
-  Root cause: `predictSpread`'s market-blend weight (`modelWeight`) only
-  ever depended on games played, never on how extreme the market spread
-  itself was — so by mid-season the model trusted its own (rating-scale-
-  compressed) number just as much in a 40-point mismatch as a 3-point game.
-  Fixed with a new `bigSpreadShrinkRef` param that also defers to market as
-  `|marketSpreadHome|` grows (`cfb-bigspread-sweep` job to calibrate it —
-  the default of 25 is a reasoned starting point, not yet swept).
+  (real blowouts tended to be at least as extreme as market, not less) —
+  this rating system's incremental, regression-heavy updates (season
+  carryover, bounded SOS multiplier) genuinely can't accumulate enough
+  separation within a season to match real elite-vs-bottom-tier CFB gaps.
+
+  **First fix attempt was a real mistake, caught by its own sweep, not by
+  review.** The first version shrank `predictSpread`'s market-blend weight
+  (`modelWeight`) as `|marketSpreadHome|` grew, on the theory that
+  deferring more to market on extreme spreads would fix the losing pattern.
+  A 7-value sweep came back with bit-for-bit identical cover rate and avg
+  CLV at every single value, from a no-op-strength reference (1000) down to
+  an aggressive one (5) — which turned out to be mathematically guaranteed,
+  not a bug: `computeCovered`/`computeClv` (`src/backtest/clv.ts`) only
+  ever look at `pickSide`, a binary choice from the *sign* of
+  (market − modelSpreadHome), never its magnitude. `modelSpreadHome` is a
+  weighted average of the model's own number and market, and a weighted
+  average can never cross past either endpoint — so shrinking modelWeight
+  can only pull the number closer to market, never flip which side it's
+  on. Cover rate and CLV were provably unable to move, no matter the
+  parameter value, because the fix targeted the wrong lever entirely.
+
+  **Real fix**: instead of changing which side gets picked (not possible
+  without touching the rating system itself — a much bigger, riskier
+  lever, and one that would reopen exactly the unbounded-blowup risk the
+  SOS multiplier fix closed earlier), `bigSpreadShrinkRef` now widens
+  `confidence` as `|marketSpreadHome|` grows, flagging these predictions as
+  less trustworthy for a confidence-based filter to screen out — the same
+  "recognize and exclude the untrustworthy segment" pattern that excluding
+  rivalry week already validated. Because confidence doesn't touch
+  `pickSide` either, the metric that can actually move is cover rate
+  *filtered by confidence* (`getConfidenceReport`), not the overall rate —
+  `cfb-bigspread-sweep` was updated to report that. Not yet run against the
+  corrected version.
 
 ## Schema
 

@@ -353,10 +353,13 @@ export function startCfbSosSweepJob(): Promise<JobStatus> {
  */
 export function startCfbBigSpreadShrinkSweepJob(): Promise<JobStatus> {
   return runJob("cfb-bigspread-sweep", async (job) => {
-    log(job, "sweeping cfb bigSpreadShrinkRef, 2023-2025");
+    log(job, "sweeping cfb bigSpreadShrinkRef, 2023-2025 (reports cover rate BY CONFIDENCE CEILING, not overall — see runBigSpreadShrinkSweep's doc for why)");
     const results = await runBigSpreadShrinkSweep("cfb", 2023, 2025);
     for (const r of results) {
-      log(job, `bigSpreadShrinkRef=${r.bigSpreadShrinkRef}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+      const parts = r.coverRateByConfidenceCeiling
+        .map((c) => `conf<=${c.maxConfidence}: ${c.games}g ${fmtPct(c.coverRate)}`)
+        .join(", ");
+      log(job, `bigSpreadShrinkRef=${r.bigSpreadShrinkRef} (run ${r.runId}): ${parts}`);
     }
   });
 }

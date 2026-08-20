@@ -41,7 +41,7 @@ export interface RatingParams {
   spPriorWeight: number;
   /** Points of predicted-margin adjustment per unit z-score gap in CFBD's weekly Elo (see ratings/elo.ts's predictSpread). CFB-only — 0 for NFL, which CFBD doesn't cover. */
   eloSignalPoints: number;
-  /** Defers more to market as |marketSpreadHome| grows, on top of the existing games-played shrinkage (see ratings/elo.ts's predictSpread). Smaller = defers to market sooner/harder at a given spread size. */
+  /** Widens `confidence` as |marketSpreadHome| grows — a big market spread is a signal the prediction is less trustworthy (see ratings/elo.ts's predictSpread), for a confidence-based filter to screen out, NOT a lever on modelWeight (a modelWeight-only version was tried and proven to be a no-op, see predictSpread's doc). Smaller = widens confidence faster at a given spread size. */
   bigSpreadShrinkRef: number;
 }
 
@@ -58,7 +58,7 @@ const NFL_PARAMS: RatingParams = {
   marketShrinkageK: 8,
   spPriorWeight: 0, // no SP+ for NFL
   eloSignalPoints: 0, // no CFBD Elo for NFL
-  bigSpreadShrinkRef: 40, // fairly inert at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
+  bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -76,12 +76,15 @@ const CFB_PARAMS: RatingParams = {
   pointsPerEpa: 20,
   spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
   eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
-  // Uncalibrated starting point — real CFB mismatches routinely hit 30-50+
-  // point market spreads, and backtest data showed the model losing when it
-  // predicted a noticeably SMALLER spread than a big market number (real
-  // blowouts tended to be at least as extreme as market, not less — see
-  // README "Big-spread deviation"). Needs a real sweep before trusting this
-  // specific value, same as everything else in this file originally was.
+  // Uncalibrated starting point — widens confidence for predictions
+  // fighting an extreme market spread, since backtest data showed those
+  // losing more often than not (real CFB mismatches routinely hit 30-50+
+  // points, more extreme than this rating system's compressed scale can
+  // match — see README "Big-spread deviation"). A modelWeight-based
+  // version of this same idea was tried first and proven mathematically
+  // incapable of changing cover rate/CLV (see predictSpread's doc) — this
+  // confidence-based version needs its own real sweep against
+  // getConfidenceReport before trusting this specific value.
   bigSpreadShrinkRef: 25,
 };
 
