@@ -249,9 +249,18 @@ const CFB_PARAMS: RatingParams = {
   // differential in efficiently, so there's nothing incremental left to
   // extract from an additive signal on top of the closing line. Left at 0.
   pointsPerRestDay: 0,
-  // Inherited 0 from NFL_PARAMS — no-op until swept. Needs a real turnover-
-  // stats ingestion pass (cfb-turnover-ingest) before it's worth trusting,
-  // same process excludeGarbageTime and successRateWeight went through.
+  // Swept 0-1 (cfb-turnoverluck-sweep, run 262-268, after cfb-turnover-
+  // ingest): essentially flat — cover rate wobbles 50.5%-50.7% with no
+  // clean monotonic trend and avgClv is unchanged (0.69-0.70) across the
+  // whole grid, nothing like successRateWeight's real 0.6pp move with a
+  // clear direction. Skipped the walk-forward holdout since the in-sample
+  // sweep already shows no signal worth confirming — same call made for
+  // opponentAdjustWeight and pointsPerRestDay above. Best guess why:
+  // turnover luck is likely already substantially captured by the
+  // success-rate blend this model runs on — a defense that forces
+  // turnovers usually also suppresses success rate on the same drives, so
+  // stripping turnovers out separately has little independent information
+  // left to add. Left at 0.
   turnoverLuckWeight: 0,
 };
 
