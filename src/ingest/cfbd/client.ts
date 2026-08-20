@@ -2,7 +2,7 @@ import { requireCfbdApiKey } from "../../config.js";
 
 const BASE_URL = "https://api.collegefootballdata.com";
 
-async function cfbdGet<T>(path: string, params: Record<string, string | number | undefined>): Promise<T> {
+async function cfbdGet<T>(path: string, params: Record<string, string | number | boolean | undefined>): Promise<T> {
   const apiKey = requireCfbdApiKey();
   const url = new URL(path, BASE_URL);
   for (const [key, value] of Object.entries(params)) {
@@ -95,8 +95,14 @@ export function getGameAdvancedStats(
   year: number,
   week?: number,
   seasonType: "regular" | "postseason" = "regular",
+  excludeGarbageTime?: boolean,
 ): Promise<CfbdGameAdvancedStats[]> {
-  return cfbdGet<CfbdGameAdvancedStats[]>("/stats/game/advanced", { year, week, seasonType });
+  return cfbdGet<CfbdGameAdvancedStats[]>("/stats/game/advanced", {
+    year,
+    week,
+    seasonType,
+    excludeGarbageTime,
+  });
 }
 
 // Verified against a real CFBD response — field names and spread sign

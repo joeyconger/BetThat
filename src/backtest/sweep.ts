@@ -369,3 +369,52 @@ export async function runBigSpreadShrinkSweep(
   results.sort((a, b) => (b.coverRateByConfidenceCeiling[3]?.coverRate ?? -1) - (a.coverRateByConfidenceCeiling[3]?.coverRate ?? -1));
   return results;
 }
+
+/**
+ * A/B test: excludeGarbageTime false vs. true, holding every other param
+ * at the sport's current defaults (including successRateWeight/
+ * pointsPerSuccessRate, which are already blended in for CFB). Only two
+ * points, not a grid, because excludeGarbageTime is a binary data-cleaning
+ * switch (which plays count), not a signal weight to interpolate — see
+ * RatingParams.excludeGarbageTime's doc. Requires the no-garbage columns
+ * to actually be ingested first (syncCfbdGarbageTimeStats /
+ * cfb-garbage-time-ingest job) — the true=true run is a silent no-op
+ * (identical to false) for any game missing that data.
+ */
+export interface GarbageTimeSweepResult {
+  excludeGarbageTime: boolean;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+}
+
+export async function runGarbageTimeSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+): Promise<GarbageTimeSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: GarbageTimeSweepResult[] = [];
+
+  for (const excludeGarbageTime of [false, true]) {
+    const paramsOverride: RatingParams = { ...base, excludeGarbageTime };
+    const name = `sweep-garbagetime-${sport}-${excludeGarbageTime}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    results.push({
+      excludeGarbageTime,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+    });
+    console.log(
+      `excludeGarbageTime=${excludeGarbageTime}: ${scored} games, cover=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  return results;
+}

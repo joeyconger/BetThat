@@ -224,3 +224,53 @@ test("computeSeasonRatings clamps the SOS multiplier instead of letting an extre
     `expected clamped rating ${expectedHomeRating}, got ${home.rating}`,
   );
 });
+
+test("computeSeasonRatings ignores no-garbage fields entirely when excludeGarbageTime is false (today's default), even when present", () => {
+  const gameBase = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: -0.05, awayOffEpa: -0.05, awayDefEpa: 0.05,
+  };
+  const withoutFlag = computeSeasonRatings([gameBase], new Map(), { ...CFB, excludeGarbageTime: false, successRateWeight: 0 });
+  const withGarbageDataButFlagOff = computeSeasonRatings(
+    [{ ...gameBase, homeOffEpaNoGarbage: 999, homeDefEpaNoGarbage: 999, awayOffEpaNoGarbage: -999, awayDefEpaNoGarbage: -999 }],
+    new Map(),
+    { ...CFB, excludeGarbageTime: false, successRateWeight: 0 },
+  );
+  assert.equal(withoutFlag.get(1)!.rating, withGarbageDataButFlagOff.get(1)!.rating);
+});
+
+test("computeSeasonRatings actually uses no-garbage EPA when excludeGarbageTime is true and the fields are present", () => {
+  const params = { ...CFB, excludeGarbageTime: true, successRateWeight: 0 };
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: -0.05, awayOffEpa: -0.05, awayDefEpa: 0.05,
+    homeOffEpaNoGarbage: 0.2, homeDefEpaNoGarbage: -0.1, awayOffEpaNoGarbage: -0.1, awayDefEpaNoGarbage: 0.1,
+  };
+  // homeNetEpa = 0.2 - -0.1 = 0.3; awayNetEpa = -0.1 - 0.1 = -0.2
+  // epaMargin = pointsPerEpa * (0.3 - -0.2) = pointsPerEpa * 0.5
+  const predictedMargin = CFB.homeFieldAdvantage;
+  const expectedError = CFB.pointsPerEpa * 0.5 - predictedMargin;
+  const expectedDelta = CFB.baseK * expectedError;
+  const state = computeSeasonRatings([game], new Map(), params);
+  assert.ok(Math.abs(state.get(1)!.rating - expectedDelta) < 1e-9);
+});
+
+test("computeSeasonRatings falls back to raw EPA per-field when excludeGarbageTime is true but a no-garbage field is null for that game", () => {
+  const params = { ...CFB, excludeGarbageTime: true, successRateWeight: 0 };
+  // Only homeOffEpaNoGarbage is present; every other no-garbage field is
+  // missing (undefined/null) for this game -- each field should fall back
+  // independently to its own raw value, not degrade the whole game to
+  // all-raw or throw away the one field that IS present.
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: -0.05, awayOffEpa: -0.05, awayDefEpa: 0.05,
+    homeOffEpaNoGarbage: 0.3,
+  };
+  // homeOffEpa -> 0.3 (swapped), homeDefEpa stays -0.05 (raw), away stays raw (-0.05, 0.05)
+  // homeNetEpa = 0.3 - -0.05 = 0.35; awayNetEpa = -0.05 - 0.05 = -0.1
+  const predictedMargin = CFB.homeFieldAdvantage;
+  const expectedError = CFB.pointsPerEpa * (0.35 - -0.1) - predictedMargin;
+  const expectedDelta = CFB.baseK * expectedError;
+  const state = computeSeasonRatings([game], new Map(), params);
+  assert.ok(Math.abs(state.get(1)!.rating - expectedDelta) < 1e-9);
+});

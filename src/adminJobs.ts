@@ -1,7 +1,7 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
-import { syncCfbdGameStats } from "./ingest/cfbd/syncStats.js";
+import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { syncCfbdHistoricalWeather } from "./ingest/cfbd/syncHistoricalWeather.js";
@@ -13,6 +13,7 @@ import {
   runBigSpreadShrinkSweep,
   runSpSignalSweep,
   runSuccessRateSweep,
+  runGarbageTimeSweep,
 } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -440,6 +441,80 @@ export function startCfbSuccessRateWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Ingests garbage-time-excluded EPA/success rate for CFB 2023-2025 via a
+ * second CFBD call (excludeGarbageTime=true) against the same endpoint
+ * already in use for the all-plays stats -- see syncCfbdGarbageTimeStats's
+ * doc. Run this BEFORE cfb-garbagetime-sweep or cfb-garbagetime-
+ * walkforward; without it, RatingParams.excludeGarbageTime=true is a
+ * silent no-op (every game falls back to its all-plays value).
+ */
+export function startCfbGarbageTimeIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-garbage-time-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: garbage-time-excluded stats`);
+      const result = await syncCfbdGarbageTimeStats(year);
+      log(job, `${year}: synced ${result.synced}, skipped ${result.skipped}`);
+    }
+  });
+}
+
+/**
+ * A/B: excludeGarbageTime false vs. true, on top of today's CFB defaults
+ * (which already include successRateWeight=0.75/pointsPerSuccessRate=120
+ * -- see ratings/config.ts). Requires cfb-garbage-time-ingest to have run
+ * first.
+ */
+export function startCfbGarbageTimeSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-garbagetime-sweep", async (job) => {
+    log(job, "sweeping cfb excludeGarbageTime false vs true, 2023-2025");
+    const results = await runGarbageTimeSweep("cfb", 2023, 2025);
+    for (const r of results) {
+      log(job, `excludeGarbageTime=${r.excludeGarbageTime}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+  });
+}
+
+/**
+ * Walk-forward validation for excludeGarbageTime, same discipline as
+ * cfb-successrate-walkforward: train (the false-vs-true A/B) on 2023-2024
+ * only, then score the winner on the untouched 2025 season. With only two
+ * candidates there's less multiple-comparison risk than the successRate
+ * grid had, but the same in-sample-vs-holdout question still applies.
+ * Requires cfb-garbage-time-ingest to have run first.
+ */
+export function startCfbGarbageTimeWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-garbagetime-walkforward", async (job) => {
+    log(job, "training: excludeGarbageTime false vs true on 2023-2024 only");
+    const trainResults = await runGarbageTimeSweep("cfb", 2023, 2024);
+    for (const r of trainResults) {
+      log(job, `train: excludeGarbageTime=${r.excludeGarbageTime}: cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`);
+    }
+    const best = trainResults.reduce((a, b) => ((b.coverRate ?? -1) > (a.coverRate ?? -1) ? b : a));
+    log(job, `best training option: excludeGarbageTime=${best.excludeGarbageTime} (train cover ${fmtPct(best.coverRate)})`);
+
+    log(job, "holdout: running 2025-only backtest with training-selected option");
+    const base = getRatingParams("cfb");
+    const paramsOverride = { ...base, excludeGarbageTime: best.excludeGarbageTime };
+    const holdout = await runBacktest({
+      name: "cfb-garbagetime-walkforward-holdout-2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride,
+    });
+    const overall = await getOverallReport(holdout.backtestRunId);
+    const openingCover = await getOpeningCoverRate(holdout.backtestRunId);
+    log(
+      job,
+      `holdout 2025: ${holdout.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${holdout.backtestRunId})`,
+    );
+    log(job, "compare against cfb-successrate-walkforward's holdout for the equivalent number without this toggle: cover vs close=48.7%, cover vs open=50.7%, avgClv=0.87.");
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -557,6 +632,9 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-spsignal-sweep": startCfbSpSignalSweepJob,
   "cfb-successrate-sweep": startCfbSuccessRateSweepJob,
   "cfb-successrate-walkforward": startCfbSuccessRateWalkforwardJob,
+  "cfb-garbage-time-ingest": startCfbGarbageTimeIngestJob,
+  "cfb-garbagetime-sweep": startCfbGarbageTimeSweepJob,
+  "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,

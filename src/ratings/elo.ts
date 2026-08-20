@@ -21,6 +21,23 @@ export interface GameForRating {
   homeDefSuccess?: number | null;
   awayOffSuccess?: number | null;
   awayDefSuccess?: number | null;
+  /**
+   * Garbage-time-excluded EPA/success rate, from a second CFBD ingestion
+   * pass (excludeGarbageTime=true) — only used when
+   * params.excludeGarbageTime is true (see RatingParams doc), and only for
+   * whichever of these four is actually present; a game missing one falls
+   * back to that game's regular all-plays value rather than being dropped,
+   * same "degrade to the broader signal, don't discard the game"
+   * philosophy as the success-rate fields above.
+   */
+  homeOffEpaNoGarbage?: number | null;
+  homeDefEpaNoGarbage?: number | null;
+  awayOffEpaNoGarbage?: number | null;
+  awayDefEpaNoGarbage?: number | null;
+  homeOffSuccessNoGarbage?: number | null;
+  homeDefSuccessNoGarbage?: number | null;
+  awayOffSuccessNoGarbage?: number | null;
+  awayDefSuccessNoGarbage?: number | null;
 }
 
 export interface TeamRatingState {
@@ -61,9 +78,25 @@ export function computeSeasonRatings(
     const home = state.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0 };
     const away = state.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0 };
 
+    // Prefer garbage-time-excluded EPA/success rate when params.excludeGarbageTime
+    // is set and that game actually has it ingested -- falls back to the
+    // regular all-plays value per-field otherwise, same degrade-don't-drop
+    // philosophy as the success-rate fallback below. A game with NEITHER
+    // (excludeGarbageTime off, or no-garbage data not yet ingested) is
+    // bit-for-bit the pre-existing behavior.
+    const useNoGarbage = params.excludeGarbageTime;
+    const homeOffEpa = (useNoGarbage ? game.homeOffEpaNoGarbage : null) ?? game.homeOffEpa;
+    const homeDefEpa = (useNoGarbage ? game.homeDefEpaNoGarbage : null) ?? game.homeDefEpa;
+    const awayOffEpa = (useNoGarbage ? game.awayOffEpaNoGarbage : null) ?? game.awayOffEpa;
+    const awayDefEpa = (useNoGarbage ? game.awayDefEpaNoGarbage : null) ?? game.awayDefEpa;
+    const homeOffSuccess = (useNoGarbage ? game.homeOffSuccessNoGarbage : undefined) ?? game.homeOffSuccess;
+    const homeDefSuccess = (useNoGarbage ? game.homeDefSuccessNoGarbage : undefined) ?? game.homeDefSuccess;
+    const awayOffSuccess = (useNoGarbage ? game.awayOffSuccessNoGarbage : undefined) ?? game.awayOffSuccess;
+    const awayDefSuccess = (useNoGarbage ? game.awayDefSuccessNoGarbage : undefined) ?? game.awayDefSuccess;
+
     const predictedMargin = home.rating - away.rating + params.homeFieldAdvantage;
-    const homeNetEpa = game.homeOffEpa - game.homeDefEpa;
-    const awayNetEpa = game.awayOffEpa - game.awayDefEpa;
+    const homeNetEpa = homeOffEpa - homeDefEpa;
+    const awayNetEpa = awayOffEpa - awayDefEpa;
     const epaMargin = params.pointsPerEpa * (homeNetEpa - awayNetEpa);
 
     // Blends in success rate as a second "how the game went" signal,
@@ -73,17 +106,17 @@ export function computeSeasonRatings(
     let actualMargin = epaMargin;
     if (
       params.successRateWeight > 0 &&
-      game.homeOffSuccess !== undefined &&
-      game.homeOffSuccess !== null &&
-      game.homeDefSuccess !== undefined &&
-      game.homeDefSuccess !== null &&
-      game.awayOffSuccess !== undefined &&
-      game.awayOffSuccess !== null &&
-      game.awayDefSuccess !== undefined &&
-      game.awayDefSuccess !== null
+      homeOffSuccess !== undefined &&
+      homeOffSuccess !== null &&
+      homeDefSuccess !== undefined &&
+      homeDefSuccess !== null &&
+      awayOffSuccess !== undefined &&
+      awayOffSuccess !== null &&
+      awayDefSuccess !== undefined &&
+      awayDefSuccess !== null
     ) {
-      const homeNetSuccess = game.homeOffSuccess - game.homeDefSuccess;
-      const awayNetSuccess = game.awayOffSuccess - game.awayDefSuccess;
+      const homeNetSuccess = homeOffSuccess - homeDefSuccess;
+      const awayNetSuccess = awayOffSuccess - awayDefSuccess;
       const successMargin = params.pointsPerSuccessRate * (homeNetSuccess - awayNetSuccess);
       actualMargin = (1 - params.successRateWeight) * epaMargin + params.successRateWeight * successMargin;
     }

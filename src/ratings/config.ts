@@ -85,6 +85,21 @@ export interface RatingParams {
   pointsPerSuccessRate: number;
   /** Widens `confidence` as |marketSpreadHome| grows — a big market spread is a signal the prediction is less trustworthy (see ratings/elo.ts's predictSpread), for a confidence-based filter to screen out, NOT a lever on modelWeight (a modelWeight-only version was tried and proven to be a no-op, see predictSpread's doc). Smaller = widens confidence faster at a given spread size. */
   bigSpreadShrinkRef: number;
+  /**
+   * When true, computeSeasonRatings prefers each game's garbage-time-
+   * excluded EPA/success rate (a second CFBD ingestion pass with
+   * excludeGarbageTime=true — see ingest/cfbd/syncStats.ts) over the
+   * regular all-plays value, per-field, falling back to the all-plays
+   * value for any game that doesn't have the no-garbage columns ingested
+   * yet. Distinct from successRateWeight: that's a SIGNAL blend (how much
+   * to trust success rate vs. EPA), this is a DATA CLEANING toggle (which
+   * plays count at all) — a backup mopping up 45-0 in the 4th quarter
+   * inflates or deflates both EPA and success rate the same way, so this
+   * is a binary switch, not something to partially blend. Defaults to
+   * false (today's behavior, includes all plays) — untested, needs a
+   * sweep once the no-garbage columns are actually ingested for a season.
+   */
+  excludeGarbageTime: boolean;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -104,6 +119,7 @@ const NFL_PARAMS: RatingParams = {
   successRateWeight: 0, // untested — see RatingParams doc; 0 = today's pure-EPA behavior
   pointsPerSuccessRate: 90, // untested placeholder — see RatingParams doc
   bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
+  excludeGarbageTime: false, // untested — no-garbage columns not ingested for NFL yet (nflverse-based, not CFBD)
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -158,6 +174,13 @@ const CFB_PARAMS: RatingParams = {
   // confidence-based version needs its own real sweep against
   // getConfidenceReport before trusting this specific value.
   bigSpreadShrinkRef: 25,
+  // Inherited false from NFL_PARAMS — deliberately not flipped on yet.
+  // CFBD's excludeGarbageTime param is confirmed to exist on the exact
+  // endpoint already in use (/stats/game/advanced), but the no-garbage
+  // columns need a real ingestion pass (cfb-garbage-time-ingest) and a
+  // sweep + walk-forward validation before this is worth trusting, same
+  // process successRateWeight just went through.
+  excludeGarbageTime: false,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

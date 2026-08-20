@@ -365,6 +365,42 @@ export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Prom
   );
 }
 
+export interface UpsertGarbageTimeStatsInput {
+  gameId: number;
+  teamId: number;
+  offEpaPlayNoGarbage: number | null;
+  defEpaPlayNoGarbage: number | null;
+  offSuccessRateNoGarbage: number | null;
+  defSuccessRateNoGarbage: number | null;
+}
+
+/**
+ * A targeted UPDATE onto an existing team_game_stats row (from
+ * upsertTeamGameStats's normal all-plays ingestion) with the same game's
+ * garbage-time-excluded EPA/success rate, from a second CFBD call with
+ * excludeGarbageTime=true. Not an upsert -- there's nothing sensible to
+ * INSERT here on its own (is_home/plays/source etc. all come from the
+ * all-plays row), so a game with no prior row is a no-op (0 rows
+ * affected), same as any other "the base row doesn't exist yet" case in
+ * this ingestion pipeline.
+ */
+export async function upsertGarbageTimeStats(input: UpsertGarbageTimeStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats
+     SET off_epa_play_no_garbage = $3, def_epa_play_no_garbage = $4,
+         off_success_rate_no_garbage = $5, def_success_rate_no_garbage = $6
+     WHERE game_id = $1 AND team_id = $2`,
+    [
+      input.gameId,
+      input.teamId,
+      input.offEpaPlayNoGarbage,
+      input.defEpaPlayNoGarbage,
+      input.offSuccessRateNoGarbage,
+      input.defSuccessRateNoGarbage,
+    ],
+  );
+}
+
 export interface GameForRating {
   gameId: number;
   week: number;
@@ -379,6 +415,15 @@ export interface GameForRating {
   homeDefSuccess: number | null;
   awayOffSuccess: number | null;
   awayDefSuccess: number | null;
+  /** Garbage-time-excluded EPA/success rate, from a second CFBD call with excludeGarbageTime=true (see ingest/cfbd/syncStats.ts's syncCfbdGarbageTimeStats). Nullable: only populated where that second ingestion pass has run; ratings/elo.ts falls back to the all-plays fields above when null, same pattern as the success-rate fields. */
+  homeOffEpaNoGarbage: number | null;
+  homeDefEpaNoGarbage: number | null;
+  awayOffEpaNoGarbage: number | null;
+  awayDefEpaNoGarbage: number | null;
+  homeOffSuccessNoGarbage: number | null;
+  homeDefSuccessNoGarbage: number | null;
+  awayOffSuccessNoGarbage: number | null;
+  awayDefSuccessNoGarbage: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -400,12 +445,24 @@ export async function getSeasonGamesForRating(
     home_def_success: number | null;
     away_off_success: number | null;
     away_def_success: number | null;
+    home_off_epa_no_garbage: number | null;
+    home_def_epa_no_garbage: number | null;
+    away_off_epa_no_garbage: number | null;
+    away_def_epa_no_garbage: number | null;
+    home_off_success_no_garbage: number | null;
+    home_def_success_no_garbage: number | null;
+    away_off_success_no_garbage: number | null;
+    away_def_success_no_garbage: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
             away_stats.off_epa_play AS away_off_epa, away_stats.def_epa_play AS away_def_epa,
             home_stats.off_success_rate AS home_off_success, home_stats.def_success_rate AS home_def_success,
-            away_stats.off_success_rate AS away_off_success, away_stats.def_success_rate AS away_def_success
+            away_stats.off_success_rate AS away_off_success, away_stats.def_success_rate AS away_def_success,
+            home_stats.off_epa_play_no_garbage AS home_off_epa_no_garbage, home_stats.def_epa_play_no_garbage AS home_def_epa_no_garbage,
+            away_stats.off_epa_play_no_garbage AS away_off_epa_no_garbage, away_stats.def_epa_play_no_garbage AS away_def_epa_no_garbage,
+            home_stats.off_success_rate_no_garbage AS home_off_success_no_garbage, home_stats.def_success_rate_no_garbage AS home_def_success_no_garbage,
+            away_stats.off_success_rate_no_garbage AS away_off_success_no_garbage, away_stats.def_success_rate_no_garbage AS away_def_success_no_garbage
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -428,6 +485,14 @@ export async function getSeasonGamesForRating(
     homeDefSuccess: r.home_def_success,
     awayOffSuccess: r.away_off_success,
     awayDefSuccess: r.away_def_success,
+    homeOffEpaNoGarbage: r.home_off_epa_no_garbage,
+    homeDefEpaNoGarbage: r.home_def_epa_no_garbage,
+    awayOffEpaNoGarbage: r.away_off_epa_no_garbage,
+    awayDefEpaNoGarbage: r.away_def_epa_no_garbage,
+    homeOffSuccessNoGarbage: r.home_off_success_no_garbage,
+    homeDefSuccessNoGarbage: r.home_def_success_no_garbage,
+    awayOffSuccessNoGarbage: r.away_off_success_no_garbage,
+    awayDefSuccessNoGarbage: r.away_def_success_no_garbage,
   }));
 }
 
