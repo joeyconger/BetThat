@@ -1,5 +1,6 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
+import { getPlays } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
@@ -749,4 +750,43 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,
+  "cfb-playtype-discover": startCfbPlayTypeDiscoverJob,
 };
+
+/**
+ * One-off diagnostic: pulls a single real week of CFB play-by-play and
+ * tabulates distinct play_type values by count, so the turnover-luck
+ * feature's play-type filter can be built against what CFBD ACTUALLY
+ * returns rather than a guessed list -- CFBD's play types are a lookup
+ * table in their own database, not a fixed enum in any client library, and
+ * this sandbox has no route to their docs site or a live API response to
+ * check against otherwise. Delete this job once the real filter is known
+ * and built into the turnover ingestion -- it's throwaway, not part of the
+ * permanent architecture.
+ */
+export function startCfbPlayTypeDiscoverJob(): Promise<JobStatus> {
+  return runJob("cfb-playtype-discover", async (job) => {
+    log(job, "pulling 2024 week 8 plays to inspect real play_type values");
+    const plays = await getPlays(2024, 8);
+    log(job, `${plays.length} total plays returned`);
+
+    const counts = new Map<string, number>();
+    for (const play of plays) {
+      counts.set(play.playType, (counts.get(play.playType) ?? 0) + 1);
+    }
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [playType, count] of sorted) {
+      log(job, `${count}x  "${playType}"`);
+    }
+
+    // Also surface a few sample plays whose type LOOKS turnover-related
+    // (case-insensitive substring match on common football terms), with
+    // their full text, as a sanity check on the exact wording before
+    // committing to a filter.
+    const candidates = plays.filter((p) => /fumble|intercept/i.test(p.playType));
+    log(job, `${candidates.length} plays with a play_type matching /fumble|intercept/i`);
+    for (const p of candidates.slice(0, 10)) {
+      log(job, `  sample: playType="${p.playType}" offense=${p.offense} defense=${p.defense} ppa=${p.ppa}`);
+    }
+  });
+}

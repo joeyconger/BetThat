@@ -182,3 +182,32 @@ export function getEloRatings(
 ): Promise<CfbdTeamElo[]> {
   return cfbdGet<CfbdTeamElo[]>("/ratings/elo", { year, week, seasonType });
 }
+
+export interface CfbdPlay {
+  id: string;
+  gameId: number;
+  offense: string;
+  defense: string;
+  period: number;
+  down: number;
+  distance: number;
+  yardsGained: number;
+  playType: string;
+  ppa: number | null;
+}
+
+/**
+ * Play-by-play data — year+week are BOTH required by this endpoint
+ * (confirmed against the real CFBD client source, since the docs site
+ * itself wasn't reachable from this environment; see client.ts's
+ * getGameAdvancedStats doc for the same pattern with excludeGarbageTime).
+ * One call per week, not per season, unlike every other endpoint this
+ * project uses — a full season pull is ~13 calls, not 1.
+ */
+export function getPlays(
+  year: number,
+  week: number,
+  seasonType: "regular" | "postseason" = "regular",
+): Promise<CfbdPlay[]> {
+  return cfbdGet<CfbdPlay[]>("/plays", { year, week, seasonType });
+}
