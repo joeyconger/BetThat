@@ -703,17 +703,19 @@ export function startCfbComponentIngestJob(): Promise<JobStatus> {
 }
 
 const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }> = [
-  // pointsPerExplosiveness's natural scale is EPA-like (CFBD explosiveness
-  // values run roughly 0.3-2.0) -- grid centered around pointsPerEpa=20's
-  // already-calibrated magnitude.
-  { jobName: "cfb-component-sweep-explosiveness", paramKey: "pointsPerExplosiveness", grid: [0, 2, 5, 10, 20], label: "pointsPerExplosiveness" },
-  // Down/distance splits are success-rate-scale (0-1, typical diffs
-  // 0.05-0.15) -- grid centered around pointsPerSuccessRate=120's
-  // already-calibrated magnitude for the same reason.
-  { jobName: "cfb-component-sweep-standarddowns", paramKey: "pointsPerStandardDownsSplit", grid: [0, 30, 60, 120, 200], label: "pointsPerStandardDownsSplit" },
-  { jobName: "cfb-component-sweep-passingdowns", paramKey: "pointsPerPassingDownsSplit", grid: [0, 30, 60, 120, 200], label: "pointsPerPassingDownsSplit" },
-  // Sack rate is also a small-fraction rate stat, same scale reasoning as the down splits.
-  { jobName: "cfb-component-sweep-sackrate", paramKey: "pointsPerSackRate", grid: [0, 30, 60, 120, 200], label: "pointsPerSackRate" },
+  // Refined after the first coarse pass (run 279-298): explosiveness was
+  // flat across 0-20 (best near 10) -- narrowed grid for a slightly finer
+  // read around that flat region. standardDownsSplit peaked at 30 then
+  // declined -- narrowed to pinpoint the peak between 0-50. passingDownsSplit
+  // and pointsPerSackRate both declined monotonically starting at the first
+  // nonzero point tested (30) -- narrowed toward 0 to find where each is
+  // actually best-calibrated, per the user's explicit instruction that these
+  // are being included regardless of whether they clear breakeven; this
+  // sweep is about WHERE to set the weight, not whether to use it.
+  { jobName: "cfb-component-sweep-explosiveness", paramKey: "pointsPerExplosiveness", grid: [0, 5, 8, 10, 12, 15], label: "pointsPerExplosiveness" },
+  { jobName: "cfb-component-sweep-standarddowns", paramKey: "pointsPerStandardDownsSplit", grid: [0, 10, 20, 30, 40, 50], label: "pointsPerStandardDownsSplit" },
+  { jobName: "cfb-component-sweep-passingdowns", paramKey: "pointsPerPassingDownsSplit", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerPassingDownsSplit" },
+  { jobName: "cfb-component-sweep-sackrate", paramKey: "pointsPerSackRate", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerSackRate" },
 ];
 
 /**
