@@ -447,10 +447,15 @@ const CFB_PARAMS: RatingParams = {
   // argues for -- treat this as the deliberately-minimized end of a real
   // trade-off, not a neutral pick.
   pointsPerFinishingDrives: 2,
-  // Inherited 0 from NFL_PARAMS — Phase 3 of the component-model rebuild,
-  // untested. Needs cfb-specialteams-ingest then a real sweep.
-  pointsPerFieldPosition: 0,
-  pointsPerFgMakeRate: 0,
+  // Calibrated via cfb-specialteams-ingest + cfb-component-sweep-*
+  // (run 328-338). pointsPerFieldPosition=0.2: tied-best cover vs open
+  // (52.4%, tied with 0.1) with the best avgClv of that pair (0.65);
+  // declined beyond 0.2. pointsPerFgMakeRate=5: best cover vs open of
+  // the WHOLE grid (52.5%, the single best value seen across every
+  // Phase 1-3 component sweep tonight) with a still-reasonable avgClv
+  // (0.60); both metrics declined steadily past weight=5.
+  pointsPerFieldPosition: 0.2,
+  pointsPerFgMakeRate: 5,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {
