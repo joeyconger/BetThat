@@ -274,7 +274,12 @@ export interface CfbdPlayWinProbability {
   yardLine: number;
   down: number;
   distance: number;
-  homeWinProb: number | null;
+  // Confirmed real (cfb-verify-plays, 2026-08-21): some rows omit this key
+  // entirely rather than sending JSON null, so it comes back JS-undefined
+  // at runtime despite the declared `| null` -- TypeScript can't catch
+  // this since JSON.parse's result is cast, not validated. Always check
+  // with `== null`, not `=== null`, for both cases at once.
+  homeWinProb?: number | null;
   playNumber: number;
 }
 

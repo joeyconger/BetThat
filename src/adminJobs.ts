@@ -1281,7 +1281,7 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     for (const play of shown) {
       const clock = play.clock ? `${play.clock.minutes}:${String(play.clock.seconds ?? 0).padStart(2, "0")}` : "?";
       const wpRow = wpByPlayNumber.get(play.playNumber);
-      const wpStr = wpRow ? (wpRow.homeWinProb === null ? "null" : wpRow.homeWinProb.toFixed(3)) : "(none)";
+      const wpStr = wpRow ? (wpRow.homeWinProb == null ? "null" : wpRow.homeWinProb.toFixed(3)) : "(none)";
       log(
         job,
         [
