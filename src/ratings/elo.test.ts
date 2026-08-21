@@ -630,14 +630,37 @@ test("computeSeasonRatings applies pointsPerFieldPosition and pointsPerFgMakeRat
   );
 });
 
-test("computeSeasonRatings' new component signals (explosiveness/splits/sack rate/finishing drives) are all no-ops when their weights are explicitly 0, even with data present", () => {
+test("computeSeasonRatings applies pointsPerOpponentAdj as an additive term, with the standard (non-inverted) sign convention", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerOpponentAdj: 10 };
+  const game = {
+    gameId: 1, week: 3, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    // Home's opponent-adjusted profile: strong offense, strong defense (both as-of-week-3 snapshots from prior weeks).
+    homeOffAdj: 0.08, homeDefAdj: -0.06,
+    // Away: below-average offense, below-average defense.
+    awayOffAdj: -0.02, awayDefAdj: 0.03,
+  };
+  const state = computeSeasonRatings([game], new Map(), params);
+
+  // homeNetAdj = 0.08 - (-0.06) = 0.14; awayNetAdj = -0.02 - 0.03 = -0.05 -> diff 0.19 -> term = 10 * 0.19 = 1.9
+  const actualMargin = params.pointsPerOpponentAdj * (0.14 - -0.05);
+  const error = actualMargin - params.homeFieldAdvantage;
+  const expectedHomeRating = params.baseK * error;
+
+  assert.ok(
+    Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9,
+    `home rating (${state.get(1)!.rating}) matches hand-computed opponent-adjustment formula (${expectedHomeRating})`,
+  );
+});
+
+test("computeSeasonRatings' new component signals (explosiveness/splits/sack rate/finishing drives/opponent-adjustment) are all no-ops when their weights are explicitly 0, even with data present", () => {
   // CFB's real defaults for these are now calibrated nonzero values
   // (see config.ts) -- explicitly zero them here so this test isolates the
   // no-op guard itself, not CFB's current calibration.
   const zeroed = {
     ...CFB, successRateWeight: 0,
     pointsPerExplosiveness: 0, pointsPerStandardDownsSplit: 0, pointsPerPassingDownsSplit: 0, pointsPerSackRate: 0, pointsPerFinishingDrives: 0,
-    pointsPerFieldPosition: 0, pointsPerFgMakeRate: 0,
+    pointsPerFieldPosition: 0, pointsPerFgMakeRate: 0, pointsPerOpponentAdj: 0,
   };
   const gameBase = {
     gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
@@ -652,6 +675,7 @@ test("computeSeasonRatings' new component signals (explosiveness/splits/sack rat
     homeOffFinishingDrivesPpo: 5.5, homeDefFinishingDrivesPpo: 4.0, awayOffFinishingDrivesPpo: 3.0, awayDefFinishingDrivesPpo: 2.0,
     homeOffFieldPosition: 35, homeDefFieldPosition: 40, awayOffFieldPosition: 28, awayDefFieldPosition: 22,
     homeOffFgMakeRate: 0.8, homeDefFgMakeRate: 0.6, awayOffFgMakeRate: 0.5, awayDefFgMakeRate: 0.5,
+    homeOffAdj: 0.08, homeDefAdj: -0.06, awayOffAdj: -0.02, awayDefAdj: 0.03,
   };
   const withComponents = computeSeasonRatings([gameWithComponents], new Map(), zeroed);
   const withoutComponents = computeSeasonRatings([gameBase], new Map(), zeroed);
@@ -663,7 +687,7 @@ test("computeSeasonRatings falls back to a no-op per component when that compone
   const params = {
     ...CFB, successRateWeight: 0,
     pointsPerExplosiveness: 4, pointsPerStandardDownsSplit: 3, pointsPerPassingDownsSplit: 5, pointsPerSackRate: 10, pointsPerFinishingDrives: 6,
-    pointsPerFieldPosition: 0.5, pointsPerFgMakeRate: 8,
+    pointsPerFieldPosition: 0.5, pointsPerFgMakeRate: 8, pointsPerOpponentAdj: 10,
   };
   const gameNoComponentData = {
     gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
@@ -675,7 +699,7 @@ test("computeSeasonRatings falls back to a no-op per component when that compone
     new Map(),
     {
       ...params, pointsPerExplosiveness: 0, pointsPerStandardDownsSplit: 0, pointsPerPassingDownsSplit: 0, pointsPerSackRate: 0, pointsPerFinishingDrives: 0,
-      pointsPerFieldPosition: 0, pointsPerFgMakeRate: 0,
+      pointsPerFieldPosition: 0, pointsPerFgMakeRate: 0, pointsPerOpponentAdj: 0,
     },
   );
   assert.equal(withWeights.get(1)!.rating, withoutWeights.get(1)!.rating, "missing component fields fall back to pure epaMargin, identical to all weights at 0");

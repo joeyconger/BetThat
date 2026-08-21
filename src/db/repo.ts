@@ -464,6 +464,31 @@ export async function upsertSpecialTeamsStats(input: UpsertSpecialTeamsStatsInpu
   );
 }
 
+export interface UpsertOpponentAdjustedStatsInput {
+  gameId: number;
+  teamId: number;
+  /** Null when this team has no completed prior-week games this season to compute an as-of-week snapshot from (week 1, a transfer, first FBS season). */
+  offAdj: number | null;
+  defAdj: number | null;
+}
+
+/**
+ * Same targeted-UPDATE shape as upsertSpecialTeamsStats. Unlike every
+ * other component, these values are NOT a per-game aggregate from a CFBD
+ * endpoint -- they come from re-running
+ * ratings/opponentAdjust.ts's computeOpponentAdjustedRatings fresh over
+ * this team's SEASON-TO-DATE-BEFORE-THIS-WEEK games (see
+ * ingest/cfbd/syncOpponentAdjustedStats.ts), so the same team gets a
+ * DIFFERENT off_adj/def_adj value in each game of the season (its rating
+ * as of that point), not one fixed value repeated across all its games.
+ */
+export async function upsertOpponentAdjustedStats(input: UpsertOpponentAdjustedStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats SET off_adj = $3, def_adj = $4 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offAdj, input.defAdj],
+  );
+}
+
 /**
  * Bulk name -> team id map for a whole sport, one query instead of N --
  * needed for raw play ingestion (~15-20k rows per week, ~150k+ per season),
@@ -774,6 +799,11 @@ export interface GameForRating {
   homeDefFgMakeRate: number | null;
   awayOffFgMakeRate: number | null;
   awayDefFgMakeRate: number | null;
+  /** Real iterative opponent-adjustment (see ratings/opponentAdjust.ts), from ingest/cfbd/syncOpponentAdjustedStats.ts. Standard off/def sign convention. Null for a team's week-1 game or any week with no prior completed games to compute an as-of-week snapshot from -- see upsertOpponentAdjustedStats' doc. */
+  homeOffAdj: number | null;
+  homeDefAdj: number | null;
+  awayOffAdj: number | null;
+  awayDefAdj: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -843,6 +873,10 @@ export async function getSeasonGamesForRating(
     home_def_fg_make_rate: number | null;
     away_off_fg_make_rate: number | null;
     away_def_fg_make_rate: number | null;
+    home_off_adj: number | null;
+    home_def_adj: number | null;
+    away_off_adj: number | null;
+    away_def_adj: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -872,7 +906,9 @@ export async function getSeasonGamesForRating(
             home_stats.off_field_position AS home_off_field_position, home_stats.def_field_position AS home_def_field_position,
             away_stats.off_field_position AS away_off_field_position, away_stats.def_field_position AS away_def_field_position,
             home_stats.off_fg_make_rate AS home_off_fg_make_rate, home_stats.def_fg_make_rate AS home_def_fg_make_rate,
-            away_stats.off_fg_make_rate AS away_off_fg_make_rate, away_stats.def_fg_make_rate AS away_def_fg_make_rate
+            away_stats.off_fg_make_rate AS away_off_fg_make_rate, away_stats.def_fg_make_rate AS away_def_fg_make_rate,
+            home_stats.off_adj AS home_off_adj, home_stats.def_adj AS home_def_adj,
+            away_stats.off_adj AS away_off_adj, away_stats.def_adj AS away_def_adj
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -943,6 +979,10 @@ export async function getSeasonGamesForRating(
     homeDefFgMakeRate: r.home_def_fg_make_rate,
     awayOffFgMakeRate: r.away_off_fg_make_rate,
     awayDefFgMakeRate: r.away_def_fg_make_rate,
+    homeOffAdj: r.home_off_adj,
+    homeDefAdj: r.home_def_adj,
+    awayOffAdj: r.away_off_adj,
+    awayDefAdj: r.away_def_adj,
   }));
 }
 

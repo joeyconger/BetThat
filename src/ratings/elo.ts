@@ -125,6 +125,19 @@ export interface GameForRating {
   homeDefFgMakeRate?: number | null;
   awayOffFgMakeRate?: number | null;
   awayDefFgMakeRate?: number | null;
+  /**
+   * Real iterative opponent-adjustment (ratings/opponentAdjust.ts), from
+   * ingest/cfbd/syncOpponentAdjustedStats.ts. Standard off/def sign
+   * convention. Unlike every other component here, these are already
+   * opponent-adjusted AS OF this game's week -- that adjustment happens
+   * upstream (a fresh solve per week over prior weeks only), not in this
+   * additive term, which just diffs the two teams' pre-computed values
+   * the same way every other pointsPerX term does.
+   */
+  homeOffAdj?: number | null;
+  homeDefAdj?: number | null;
+  awayOffAdj?: number | null;
+  awayDefAdj?: number | null;
 }
 
 export interface TeamRatingState {
@@ -300,6 +313,12 @@ export function computeSeasonRatings(
     const haveAllFourFgMakeRate =
       homeOffFgMakeRate != null && homeDefFgMakeRate != null && awayOffFgMakeRate != null && awayDefFgMakeRate != null;
 
+    const homeOffAdj = game.homeOffAdj;
+    const homeDefAdj = game.homeDefAdj;
+    const awayOffAdj = game.awayOffAdj;
+    const awayDefAdj = game.awayDefAdj;
+    const haveAllFourAdj = homeOffAdj != null && homeDefAdj != null && awayOffAdj != null && awayDefAdj != null;
+
     // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
     // doc. Applied AFTER the garbage-time resolution above, on top of
     // whichever EPA source (raw or no-garbage) was just selected, always
@@ -409,6 +428,11 @@ export function computeSeasonRatings(
       const homeNetFg = homeOffFgMakeRate! - homeDefFgMakeRate!;
       const awayNetFg = awayOffFgMakeRate! - awayDefFgMakeRate!;
       actualMargin += params.pointsPerFgMakeRate * (homeNetFg - awayNetFg);
+    }
+    if (params.pointsPerOpponentAdj !== 0 && haveAllFourAdj) {
+      const homeNetAdj = homeOffAdj! - homeDefAdj!;
+      const awayNetAdj = awayOffAdj! - awayDefAdj!;
+      actualMargin += params.pointsPerOpponentAdj * (homeNetAdj - awayNetAdj);
     }
 
     const error = actualMargin - predictedMargin;

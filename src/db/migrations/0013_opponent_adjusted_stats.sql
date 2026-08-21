@@ -1,0 +1,21 @@
+-- Phase 4 of the component-model rebuild: real iterative opponent
+-- adjustment (see ratings/opponentAdjust.ts), computed from real play
+-- data now that raw plays are ingested (migration 0012) -- replacing the
+-- two failed attempts at a naive season-average-based opponentAdjustWeight.
+--
+-- off_adj/def_adj: this team's opponent-adjusted OFF/DEF rating AS OF
+-- the start of this game's week -- i.e. computed by re-running
+-- computeOpponentAdjustedRatings fresh over only the games from EARLIER
+-- weeks in the same season (see
+-- ingest/cfbd/syncOpponentAdjustedStats.ts), never including this game or
+-- any later one. Same sign convention as every other component: higher
+-- off_adj = better offense, LOWER (more negative) def_adj = better
+-- defense (def_adj is opponent-adjusted rate ALLOWED).
+--
+-- Both nullable: a team's week-1 game (or any week where the team has no
+-- completed prior games at all -- transfers, first FBS season) has
+-- nothing to compute an as-of-week snapshot from, so this degrades to the
+-- same no-op-when-missing-data pattern every other component already
+-- uses (haveAllFourX in elo.ts), not a 0-filled fake value.
+ALTER TABLE team_game_stats ADD COLUMN off_adj numeric;
+ALTER TABLE team_game_stats ADD COLUMN def_adj numeric;

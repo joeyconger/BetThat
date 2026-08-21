@@ -265,6 +265,18 @@ export interface RatingParams {
    * Defaults to 0 (no-op) — untested.
    */
   pointsPerFgMakeRate: number;
+  /**
+   * The REAL opponent-adjustment mechanism (ratings/opponentAdjust.ts's
+   * iterative solve over real play data), distinct from opponentAdjustWeight
+   * above (a naive season-to-date-average approach, tested twice and found
+   * negative both times — see that field's doc). Same additive shape as
+   * every other pointsPerX term: diffs each team's already opponent-adjusted
+   * off_adj/def_adj (computed upstream, fresh per week over PRIOR weeks
+   * only — see ingest/cfbd/syncOpponentAdjustedStats.ts). CFB-only.
+   * Defaults to 0 (no-op) — untested, needs the as-of-week sync job built
+   * and run, then a real sweep.
+   */
+  pointsPerOpponentAdj: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -296,6 +308,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerFinishingDrives: 0, // no finishing-drives ingestion for NFL yet (would need an nflverse drive-level source, not CFBD)
   pointsPerFieldPosition: 0, // no special-teams ingestion for NFL yet
   pointsPerFgMakeRate: 0,
+  pointsPerOpponentAdj: 0, // no raw-play ingestion for NFL yet
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -456,6 +469,13 @@ const CFB_PARAMS: RatingParams = {
   // (0.60); both metrics declined steadily past weight=5.
   pointsPerFieldPosition: 0.2,
   pointsPerFgMakeRate: 5,
+  // Untested — the real iterative-solve opponent-adjustment
+  // (ratings/opponentAdjust.ts) is built and real-data-sanity-checked
+  // (cfb-opponent-adjust-snapshot: converges cleanly, 2024 rankings match
+  // reality), but off_adj/def_adj haven't been computed/ingested per-week
+  // yet (needs ingest/cfbd/syncOpponentAdjustedStats.ts, not yet built) —
+  // 0 until that exists and a real sweep has run.
+  pointsPerOpponentAdj: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {
