@@ -840,6 +840,12 @@ const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey
   { jobName: "cfb-component-sweep-fieldposition", paramKey: "pointsPerFieldPosition", grid: [0, 0.1, 0.2, 0.5, 1], label: "pointsPerFieldPosition" },
   // FG make rate is a 0-1 rate stat like success rate/sack rate -- same scale reasoning.
   { jobName: "cfb-component-sweep-fgmakerate", paramKey: "pointsPerFgMakeRate", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerFgMakeRate" },
+  // Phase 4: real opponent-adjustment. off_adj/def_adj are success-rate-
+  // scale deviations from league average (real 2024 snapshot ranged
+  // roughly -0.15 to +0.12 -- see cfb-opponent-adjust-snapshot) -- same
+  // rough scale as the standard/passing-downs splits above, so starting
+  // with a similar-order coarse grid before refining.
+  { jobName: "cfb-component-sweep-opponentadj", paramKey: "pointsPerOpponentAdj", grid: [0, 20, 40, 60, 80, 100], label: "pointsPerOpponentAdj" },
 ];
 
 /**
@@ -863,6 +869,7 @@ export const startCfbComponentSweepSackRateJob = () => runComponentSweepJob(COMP
 export const startCfbComponentSweepFinishingDrivesJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[4]!);
 export const startCfbComponentSweepFieldPositionJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[5]!);
 export const startCfbComponentSweepFgMakeRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[6]!);
+export const startCfbComponentSweepOpponentAdjJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[7]!);
 
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
@@ -1182,6 +1189,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-rawplays-ingest": startCfbRawPlaysIngestJob,
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
+  "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
