@@ -739,6 +739,24 @@ export function startCfbConfidenceReportJob(): Promise<JobStatus> {
  * confidence ceiling on 2023-2024 (restricted to buckets with >=30 games,
  * so a tiny high-confidence sample can't win on noise alone), then check
  * that EXACT ceiling against the untouched 2025 season.
+ *
+ * RESULT (run 2026-08-21): the in-sample trend looked real and monotonic
+ * -- cover vs open climbed from 52.7% (confidence<=8, near-unfiltered) to
+ * 54.9% (confidence<=2.5, 436 games) across the full 2023-2025 sample
+ * (cfb-confidence-report). Training on 2023-2024 alone picked
+ * confidence<=2.5 as best (57.6% train cover, 273 games) -- but that exact
+ * ceiling scored only 50.3% on the untouched 2025 holdout (163 games),
+ * WORSE than the unfiltered 2025 baseline (50.7%) and well under the
+ * ~52.4% breakeven. Did not survive walk-forward -- same conclusion as
+ * opponentAdjustWeight/pointsPerRestDay/turnoverLuckWeight tonight: the
+ * in-sample trend was very likely overfit noise (best-of-6-ceilings on a
+ * modest 273-game training sample is exactly the kind of multiple-
+ * comparisons risk this project's whole walk-forward discipline exists to
+ * catch), not a real, robust "the model already makes money on its most
+ * confident picks" edge. No RatingParams change to make here (this is a
+ * reporting lens, not a model input) -- just a finding: confidence, as
+ * currently computed (games-played + market-spread-size), isn't a
+ * profitable filter on its own.
  */
 export function startCfbConfidenceWalkforwardJob(): Promise<JobStatus> {
   return runJob("cfb-confidence-walkforward", async (job) => {
