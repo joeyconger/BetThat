@@ -285,10 +285,19 @@ const CFB_PARAMS: RatingParams = {
   // stripping turnovers out separately has little independent information
   // left to add. Left at 0.
   turnoverLuckWeight: 0,
-  // Inherited 0 from NFL_PARAMS — no-op until swept. Needs
-  // cfb-manual-sp-ingest first (only 2025 has a real weekly archive so
-  // far) — see weeklySpSignalPoints' doc for why this is worth retrying
-  // despite spSignalPoints' failure above.
+  // Swept 0-3 (cfb-weeklyspsignal-sweep, run 273-278, 2025 only — the one
+  // season a real weekly archive exists for): noisy, not a clean trend —
+  // cover vs open bounces 50.4%-50.8% through most of the grid, then the
+  // top-of-range value (weight=3) came out best at 52.1%, still short of
+  // the ~52.4% breakeven and short of "significantly higher than 52%."
+  // Same "best value sits at the edge of the tested range" pattern the
+  // confidence-filter idea showed right before its walk-forward holdout
+  // showed it was noise (see adminJobs.ts's cfb-confidence-walkforward) —
+  // except this one has no possible holdout to confirm or refute it
+  // against, since 2025 is the only season with real data. Verdict:
+  // staleness (the diagnosed reason spSignalPoints failed) wasn't
+  // actually the problem — real, fresh week-by-week SP+ still doesn't
+  // add anything this model doesn't already have. Left at 0.
   weeklySpSignalPoints: 0,
 };
 
