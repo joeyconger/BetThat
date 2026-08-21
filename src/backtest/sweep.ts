@@ -626,3 +626,70 @@ export async function runWeeklySpSignalSweep(
   results.sort((a, b) => (b.coverRateVsOpening ?? -1) - (a.coverRateVsOpening ?? -1));
   return results;
 }
+
+/**
+ * Generic single-param sweep for the component-model rebuild (explosiveness,
+ * down/distance splits, sack rate — see RatingParams.pointsPerExplosiveness's
+ * doc for why these replaced the removed sosWeight). One reusable function
+ * instead of four near-identical bespoke ones, since all four are the exact
+ * same shape: an additive pointsPer* term, swept in isolation (every other
+ * component held at its 0 default), same "one param at a time" discipline
+ * as every other sweep tonight rather than an expensive multi-dimensional
+ * grid search. Reports cover vs. OPENING line (the real "would this make
+ * money" question), not just vs. closing.
+ */
+export type ComponentParamKey =
+  | "pointsPerExplosiveness"
+  | "pointsPerStandardDownsSplit"
+  | "pointsPerPassingDownsSplit"
+  | "pointsPerSackRate";
+
+const DEFAULT_COMPONENT_WEIGHT_GRID = [0, 1, 2, 4, 8];
+
+export interface ComponentSweepResult {
+  value: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+  openingGames: number;
+  coverRateVsOpening: number | null;
+}
+
+export async function runComponentSweep(
+  sport: Sport,
+  seasonStart: number,
+  seasonEnd: number,
+  paramKey: ComponentParamKey,
+  weightGrid: number[] = DEFAULT_COMPONENT_WEIGHT_GRID,
+): Promise<ComponentSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: ComponentSweepResult[] = [];
+
+  for (const value of weightGrid) {
+    const paramsOverride: RatingParams = { ...base, [paramKey]: value };
+    const name = `sweep-${paramKey}-${sport}-v${value}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart, seasonEnd, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    const opening = await getOpeningCoverRate(backtestRunId);
+    results.push({
+      value,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+      openingGames: opening.games,
+      coverRateVsOpening: opening.coverRateVsOpening,
+    });
+    console.log(
+      `${paramKey}=${value}: ${scored} games, cover vs close=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, cover vs open=${
+        opening.coverRateVsOpening === null ? "n/a" : (opening.coverRateVsOpening * 100).toFixed(1) + "%"
+      } (${opening.games} games), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRateVsOpening ?? -1) - (a.coverRateVsOpening ?? -1));
+  return results;
+}

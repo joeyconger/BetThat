@@ -507,3 +507,113 @@ test("computeSeasonRatings falls back to raw EPA when turnover-stats fields are 
   assert.equal(withWeight.get(1)!.rating, withoutWeight.get(1)!.rating, "missing turnover-stats fields fall back to raw EPA, identical to turnoverLuckWeight=0");
   assert.equal(withWeight.get(2)!.rating, withoutWeight.get(2)!.rating, "missing turnover-stats fields fall back to raw EPA, identical to turnoverLuckWeight=0");
 });
+
+// --- Component-model rebuild: explosiveness / down-distance splits / sack rate ---
+// All four tests below hold both teams at rating 0 (fresh, no initial ratings)
+// so each side's SOS multiplier is exactly 1 (sosWeight=0 for CFB anyway, see
+// config.ts) and successRateWeight is forced to 0 so actualMargin starts as
+// pure epaMargin, isolating each new additive term's own contribution.
+
+test("computeSeasonRatings applies pointsPerExplosiveness as an additive term on top of epaMargin", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerExplosiveness: 4 };
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: 0.05, awayOffEpa: 0.05, awayDefEpa: 0.1,
+    homeOffExplosiveness: 1.4, homeDefExplosiveness: 1.1, awayOffExplosiveness: 1.2, awayDefExplosiveness: 1.3,
+  };
+  const state = computeSeasonRatings([game], new Map(), params);
+
+  const epaMargin = params.pointsPerEpa * ((game.homeOffEpa - game.homeDefEpa) - (game.awayOffEpa - game.awayDefEpa));
+  const homeNetExpl = game.homeOffExplosiveness - game.homeDefExplosiveness; // 0.3
+  const awayNetExpl = game.awayOffExplosiveness - game.awayDefExplosiveness; // -0.1
+  const actualMargin = epaMargin + params.pointsPerExplosiveness * (homeNetExpl - awayNetExpl); // + 4*0.4 = +1.6
+  const error = actualMargin - params.homeFieldAdvantage;
+  const expectedHomeRating = params.baseK * error;
+
+  assert.ok(Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9, `home rating (${state.get(1)!.rating}) matches hand-computed explosiveness-adjusted formula (${expectedHomeRating})`);
+});
+
+test("computeSeasonRatings applies pointsPerStandardDownsSplit and pointsPerPassingDownsSplit as independent additive terms", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerStandardDownsSplit: 3, pointsPerPassingDownsSplit: 5 };
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffStandardDownsSuccessRate: 0.5, homeDefStandardDownsSuccessRate: 0.4, awayOffStandardDownsSuccessRate: 0.45, awayDefStandardDownsSuccessRate: 0.35,
+    homeOffPassingDownsSuccessRate: 0.3, homeDefPassingDownsSuccessRate: 0.35, awayOffPassingDownsSuccessRate: 0.25, awayDefPassingDownsSuccessRate: 0.4,
+  };
+  const state = computeSeasonRatings([game], new Map(), params);
+
+  // homeNetStd = 0.5-0.4=0.1; awayNetStd = 0.45-0.35=0.1 -> diff 0 -> standardDowns term contributes 0.
+  // homeNetPass = 0.3-0.35=-0.05; awayNetPass = 0.25-0.4=-0.15 -> diff 0.1 -> passingDowns term = 5*0.1 = 0.5.
+  const actualMargin = 0 + params.pointsPerStandardDownsSplit * 0 + params.pointsPerPassingDownsSplit * 0.1;
+  const error = actualMargin - params.homeFieldAdvantage;
+  const expectedHomeRating = params.baseK * error;
+
+  assert.ok(Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9, `home rating (${state.get(1)!.rating}) matches hand-computed down-splits formula (${expectedHomeRating})`);
+});
+
+test("computeSeasonRatings applies pointsPerSackRate with the INVERTED sign convention (def_sack_rate good, off_sack_rate bad)", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerSackRate: 10 };
+  const game = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    // Home offense gets sacked a lot (bad, 0.15) but home defense also sacks a lot (good, 0.12).
+    homeOffSackRate: 0.15, homeDefSackRate: 0.12,
+    // Away offense rarely sacked (good for away, 0.02); away defense rarely sacks (bad for away, 0.03).
+    awayOffSackRate: 0.02, awayDefSackRate: 0.03,
+  };
+  const state = computeSeasonRatings([game], new Map(), params);
+
+  // homeNetSack = def - off = 0.12 - 0.15 = -0.03 (net bad for home)
+  // awayNetSack = def - off = 0.03 - 0.02 = 0.01 (net good for away)
+  const homeNetSack = 0.12 - 0.15;
+  const awayNetSack = 0.03 - 0.02;
+  const actualMargin = params.pointsPerSackRate * (homeNetSack - awayNetSack); // 10 * (-0.04) = -0.4
+  const error = actualMargin - params.homeFieldAdvantage;
+  const expectedHomeRating = params.baseK * error;
+
+  assert.ok(
+    Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9,
+    `home rating (${state.get(1)!.rating}) matches hand-computed sack-rate formula with inverted sign convention (${expectedHomeRating})`,
+  );
+  // Sanity check the sign actually matters: a naive off-minus-def (uninverted) convention would give a different, wrong answer.
+  const wrongConventionMargin = params.pointsPerSackRate * ((0.15 - 0.12) - (0.02 - 0.03));
+  assert.notEqual(actualMargin, wrongConventionMargin, "inverted and naive sign conventions must diverge for this test to actually prove the sign is right");
+});
+
+test("computeSeasonRatings' new component signals (explosiveness/splits/sack rate) are all no-ops at default (0) weights, even with data present", () => {
+  const gameBase = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: 0.05, awayOffEpa: 0.05, awayDefEpa: 0.1,
+  };
+  const gameWithComponents = {
+    ...gameBase,
+    homeOffExplosiveness: 1.4, homeDefExplosiveness: 1.1, awayOffExplosiveness: 1.2, awayDefExplosiveness: 1.3,
+    homeOffStandardDownsSuccessRate: 0.5, homeDefStandardDownsSuccessRate: 0.4, awayOffStandardDownsSuccessRate: 0.45, awayDefStandardDownsSuccessRate: 0.35,
+    homeOffPassingDownsSuccessRate: 0.3, homeDefPassingDownsSuccessRate: 0.35, awayOffPassingDownsSuccessRate: 0.25, awayDefPassingDownsSuccessRate: 0.4,
+    homeOffSackRate: 0.15, homeDefSackRate: 0.12, awayOffSackRate: 0.02, awayDefSackRate: 0.03,
+  };
+  const withComponents = computeSeasonRatings([gameWithComponents], new Map(), { ...CFB, successRateWeight: 0 });
+  const withoutComponents = computeSeasonRatings([gameBase], new Map(), { ...CFB, successRateWeight: 0 });
+  assert.equal(withComponents.get(1)!.rating, withoutComponents.get(1)!.rating, "home rating identical with all component weights at their 0 default");
+  assert.equal(withComponents.get(2)!.rating, withoutComponents.get(2)!.rating, "away rating identical with all component weights at their 0 default");
+});
+
+test("computeSeasonRatings falls back to a no-op per component when that component's fields are missing, even with nonzero weights", () => {
+  const params = {
+    ...CFB, successRateWeight: 0,
+    pointsPerExplosiveness: 4, pointsPerStandardDownsSplit: 3, pointsPerPassingDownsSplit: 5, pointsPerSackRate: 10,
+  };
+  const gameNoComponentData = {
+    gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0.1, homeDefEpa: 0.05, awayOffEpa: 0.05, awayDefEpa: 0.1,
+  };
+  const withWeights = computeSeasonRatings([gameNoComponentData], new Map(), params);
+  const withoutWeights = computeSeasonRatings(
+    [gameNoComponentData],
+    new Map(),
+    { ...params, pointsPerExplosiveness: 0, pointsPerStandardDownsSplit: 0, pointsPerPassingDownsSplit: 0, pointsPerSackRate: 0 },
+  );
+  assert.equal(withWeights.get(1)!.rating, withoutWeights.get(1)!.rating, "missing component fields fall back to pure epaMargin, identical to all weights at 0");
+  assert.equal(withWeights.get(2)!.rating, withoutWeights.get(2)!.rating, "missing component fields fall back to pure epaMargin, identical to all weights at 0");
+});

@@ -72,14 +72,28 @@ export function getVenues(): Promise<CfbdVenue[]> {
 interface CfbdAdvancedSplit {
   ppa: number | null;
   successRate: number | null;
+  explosiveness?: number | null;
 }
 
+/**
+ * standardDowns/passingDowns and explosiveness -- confirmed real fields on
+ * this exact endpoint via CFBD's own client library docs (AdvancedGameStatOffense,
+ * AdvancedGameStatOffenseStandardDowns), not guessed -- see
+ * ratings/config.ts's offExplosivenessWeight-family docs for how these
+ * feed the rating model. camelCase here (not the Python client's snake_case
+ * doc naming) to match this project's existing successRate/rushingPlays
+ * fields on the same endpoint, which are already confirmed working against
+ * real production responses.
+ */
 interface CfbdAdvancedSide {
   plays: number | null;
   ppa: number | null;
   successRate: number | null;
+  explosiveness?: number | null;
   rushingPlays?: CfbdAdvancedSplit;
   passingPlays?: CfbdAdvancedSplit;
+  standardDowns?: CfbdAdvancedSplit;
+  passingDowns?: CfbdAdvancedSplit;
 }
 
 export interface CfbdGameAdvancedStats {

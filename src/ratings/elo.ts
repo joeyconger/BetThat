@@ -64,6 +64,38 @@ export interface GameForRating {
   awayOffTurnoverPlays?: number | null;
   awayDefTurnoverPpaSum?: number | null;
   awayDefTurnoverPlays?: number | null;
+  /**
+   * Explosiveness and down/distance splits, from the same CFBD advanced-
+   * stats response as EPA/success rate — only used when the corresponding
+   * params.pointsPer* is nonzero, and only when all four of a given
+   * metric's fields are present for a game; missing any one falls back to
+   * a no-op for that metric on that game, same degrade-don't-guess
+   * pattern as every other optional signal here.
+   */
+  homeOffExplosiveness?: number | null;
+  homeDefExplosiveness?: number | null;
+  awayOffExplosiveness?: number | null;
+  awayDefExplosiveness?: number | null;
+  homeOffStandardDownsSuccessRate?: number | null;
+  homeDefStandardDownsSuccessRate?: number | null;
+  awayOffStandardDownsSuccessRate?: number | null;
+  awayDefStandardDownsSuccessRate?: number | null;
+  homeOffPassingDownsSuccessRate?: number | null;
+  homeDefPassingDownsSuccessRate?: number | null;
+  awayOffPassingDownsSuccessRate?: number | null;
+  awayDefPassingDownsSuccessRate?: number | null;
+  /**
+   * Sack rate, from a separate CFBD /plays ingestion pass (see
+   * ingest/cfbd/syncSackRateStats.ts) — INVERTED off/def sign convention
+   * from every other pair here (off_sack_rate is bad for the team that
+   * has it, def_sack_rate is good — see RatingParams.pointsPerSackRate's
+   * doc). Only used when params.pointsPerSackRate is nonzero and all four
+   * fields are present.
+   */
+  homeOffSackRate?: number | null;
+  homeDefSackRate?: number | null;
+  awayOffSackRate?: number | null;
+  awayDefSackRate?: number | null;
 }
 
 export interface TeamRatingState {
@@ -179,6 +211,42 @@ export function computeSeasonRatings(
     const awayOffSuccess = (useNoGarbage ? game.awayOffSuccessNoGarbage : undefined) ?? game.awayOffSuccess;
     const awayDefSuccess = (useNoGarbage ? game.awayDefSuccessNoGarbage : undefined) ?? game.awayDefSuccess;
 
+    // Explosiveness / down-distance splits / sack rate -- no garbage-time
+    // variant exists for any of these (unlike EPA/success rate above), so
+    // these are read directly off the game object, no useNoGarbage branch.
+    const homeOffExplosiveness = game.homeOffExplosiveness;
+    const homeDefExplosiveness = game.homeDefExplosiveness;
+    const awayOffExplosiveness = game.awayOffExplosiveness;
+    const awayDefExplosiveness = game.awayDefExplosiveness;
+    const haveAllFourExplosiveness =
+      homeOffExplosiveness != null && homeDefExplosiveness != null && awayOffExplosiveness != null && awayDefExplosiveness != null;
+
+    const homeOffStandardDownsSuccessRate = game.homeOffStandardDownsSuccessRate;
+    const homeDefStandardDownsSuccessRate = game.homeDefStandardDownsSuccessRate;
+    const awayOffStandardDownsSuccessRate = game.awayOffStandardDownsSuccessRate;
+    const awayDefStandardDownsSuccessRate = game.awayDefStandardDownsSuccessRate;
+    const haveAllFourStandardDowns =
+      homeOffStandardDownsSuccessRate != null &&
+      homeDefStandardDownsSuccessRate != null &&
+      awayOffStandardDownsSuccessRate != null &&
+      awayDefStandardDownsSuccessRate != null;
+
+    const homeOffPassingDownsSuccessRate = game.homeOffPassingDownsSuccessRate;
+    const homeDefPassingDownsSuccessRate = game.homeDefPassingDownsSuccessRate;
+    const awayOffPassingDownsSuccessRate = game.awayOffPassingDownsSuccessRate;
+    const awayDefPassingDownsSuccessRate = game.awayDefPassingDownsSuccessRate;
+    const haveAllFourPassingDowns =
+      homeOffPassingDownsSuccessRate != null &&
+      homeDefPassingDownsSuccessRate != null &&
+      awayOffPassingDownsSuccessRate != null &&
+      awayDefPassingDownsSuccessRate != null;
+
+    const homeOffSackRate = game.homeOffSackRate;
+    const homeDefSackRate = game.homeDefSackRate;
+    const awayOffSackRate = game.awayOffSackRate;
+    const awayDefSackRate = game.awayDefSackRate;
+    const haveAllFourSackRate = homeOffSackRate != null && homeDefSackRate != null && awayOffSackRate != null && awayDefSackRate != null;
+
     // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
     // doc. Applied AFTER the garbage-time resolution above, on top of
     // whichever EPA source (raw or no-garbage) was just selected, always
@@ -243,6 +311,38 @@ export function computeSeasonRatings(
       const successMargin = params.pointsPerSuccessRate * (homeNetSuccess - awayNetSuccess);
       actualMargin = (1 - params.successRateWeight) * epaMargin + params.successRateWeight * successMargin;
     }
+
+    // Explosiveness, down/distance splits, and sack rate -- each an
+    // independent ADDITIVE term on top of the epaMargin/successRateWeight
+    // blend above, not a replacement for it (distinct from successRateWeight,
+    // which interpolates between two competing interpretations of the SAME
+    // signal). Each is a no-op unless its own points-per-* param is nonzero
+    // AND all four of that metric's fields are present for this game --
+    // same degrade-don't-guess pattern as every other optional signal.
+    if (params.pointsPerExplosiveness !== 0 && haveAllFourExplosiveness) {
+      const homeNetExpl = homeOffExplosiveness! - homeDefExplosiveness!;
+      const awayNetExpl = awayOffExplosiveness! - awayDefExplosiveness!;
+      actualMargin += params.pointsPerExplosiveness * (homeNetExpl - awayNetExpl);
+    }
+    if (params.pointsPerStandardDownsSplit !== 0 && haveAllFourStandardDowns) {
+      const homeNetStd = homeOffStandardDownsSuccessRate! - homeDefStandardDownsSuccessRate!;
+      const awayNetStd = awayOffStandardDownsSuccessRate! - awayDefStandardDownsSuccessRate!;
+      actualMargin += params.pointsPerStandardDownsSplit * (homeNetStd - awayNetStd);
+    }
+    if (params.pointsPerPassingDownsSplit !== 0 && haveAllFourPassingDowns) {
+      const homeNetPass = homeOffPassingDownsSuccessRate! - homeDefPassingDownsSuccessRate!;
+      const awayNetPass = awayOffPassingDownsSuccessRate! - awayDefPassingDownsSuccessRate!;
+      actualMargin += params.pointsPerPassingDownsSplit * (homeNetPass - awayNetPass);
+    }
+    if (params.pointsPerSackRate !== 0 && haveAllFourSackRate) {
+      // INVERTED off/def convention -- def_sack_rate (forcing sacks) is
+      // good, off_sack_rate (getting sacked) is bad, so the "net advantage"
+      // is def MINUS off, not off MINUS def like every other metric here.
+      const homeNetSack = homeDefSackRate! - homeOffSackRate!;
+      const awayNetSack = awayDefSackRate! - awayOffSackRate!;
+      actualMargin += params.pointsPerSackRate * (homeNetSack - awayNetSack);
+    }
+
     const error = actualMargin - predictedMargin;
 
     // Update each team's success-rate context with this game's RAW (not

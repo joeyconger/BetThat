@@ -15,7 +15,7 @@ export interface RatingParams {
   pointsPerEpa: number;
   /** Elo-style learning rate: fraction of the prediction error absorbed into the rating each game. */
   baseK: number;
-  /** How much a team's rating swings based on opponent strength — this is the SOS knob, stronger for CFB. */
+  /** How much a team's rating swings based on opponent strength. Retired for CFB (set to 0, see CFB_PARAMS) in favor of the broader pointsPerExplosiveness-family opponent-adjustment system — still active for NFL, which hasn't gone through that rebuild. */
   sosWeight: number;
   /** Rating-scale reference point the SOS multiplier is expressed against. */
   ratingScaleRef: number;
@@ -175,6 +175,60 @@ export interface RatingParams {
    * forward treatment — see README/adminJobs.ts for how that's handled.
    */
   weeklySpSignalPoints: number;
+  /**
+   * Points of predicted-margin adjustment per unit of net explosiveness
+   * differential (home offense-minus-defense explosiveness, minus the
+   * same for away — same net-differential shape as pointsPerEpa/
+   * pointsPerSuccessRate, applied as an ADDITIVE term on top of the
+   * existing epaMargin/successRateWeight blend in
+   * ratings/elo.ts's computeSeasonRatings, not a replacement for
+   * either) — part of the component-model rebuild (explosiveness,
+   * down/distance splits, sack rate, finishing drives, special teams)
+   * that replaced the old single SOS multiplier (see sosWeight's doc).
+   * Explosiveness is CFBD's own metric (confirmed real field via their
+   * client library docs, not guessed) — roughly "how big are this
+   * team's successful plays," a genuinely different question from
+   * successRate's "how often does a play succeed at all," which is why
+   * this is additive rather than folded into the existing blend. Only
+   * takes effect for a game with all four of home/away off/def
+   * explosiveness present (falls back to a no-op otherwise, same
+   * degrade-don't-guess pattern as every other optional signal). CFB-
+   * only for now (NFL has no ingestion path yet). Defaults to 0 (no-op)
+   * — untested, needs ingestion + a real sweep.
+   */
+  pointsPerExplosiveness: number;
+  /**
+   * Same additive-term shape as pointsPerExplosiveness, for the
+   * standard-downs success-rate split specifically (CFBD's own down/
+   * distance categorization — see client.ts's CfbdAdvancedSide doc).
+   * "Standard downs" are non-obvious-passing situations (roughly: 1st
+   * down, or 2nd/3rd-and-short) — this isolates efficiency specifically
+   * in situations where the offense has real play-calling flexibility,
+   * a different question from the OVERALL success rate already blended
+   * in via successRateWeight (which mixes standard AND passing downs
+   * together). CFB-only. Defaults to 0 (no-op) — untested.
+   */
+  pointsPerStandardDownsSplit: number;
+  /**
+   * Same shape as pointsPerStandardDownsSplit, for passing downs (obvious-
+   * passing situations — 2nd/3rd-and-long) instead — isolates efficiency
+   * when the defense knows a pass is very likely coming, a genuinely
+   * different situational question than standard-downs success rate.
+   * CFB-only. Defaults to 0 (no-op) — untested.
+   */
+  pointsPerPassingDownsSplit: number;
+  /**
+   * Same additive-term shape as pointsPerExplosiveness, for a team's net
+   * sack advantage (def_sack_rate - off_sack_rate — see
+   * ingest/cfbd/syncSackRateStats.ts's doc for why this pair is the one
+   * INVERTED off/def convention in this whole rating model: off_sack_rate
+   * is bad for the team that has it, def_sack_rate is good). Home net
+   * advantage minus away net advantage feeds the same additive-margin
+   * shape as every other pointsPer* signal. CFB-only. Defaults to 0
+   * (no-op) — untested, needs ingestion (cfb-sackrate-ingest) + a real
+   * sweep.
+   */
+  pointsPerSackRate: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -199,6 +253,10 @@ const NFL_PARAMS: RatingParams = {
   opponentAdjustWeight: 0, // untested — no-op until swept
   turnoverLuckWeight: 0, // untested — turnover stats not ingested for NFL yet (would need an nflverse play-by-play source, not CFBD)
   weeklySpSignalPoints: 0, // no SP+ (weekly or otherwise) for NFL
+  pointsPerExplosiveness: 0, // no explosiveness ingestion for NFL yet (nflverse-based, not CFBD)
+  pointsPerStandardDownsSplit: 0, // same — no down/distance splits ingested for NFL yet
+  pointsPerPassingDownsSplit: 0,
+  pointsPerSackRate: 0, // no sack-rate ingestion for NFL yet (would need an nflverse play-by-play source, not CFBD)
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -313,6 +371,16 @@ const CFB_PARAMS: RatingParams = {
   // actually the problem — real, fresh week-by-week SP+ still doesn't
   // add anything this model doesn't already have. Left at 0.
   weeklySpSignalPoints: 0,
+  // Untested — needs syncCfbdGameStats re-run (backfills explosiveness +
+  // down/distance splits into already-ingested games, no new API call)
+  // then a real sweep. Part of the component-model rebuild that replaced
+  // sosWeight above.
+  pointsPerExplosiveness: 0,
+  pointsPerStandardDownsSplit: 0,
+  pointsPerPassingDownsSplit: 0,
+  // Untested — needs cfb-sackrate-ingest (a real /plays pass) then a real
+  // sweep.
+  pointsPerSackRate: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

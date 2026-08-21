@@ -41,6 +41,12 @@ export async function syncCfbdGameStats(
       playsOffense: row.offense.plays,
       playsDefense: row.defense.plays,
       source: "cfbd",
+      offExplosiveness: row.offense.explosiveness ?? null,
+      defExplosiveness: row.defense.explosiveness ?? null,
+      offStandardDownsSuccessRate: row.offense.standardDowns?.successRate ?? null,
+      offPassingDownsSuccessRate: row.offense.passingDowns?.successRate ?? null,
+      defStandardDownsSuccessRate: row.defense.standardDowns?.successRate ?? null,
+      defPassingDownsSuccessRate: row.defense.passingDowns?.successRate ?? null,
     });
     synced += 1;
   }

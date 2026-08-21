@@ -322,6 +322,19 @@ export interface UpsertTeamGameStatsInput {
   playsOffense: number | null;
   playsDefense: number | null;
   source: "cfbd" | "nflverse";
+  /**
+   * Off the same CFBD /stats/game/advanced response as everything else in
+   * this input -- no new API call, just more fields off an existing one
+   * (see ingest/cfbd/client.ts's CfbdAdvancedSide). Optional/undefined for
+   * nflverse (NFL) ingestion, which has no equivalent source -- treated
+   * the same as null.
+   */
+  offExplosiveness?: number | null;
+  defExplosiveness?: number | null;
+  offStandardDownsSuccessRate?: number | null;
+  offPassingDownsSuccessRate?: number | null;
+  defStandardDownsSuccessRate?: number | null;
+  defPassingDownsSuccessRate?: number | null;
 }
 
 export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Promise<void> {
@@ -330,9 +343,11 @@ export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Prom
        game_id, team_id, is_home, off_epa_play, off_epa_pass, off_epa_rush,
        def_epa_play, def_epa_pass, def_epa_rush, off_success_rate,
        off_success_rate_pass, off_success_rate_rush, def_success_rate,
-       def_success_rate_pass, def_success_rate_rush, plays_offense, plays_defense, source
+       def_success_rate_pass, def_success_rate_rush, plays_offense, plays_defense, source,
+       off_explosiveness, def_explosiveness, off_standard_downs_success_rate,
+       off_passing_downs_success_rate, def_standard_downs_success_rate, def_passing_downs_success_rate
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
      ON CONFLICT (game_id, team_id)
      DO UPDATE SET
        is_home = EXCLUDED.is_home,
@@ -341,7 +356,12 @@ export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Prom
        off_success_rate = EXCLUDED.off_success_rate, off_success_rate_pass = EXCLUDED.off_success_rate_pass,
        off_success_rate_rush = EXCLUDED.off_success_rate_rush, def_success_rate = EXCLUDED.def_success_rate,
        def_success_rate_pass = EXCLUDED.def_success_rate_pass, def_success_rate_rush = EXCLUDED.def_success_rate_rush,
-       plays_offense = EXCLUDED.plays_offense, plays_defense = EXCLUDED.plays_defense, source = EXCLUDED.source`,
+       plays_offense = EXCLUDED.plays_offense, plays_defense = EXCLUDED.plays_defense, source = EXCLUDED.source,
+       off_explosiveness = EXCLUDED.off_explosiveness, def_explosiveness = EXCLUDED.def_explosiveness,
+       off_standard_downs_success_rate = EXCLUDED.off_standard_downs_success_rate,
+       off_passing_downs_success_rate = EXCLUDED.off_passing_downs_success_rate,
+       def_standard_downs_success_rate = EXCLUDED.def_standard_downs_success_rate,
+       def_passing_downs_success_rate = EXCLUDED.def_passing_downs_success_rate`,
     [
       input.gameId,
       input.teamId,
@@ -361,7 +381,36 @@ export async function upsertTeamGameStats(input: UpsertTeamGameStatsInput): Prom
       input.playsOffense,
       input.playsDefense,
       input.source,
+      input.offExplosiveness ?? null,
+      input.defExplosiveness ?? null,
+      input.offStandardDownsSuccessRate ?? null,
+      input.offPassingDownsSuccessRate ?? null,
+      input.defStandardDownsSuccessRate ?? null,
+      input.defPassingDownsSuccessRate ?? null,
     ],
+  );
+}
+
+export interface UpsertSackRateStatsInput {
+  gameId: number;
+  teamId: number;
+  /** Rate at which THIS team's own offense got sacked (higher = worse for this team) -- sacks taken / offensive plays. */
+  offSackRate: number;
+  /** Rate at which THIS team's defense sacked the opponent (higher = better for this team) -- sacks forced / defensive plays. */
+  defSackRate: number;
+}
+
+/**
+ * Same targeted-UPDATE shape as upsertGarbageTimeStats/upsertTurnoverStats:
+ * sourced from CFBD's /plays (a different endpoint than the advanced-stats
+ * fields above), aggregated per team per game by
+ * ingest/cfbd/syncSackRateStats.ts. Not an upsert on its own -- a game with
+ * no prior team_game_stats row is a no-op.
+ */
+export async function upsertSackRateStats(input: UpsertSackRateStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats SET off_sack_rate = $3, def_sack_rate = $4 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offSackRate, input.defSackRate],
   );
 }
 
@@ -470,6 +519,24 @@ export interface GameForRating {
   awayOffTurnoverPlays: number | null;
   awayDefTurnoverPpaSum: number | null;
   awayDefTurnoverPlays: number | null;
+  /** Explosiveness (avg. PPA scaled by a "how big was this play" factor, CFBD's own metric — see client.ts's CfbdAdvancedSide) and standard/passing-downs success-rate splits, from the same /stats/game/advanced response as the EPA/success-rate fields above. Nullable: only populated once syncCfbdGameStats has been re-run to backfill these columns; ratings/elo.ts's pointsPerExplosiveness/pointsPerStandardDownsSplit/pointsPerPassingDownsSplit each fall back to a no-op when their own four fields aren't all present for a game. */
+  homeOffExplosiveness: number | null;
+  homeDefExplosiveness: number | null;
+  awayOffExplosiveness: number | null;
+  awayDefExplosiveness: number | null;
+  homeOffStandardDownsSuccessRate: number | null;
+  homeDefStandardDownsSuccessRate: number | null;
+  awayOffStandardDownsSuccessRate: number | null;
+  awayDefStandardDownsSuccessRate: number | null;
+  homeOffPassingDownsSuccessRate: number | null;
+  homeDefPassingDownsSuccessRate: number | null;
+  awayOffPassingDownsSuccessRate: number | null;
+  awayDefPassingDownsSuccessRate: number | null;
+  /** Sack rate, from a separate CFBD /plays ingestion pass (see ingest/cfbd/syncSackRateStats.ts). off_sack_rate = rate THIS team's own offense got sacked (higher = worse for this team); def_sack_rate = rate THIS team's defense sacked the opponent (higher = better) — an INVERTED sign convention from every other off/def pair in this interface, where off_X and def_X are both "higher = better for this team." Nullable: only populated where that ingestion pass has run. */
+  homeOffSackRate: number | null;
+  homeDefSackRate: number | null;
+  awayOffSackRate: number | null;
+  awayDefSackRate: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -511,6 +578,22 @@ export async function getSeasonGamesForRating(
     away_off_turnover_plays: number | null;
     away_def_turnover_ppa_sum: number | null;
     away_def_turnover_plays: number | null;
+    home_off_explosiveness: number | null;
+    home_def_explosiveness: number | null;
+    away_off_explosiveness: number | null;
+    away_def_explosiveness: number | null;
+    home_off_standard_downs_success_rate: number | null;
+    home_def_standard_downs_success_rate: number | null;
+    away_off_standard_downs_success_rate: number | null;
+    away_def_standard_downs_success_rate: number | null;
+    home_off_passing_downs_success_rate: number | null;
+    home_def_passing_downs_success_rate: number | null;
+    away_off_passing_downs_success_rate: number | null;
+    away_def_passing_downs_success_rate: number | null;
+    home_off_sack_rate: number | null;
+    home_def_sack_rate: number | null;
+    away_off_sack_rate: number | null;
+    away_def_sack_rate: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -526,7 +609,15 @@ export async function getSeasonGamesForRating(
             home_stats.off_turnover_ppa_sum AS home_off_turnover_ppa_sum, home_stats.off_turnover_plays AS home_off_turnover_plays,
             home_stats.def_turnover_ppa_sum AS home_def_turnover_ppa_sum, home_stats.def_turnover_plays AS home_def_turnover_plays,
             away_stats.off_turnover_ppa_sum AS away_off_turnover_ppa_sum, away_stats.off_turnover_plays AS away_off_turnover_plays,
-            away_stats.def_turnover_ppa_sum AS away_def_turnover_ppa_sum, away_stats.def_turnover_plays AS away_def_turnover_plays
+            away_stats.def_turnover_ppa_sum AS away_def_turnover_ppa_sum, away_stats.def_turnover_plays AS away_def_turnover_plays,
+            home_stats.off_explosiveness AS home_off_explosiveness, home_stats.def_explosiveness AS home_def_explosiveness,
+            away_stats.off_explosiveness AS away_off_explosiveness, away_stats.def_explosiveness AS away_def_explosiveness,
+            home_stats.off_standard_downs_success_rate AS home_off_standard_downs_success_rate, home_stats.def_standard_downs_success_rate AS home_def_standard_downs_success_rate,
+            away_stats.off_standard_downs_success_rate AS away_off_standard_downs_success_rate, away_stats.def_standard_downs_success_rate AS away_def_standard_downs_success_rate,
+            home_stats.off_passing_downs_success_rate AS home_off_passing_downs_success_rate, home_stats.def_passing_downs_success_rate AS home_def_passing_downs_success_rate,
+            away_stats.off_passing_downs_success_rate AS away_off_passing_downs_success_rate, away_stats.def_passing_downs_success_rate AS away_def_passing_downs_success_rate,
+            home_stats.off_sack_rate AS home_off_sack_rate, home_stats.def_sack_rate AS home_def_sack_rate,
+            away_stats.off_sack_rate AS away_off_sack_rate, away_stats.def_sack_rate AS away_def_sack_rate
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -569,6 +660,22 @@ export async function getSeasonGamesForRating(
     awayOffTurnoverPlays: r.away_off_turnover_plays,
     awayDefTurnoverPpaSum: r.away_def_turnover_ppa_sum,
     awayDefTurnoverPlays: r.away_def_turnover_plays,
+    homeOffExplosiveness: r.home_off_explosiveness,
+    homeDefExplosiveness: r.home_def_explosiveness,
+    awayOffExplosiveness: r.away_off_explosiveness,
+    awayDefExplosiveness: r.away_def_explosiveness,
+    homeOffStandardDownsSuccessRate: r.home_off_standard_downs_success_rate,
+    homeDefStandardDownsSuccessRate: r.home_def_standard_downs_success_rate,
+    awayOffStandardDownsSuccessRate: r.away_off_standard_downs_success_rate,
+    awayDefStandardDownsSuccessRate: r.away_def_standard_downs_success_rate,
+    homeOffPassingDownsSuccessRate: r.home_off_passing_downs_success_rate,
+    homeDefPassingDownsSuccessRate: r.home_def_passing_downs_success_rate,
+    awayOffPassingDownsSuccessRate: r.away_off_passing_downs_success_rate,
+    awayDefPassingDownsSuccessRate: r.away_def_passing_downs_success_rate,
+    homeOffSackRate: r.home_off_sack_rate,
+    homeDefSackRate: r.home_def_sack_rate,
+    awayOffSackRate: r.away_off_sack_rate,
+    awayDefSackRate: r.away_def_sack_rate,
   }));
 }
 

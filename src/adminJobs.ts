@@ -4,6 +4,7 @@ import { getPlays } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
+import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
@@ -21,7 +22,9 @@ import {
   runRestDaySweep,
   runTurnoverLuckSweep,
   runWeeklySpSignalSweep,
+  runComponentSweep,
 } from "./backtest/sweep.js";
+import type { ComponentParamKey } from "./backtest/sweep.js";
 import {
   getOverallReport,
   getOpeningCoverRate,
@@ -675,6 +678,77 @@ export function startCfbWeeklySpSignalSweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Backfills explosiveness + standard/passing-downs success-rate splits for
+ * CFB 2023-2025 by RE-RUNNING syncCfbdGameStats -- these come off the SAME
+ * /stats/game/advanced response already fetched for EPA/success rate (see
+ * ingest/cfbd/client.ts's CfbdAdvancedSide), so this is not a new API call
+ * pattern, just more fields off an existing one; the upsert safely updates
+ * already-ingested rows in place. THEN ingests sack rate via a genuinely
+ * separate /plays pass (syncCfbdSackRateStats, same ~15-calls-per-year
+ * shape as cfb-turnover-ingest). Run this before any of the four
+ * cfb-component-sweep-* jobs below; without it, those params are silent
+ * no-ops (every game falls back to a lower-fidelity signal or pure EPA).
+ */
+export function startCfbComponentIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-component-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: re-syncing advanced stats (backfills explosiveness + down/distance splits)`);
+      const advResult = await syncCfbdGameStats(year);
+      log(job, `${year}: advanced stats synced ${advResult.synced}, skipped ${advResult.skipped}`);
+      log(job, `${year}: sack rate (weeks 1-15)`);
+      const sackResult = await syncCfbdSackRateStats(year);
+      log(job, `${year}: sack rate synced ${sackResult.synced}, skipped ${sackResult.skipped}`);
+    }
+  });
+}
+
+const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }> = [
+  // pointsPerExplosiveness's natural scale is EPA-like (CFBD explosiveness
+  // values run roughly 0.3-2.0) -- grid centered around pointsPerEpa=20's
+  // already-calibrated magnitude.
+  { jobName: "cfb-component-sweep-explosiveness", paramKey: "pointsPerExplosiveness", grid: [0, 2, 5, 10, 20], label: "pointsPerExplosiveness" },
+  // Down/distance splits are success-rate-scale (0-1, typical diffs
+  // 0.05-0.15) -- grid centered around pointsPerSuccessRate=120's
+  // already-calibrated magnitude for the same reason.
+  { jobName: "cfb-component-sweep-standarddowns", paramKey: "pointsPerStandardDownsSplit", grid: [0, 30, 60, 120, 200], label: "pointsPerStandardDownsSplit" },
+  { jobName: "cfb-component-sweep-passingdowns", paramKey: "pointsPerPassingDownsSplit", grid: [0, 30, 60, 120, 200], label: "pointsPerPassingDownsSplit" },
+  // Sack rate is also a small-fraction rate stat, same scale reasoning as the down splits.
+  { jobName: "cfb-component-sweep-sackrate", paramKey: "pointsPerSackRate", grid: [0, 30, 60, 120, 200], label: "pointsPerSackRate" },
+];
+
+/**
+ * Four component sweeps (explosiveness, standard-downs split, passing-
+ * downs split, sack rate), each varying ONE param in isolation while every
+ * other component stays at its 0 default -- same "one param at a time"
+ * discipline as every other sweep tonight, not an expensive 4-dimensional
+ * grid. See backtest/sweep.ts's runComponentSweep. Requires
+ * cfb-component-ingest to have run first. No walk-forward job yet for any
+ * of these -- built on demand for whichever component(s) actually show a
+ * real in-sample trend, same pattern as excludeGarbageTime/pointsPerRestDay
+ * (walk-forward only run when the sweep result looked worth confirming).
+ */
+export const startCfbComponentSweepExplosivenessJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[0]!);
+export const startCfbComponentSweepStandardDownsJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[1]!);
+export const startCfbComponentSweepPassingDownsJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[2]!);
+export const startCfbComponentSweepSackRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[3]!);
+
+function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
+  return runJob(spec.jobName, async (job) => {
+    log(job, `sweeping cfb ${spec.label}, 2023-2025`);
+    const results = await runComponentSweep("cfb", 2023, 2025, spec.paramKey, spec.grid);
+    for (const r of results) {
+      log(
+        job,
+        `${spec.label}=${r.value}: ${r.games} games, cover vs close=${fmtPct(r.coverRate)}, ` +
+          `cover vs open=${fmtPct(r.coverRateVsOpening)} (${r.openingGames} games w/ opening line), ` +
+          `avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`,
+      );
+    }
+    log(job, "breakeven vs. standard -110 vig is ~52.4%. In-sample only (2023-2025 combined) -- treat any promising trend as a hypothesis to walk-forward test, not a proven edge.");
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -964,6 +1038,11 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-turnoverluck-walkforward": startCfbTurnoverLuckWalkforwardJob,
   "cfb-manual-sp-ingest": startCfbManualSpIngestJob,
   "cfb-weeklyspsignal-sweep": startCfbWeeklySpSignalSweepJob,
+  "cfb-component-ingest": startCfbComponentIngestJob,
+  "cfb-component-sweep-explosiveness": startCfbComponentSweepExplosivenessJob,
+  "cfb-component-sweep-standarddowns": startCfbComponentSweepStandardDownsJob,
+  "cfb-component-sweep-passingdowns": startCfbComponentSweepPassingDownsJob,
+  "cfb-component-sweep-sackrate": startCfbComponentSweepSackRateJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
