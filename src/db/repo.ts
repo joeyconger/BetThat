@@ -557,6 +557,86 @@ export async function insertPlaysBatch(plays: InsertPlayInput[]): Promise<number
   return inserted;
 }
 
+export interface PlayForRating {
+  gameId: number;
+  homeTeamId: number;
+  awayTeamId: number;
+  offenseTeamId: number | null;
+  defenseTeamId: number | null;
+  down: number | null;
+  distance: number | null;
+  yardsGained: number | null;
+  playType: string;
+  offenseScore: number | null;
+  defenseScore: number | null;
+  period: number;
+  clockMinutes: number | null;
+  clockSeconds: number | null;
+}
+
+/**
+ * All raw plays from a season's completed games, joined with each play's
+ * home/away team ids -- the input to ratings/gamePerformance.ts's
+ * buildTeamPerformances (grouped by gameId by the caller). throughWeek,
+ * when given, restricts to games at or before that week -- the as-of-week
+ * no-lookahead cut this project's rating pipeline requires everywhere
+ * else (see getSeasonGamesForRating); omit it for a full-season snapshot.
+ * Ordered by game_id so callers can group with a single pass.
+ */
+export async function getPlaysForSeasonThroughWeek(
+  sport: Sport,
+  season: number,
+  throughWeek?: number,
+): Promise<PlayForRating[]> {
+  const params: (string | number)[] = [sport, season];
+  let weekClause = "";
+  if (throughWeek !== undefined) {
+    weekClause = "AND g.week <= $3";
+    params.push(throughWeek);
+  }
+  const result = await pool.query<{
+    game_id: number;
+    home_team_id: number;
+    away_team_id: number;
+    offense_team_id: number | null;
+    defense_team_id: number | null;
+    down: number | null;
+    distance: number | null;
+    yards_gained: number | null;
+    play_type: string;
+    offense_score: number | null;
+    defense_score: number | null;
+    period: number;
+    clock_minutes: number | null;
+    clock_seconds: number | null;
+  }>(
+    `SELECT p.game_id, g.home_team_id, g.away_team_id, p.offense_team_id, p.defense_team_id,
+            p.down, p.distance, p.yards_gained, p.play_type, p.offense_score, p.defense_score,
+            p.period, p.clock_minutes, p.clock_seconds
+     FROM plays p
+     JOIN games g ON g.id = p.game_id
+     WHERE g.sport = $1 AND g.season = $2 AND g.status = 'final' ${weekClause}
+     ORDER BY p.game_id`,
+    params,
+  );
+  return result.rows.map((r) => ({
+    gameId: r.game_id,
+    homeTeamId: r.home_team_id,
+    awayTeamId: r.away_team_id,
+    offenseTeamId: r.offense_team_id,
+    defenseTeamId: r.defense_team_id,
+    down: r.down,
+    distance: r.distance,
+    yardsGained: r.yards_gained,
+    playType: r.play_type,
+    offenseScore: r.offense_score,
+    defenseScore: r.defense_score,
+    period: r.period,
+    clockMinutes: r.clock_minutes,
+    clockSeconds: r.clock_seconds,
+  }));
+}
+
 export interface UpsertGarbageTimeStatsInput {
   gameId: number;
   teamId: number;

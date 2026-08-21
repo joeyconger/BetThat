@@ -9,6 +9,10 @@ import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
 import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesStats.js";
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
+import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap } from "./db/repo.js";
+import { buildTeamPerformances } from "./ratings/gamePerformance.js";
+import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
+import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
@@ -1165,6 +1169,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-more-segments": startCfbMoreSegmentsJob,
   "cfb-playtype-discover": startCfbPlayTypeDiscoverJob,
   "cfb-verify-plays": startCfbVerifyPlaysJob,
+  "cfb-opponent-adjust-snapshot": startCfbOpponentAdjustSnapshotJob,
 };
 
 /**
@@ -1315,5 +1320,89 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     log(job, "  3. Does ppa's sign make sense (positive on a good gain/TD, negative on a sack/turnover/loss)?");
     log(job, "  4. If wp(home) printed: does it look like a PRE-play or POST-play probability relative to the down/distance/score on the same row?");
     log(job, "  5. Does playType match a value in playSuccess.ts's SCRIMMAGE_PLAY_TYPES where it should (and NOT where it's actually a punt/kickoff/penalty/etc.)?");
+  });
+}
+
+/**
+ * First real-data sanity check of the full opponent-adjustment pipeline
+ * built this session (playSuccess.ts -> garbageTime.ts -> gamePerformance.ts
+ * -> opponentAdjust.ts), now that cfb-rawplays-ingest has actually run.
+ * Computes ONE full-season snapshot (not per-week/as-of-week -- that's the
+ * real integration, still to come) for 2024, so the output can be
+ * eyeballed for sanity before deciding how it feeds into
+ * computeSeasonRatings. Throwaway-ish diagnostic, not wired into any
+ * rating computation.
+ */
+export function startCfbOpponentAdjustSnapshotJob(): Promise<JobStatus> {
+  return runJob("cfb-opponent-adjust-snapshot", async (job) => {
+    const season = 2024;
+
+    log(job, `fetching ${season} team name map`);
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const teamIdToName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) teamIdToName.set(id, name);
+
+    log(job, `fetching all ${season} completed games' plays (full-season snapshot, no as-of-week cut)`);
+    const plays = await getPlaysForSeasonThroughWeek("cfb", season);
+    log(job, `${plays.length} plays fetched`);
+
+    const gamesById = new Map<number, GamePlaysGroup>();
+    for (const p of plays) {
+      let g = gamesById.get(p.gameId);
+      if (!g) {
+        g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+        gamesById.set(p.gameId, g);
+      }
+      g.plays.push({
+        offenseTeamId: p.offenseTeamId,
+        defenseTeamId: p.defenseTeamId,
+        down: p.down,
+        distance: p.distance,
+        yardsGained: p.yardsGained,
+        playType: p.playType,
+        offenseScore: p.offenseScore,
+        defenseScore: p.defenseScore,
+        period: p.period,
+        clockMinutes: p.clockMinutes,
+        clockSeconds: p.clockSeconds,
+      });
+    }
+    const games = [...gamesById.values()];
+    log(job, `${games.length} distinct games`);
+
+    const performances = buildTeamPerformances(games);
+    log(job, `${performances.length} team-game performances built (garbage-time-weighted success rate)`);
+
+    const result = computeOpponentAdjustedRatings(performances);
+    log(job, `solve: converged=${result.converged} iterations=${result.iterations} teams=${result.off.size}`);
+
+    const ranked = [...result.off.keys()]
+      .map((teamId) => ({
+        teamId,
+        name: teamIdToName.get(teamId) ?? `#${teamId}`,
+        off: result.off.get(teamId)!,
+        def: result.def.get(teamId)!,
+        games: result.teamDiagnostics.get(teamId)?.gamesPlayed ?? 0,
+      }))
+      .filter((t) => t.games >= 6); // drop tiny-sample teams from the leaderboards (still included in the solve itself)
+
+    const byOffDesc = [...ranked].sort((a, b) => b.off - a.off);
+    log(job, "\ntop 15 offenses (opponent-adjusted, garbage-time-weighted success rate):");
+    for (const t of byOffDesc.slice(0, 15)) log(job, `  ${t.name}: off=${t.off.toFixed(4)} def=${t.def.toFixed(4)}`);
+    log(job, "bottom 15 offenses:");
+    for (const t of byOffDesc.slice(-15).reverse()) log(job, `  ${t.name}: off=${t.off.toFixed(4)} def=${t.def.toFixed(4)}`);
+
+    const byDefAsc = [...ranked].sort((a, b) => a.def - b.def); // lower def = better defense
+    log(job, "\ntop 15 defenses (lowest allowed, opponent-adjusted):");
+    for (const t of byDefAsc.slice(0, 15)) log(job, `  ${t.name}: def=${t.def.toFixed(4)} off=${t.off.toFixed(4)}`);
+    log(job, "bottom 15 defenses (highest allowed):");
+    for (const t of byDefAsc.slice(-15).reverse()) log(job, `  ${t.name}: def=${t.def.toFixed(4)} off=${t.off.toFixed(4)}`);
+
+    const lowConnectivity = identifyLowConnectivityTeams(result.teamDiagnostics, 6);
+    log(job, `\n${lowConnectivity.length} teams flagged low-connectivity (< 6 games played, per teamDiagnostics):`);
+    for (const teamId of lowConnectivity.slice(0, 25)) {
+      const diag = result.teamDiagnostics.get(teamId)!;
+      log(job, `  ${teamIdToName.get(teamId) ?? `#${teamId}`}: gamesPlayed=${diag.gamesPlayed} lastDelta=${diag.lastDelta.toFixed(6)}`);
+    }
   });
 }
