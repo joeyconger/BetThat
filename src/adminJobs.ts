@@ -1,6 +1,7 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
-import { getPlays } from "./ingest/cfbd/client.js";
+import { getPlays, getGames, getWinProbabilityData } from "./ingest/cfbd/client.js";
+import type { CfbdPlayWinProbability } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
@@ -1163,6 +1164,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,
   "cfb-playtype-discover": startCfbPlayTypeDiscoverJob,
+  "cfb-verify-plays": startCfbVerifyPlaysJob,
 };
 
 /**
@@ -1200,5 +1202,95 @@ export function startCfbPlayTypeDiscoverJob(): Promise<JobStatus> {
     for (const p of candidates.slice(0, 10)) {
       log(job, `  sample: playType="${p.playType}" offense=${p.offense} defense=${p.defense} ppa=${p.ppa}`);
     }
+  });
+}
+
+/**
+ * One-off diagnostic (throwaway, same spirit as cfb-playtype-discover):
+ * pulls one real game's box score (/games), raw plays (/plays), and win
+ * probability (/metrics/wp) and logs them side by side so a human can
+ * hand-verify CFBD's actual data contract against a real box score/
+ * broadcast before trusting the `plays` table (migration 0012) for
+ * anything downstream -- playSuccess.ts, garbageTime.ts, and
+ * opponentAdjust.ts were all built and unit-tested against synthetic
+ * fixtures only, never against a real CFBD response (this sandbox has no
+ * network route to CFBD's API). Local equivalent with a caller-chosen
+ * game: src/ingest/cfbd/verifyRawPlays.ts.
+ *
+ * Job triggers take no params (see server.ts's POST /admin/jobs/:name),
+ * so the game is picked deterministically rather than passed in: 2024
+ * week 8's highest-combined-score completed FBS game -- pick one you can
+ * independently verify the final score of (e.g. via a search engine) to
+ * confirm /games itself is trustworthy before checking /plays against it.
+ * Delete this job once the plays table has been trusted and built on.
+ */
+export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
+  return runJob("cfb-verify-plays", async (job) => {
+    const year = 2024;
+    const week = 8;
+
+    log(job, `fetching ${year} games to find week ${week}'s slate`);
+    const games = await getGames(year);
+    const weekGames = games.filter((g) => g.week === week && g.completed);
+    log(job, `${weekGames.length} completed games in week ${week}`);
+    for (const g of weekGames) {
+      log(job, `  ${g.awayTeam} ${g.awayPoints} @ ${g.homeTeam} ${g.homePoints}  (gameId=${g.id})`);
+    }
+
+    const target = [...weekGames].sort(
+      (a, b) => (b.homePoints ?? 0) + (b.awayPoints ?? 0) - ((a.homePoints ?? 0) + (a.awayPoints ?? 0)),
+    )[0];
+    if (!target) {
+      log(job, "no completed games found for this week -- nothing to verify");
+      return;
+    }
+    log(job, `\ndeep-diving the highest-combined-score game: ${target.awayTeam} @ ${target.homeTeam} (gameId=${target.id})`);
+    log(job, `Google/verify this final score independently before trusting anything below: ${target.awayTeam} ${target.awayPoints} @ ${target.homeTeam} ${target.homePoints}`);
+
+    const allPlays = await getPlays(year, week);
+    const gamePlays = allPlays.filter((p) => p.gameId === target.id);
+    log(job, `${gamePlays.length} total plays found for this game`);
+
+    let wpByPlayNumber = new Map<number, CfbdPlayWinProbability>();
+    try {
+      const wp = await getWinProbabilityData(target.id);
+      wpByPlayNumber = new Map(wp.map((row) => [row.playNumber, row]));
+      log(job, `${wp.length} win-probability rows found`);
+    } catch (err) {
+      log(job, `could not fetch win probability data: ${(err as Error).message} -- continuing without it`);
+    }
+
+    const maxPlays = 20;
+    const shown = gamePlays.slice(0, maxPlays);
+    log(job, `\nfirst ${shown.length} of ${gamePlays.length} plays -- hand-check against the real box score/broadcast:`);
+    log(job, "period clock  off        def        down-dist yards playType                  score(off-def) ppa     scoring wp(home)");
+    for (const play of shown) {
+      const clock = play.clock ? `${play.clock.minutes}:${String(play.clock.seconds ?? 0).padStart(2, "0")}` : "?";
+      const wpRow = wpByPlayNumber.get(play.playNumber);
+      const wpStr = wpRow ? (wpRow.homeWinProb === null ? "null" : wpRow.homeWinProb.toFixed(3)) : "(none)";
+      log(
+        job,
+        [
+          String(play.period).padEnd(6),
+          clock.padEnd(6),
+          play.offense.padEnd(10).slice(0, 10),
+          play.defense.padEnd(10).slice(0, 10),
+          `${play.down}-${play.distance}`.padEnd(9),
+          String(play.yardsGained).padEnd(5),
+          play.playType.padEnd(25).slice(0, 25),
+          `${play.offenseScore}-${play.defenseScore}`.padEnd(14),
+          String(play.ppa ?? "null").padEnd(7),
+          String(play.scoring).padEnd(7),
+          wpStr,
+        ].join(" "),
+      );
+    }
+
+    log(job, "\nCheck, against the real game:");
+    log(job, "  1. Does offenseScore/defenseScore match the real running score at each play?");
+    log(job, "  2. On a turnover play (interception/fumble), is \"offense\" still the team that HAD the ball, not the recovering team?");
+    log(job, "  3. Does ppa's sign make sense (positive on a good gain/TD, negative on a sack/turnover/loss)?");
+    log(job, "  4. If wp(home) printed: does it look like a PRE-play or POST-play probability relative to the down/distance/score on the same row?");
+    log(job, "  5. Does playType match a value in playSuccess.ts's SCRIMMAGE_PLAY_TYPES where it should (and NOT where it's actually a punt/kickoff/penalty/etc.)?");
   });
 }
