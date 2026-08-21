@@ -6,6 +6,7 @@ import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncS
 import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
 import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
 import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesStats.js";
+import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
@@ -724,6 +725,22 @@ export function startCfbFinishingDrivesIngestJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Phase 3 of the component-model rebuild: special teams (field position +
+ * FG make rate), from a combined /drives + /plays pass -- see
+ * ingest/cfbd/syncSpecialTeamsStats.ts. Run this before
+ * cfb-component-sweep-fieldposition or cfb-component-sweep-fgmakerate.
+ */
+export function startCfbSpecialTeamsIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-specialteams-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: special teams (field position + FG rate)`);
+      const result = await syncCfbdSpecialTeamsStats(year);
+      log(job, `${year}: fetched ${result.drivesFetched} raw drives, synced ${result.synced}, skipped ${result.skipped}`);
+    }
+  });
+}
+
 const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }> = [
   // Refined after the first coarse pass (run 279-298): explosiveness was
   // flat across 0-20 (best near 10) -- narrowed grid for a slightly finer
@@ -742,16 +759,23 @@ const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey
   // EPA/points-scale, not a 0-1 rate -- grid centered more like
   // pointsPerEpa=20's magnitude than the success-rate-scale splits above.
   { jobName: "cfb-component-sweep-finishingdrives", paramKey: "pointsPerFinishingDrives", grid: [0, 2, 5, 10, 20], label: "pointsPerFinishingDrives" },
+  // Phase 3: special teams. Field position differentials run maybe 5-15
+  // yards -- real football analytics puts field position worth roughly
+  // 0.05-0.1 expected points per yard, so a small grid around that.
+  { jobName: "cfb-component-sweep-fieldposition", paramKey: "pointsPerFieldPosition", grid: [0, 0.1, 0.2, 0.5, 1], label: "pointsPerFieldPosition" },
+  // FG make rate is a 0-1 rate stat like success rate/sack rate -- same scale reasoning.
+  { jobName: "cfb-component-sweep-fgmakerate", paramKey: "pointsPerFgMakeRate", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerFgMakeRate" },
 ];
 
 /**
- * Five component sweeps (explosiveness, standard-downs split, passing-
- * downs split, sack rate, finishing drives), each varying ONE param in
- * isolation while every other component stays at its 0 default -- same
- * "one param at a time" discipline as every other sweep tonight, not an
- * expensive multi-dimensional grid. See backtest/sweep.ts's
- * runComponentSweep. Requires cfb-component-ingest (Phase 1 fields) or
- * cfb-finishingdrives-ingest (Phase 2) to have run first, respectively. No
+ * Seven component sweeps (explosiveness, standard-downs split, passing-
+ * downs split, sack rate, finishing drives, field position, FG make rate),
+ * each varying ONE param in isolation while every other component stays
+ * at its 0 default -- same "one param at a time" discipline as every
+ * other sweep tonight, not an expensive multi-dimensional grid. See
+ * backtest/sweep.ts's runComponentSweep. Requires cfb-component-ingest
+ * (Phase 1 fields), cfb-finishingdrives-ingest (Phase 2), or
+ * cfb-specialteams-ingest (Phase 3) to have run first, respectively. No
  * walk-forward job yet for any of these -- built on demand for whichever
  * component(s) actually show a real in-sample trend, same pattern as
  * excludeGarbageTime/pointsPerRestDay (walk-forward only run when the
@@ -762,6 +786,8 @@ export const startCfbComponentSweepStandardDownsJob = () => runComponentSweepJob
 export const startCfbComponentSweepPassingDownsJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[2]!);
 export const startCfbComponentSweepSackRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[3]!);
 export const startCfbComponentSweepFinishingDrivesJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[4]!);
+export const startCfbComponentSweepFieldPositionJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[5]!);
+export const startCfbComponentSweepFgMakeRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[6]!);
 
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
@@ -1076,6 +1102,9 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-sackrate": startCfbComponentSweepSackRateJob,
   "cfb-finishingdrives-ingest": startCfbFinishingDrivesIngestJob,
   "cfb-component-sweep-finishingdrives": startCfbComponentSweepFinishingDrivesJob,
+  "cfb-specialteams-ingest": startCfbSpecialTeamsIngestJob,
+  "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
+  "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,

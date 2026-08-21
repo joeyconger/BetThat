@@ -244,6 +244,27 @@ export interface RatingParams {
    * (cfb-finishingdrives-ingest) + a real sweep.
    */
   pointsPerFinishingDrives: number;
+  /**
+   * Phase 3 (special teams) of the component-model rebuild: field position
+   * — avg distance from a team's own goal line at the start of its drives
+   * (own offense) vs. the same for opponents facing this team's defense
+   * (kickoff/punt coverage quality) — net home-minus-away, same additive
+   * shape as every other pointsPer* signal. Standard off/def sign
+   * convention. See ingest/cfbd/syncSpecialTeamsStats.ts for the exact
+   * definition and why punt/return efficiency specifically was deferred
+   * (unverified net-punting/return-yardage attribution, and no clean
+   * off/def pairing for punt distance the way field position and FG rate
+   * both have). CFB-only. Defaults to 0 (no-op) — untested, needs
+   * ingestion (cfb-specialteams-ingest) + a real sweep.
+   */
+  pointsPerFieldPosition: number;
+  /**
+   * Same additive shape as pointsPerFieldPosition, for field goal make
+   * rate (this team's own kicker vs. the opponent's kicker when facing
+   * this team's defense — see syncSpecialTeamsStats.ts). CFB-only.
+   * Defaults to 0 (no-op) — untested.
+   */
+  pointsPerFgMakeRate: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -273,6 +294,8 @@ const NFL_PARAMS: RatingParams = {
   pointsPerPassingDownsSplit: 0,
   pointsPerSackRate: 0, // no sack-rate ingestion for NFL yet (would need an nflverse play-by-play source, not CFBD)
   pointsPerFinishingDrives: 0, // no finishing-drives ingestion for NFL yet (would need an nflverse drive-level source, not CFBD)
+  pointsPerFieldPosition: 0, // no special-teams ingestion for NFL yet
+  pointsPerFgMakeRate: 0,
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -424,6 +447,10 @@ const CFB_PARAMS: RatingParams = {
   // argues for -- treat this as the deliberately-minimized end of a real
   // trade-off, not a neutral pick.
   pointsPerFinishingDrives: 2,
+  // Inherited 0 from NFL_PARAMS — Phase 3 of the component-model rebuild,
+  // untested. Needs cfb-specialteams-ingest then a real sweep.
+  pointsPerFieldPosition: 0,
+  pointsPerFgMakeRate: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

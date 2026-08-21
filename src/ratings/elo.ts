@@ -110,6 +110,21 @@ export interface GameForRating {
   homeDefFinishingDrivesPpo?: number | null;
   awayOffFinishingDrivesPpo?: number | null;
   awayDefFinishingDrivesPpo?: number | null;
+  /**
+   * Special teams: field position + FG make rate, from a combined /drives
+   * + /plays ingestion pass (see ingest/cfbd/syncSpecialTeamsStats.ts).
+   * Standard off/def sign convention for both. Only used when the
+   * corresponding params.pointsPer* is nonzero and all four of that
+   * metric's fields are present.
+   */
+  homeOffFieldPosition?: number | null;
+  homeDefFieldPosition?: number | null;
+  awayOffFieldPosition?: number | null;
+  awayDefFieldPosition?: number | null;
+  homeOffFgMakeRate?: number | null;
+  homeDefFgMakeRate?: number | null;
+  awayOffFgMakeRate?: number | null;
+  awayDefFgMakeRate?: number | null;
 }
 
 export interface TeamRatingState {
@@ -271,6 +286,20 @@ export function computeSeasonRatings(
       awayOffFinishingDrivesPpo != null &&
       awayDefFinishingDrivesPpo != null;
 
+    const homeOffFieldPosition = game.homeOffFieldPosition;
+    const homeDefFieldPosition = game.homeDefFieldPosition;
+    const awayOffFieldPosition = game.awayOffFieldPosition;
+    const awayDefFieldPosition = game.awayDefFieldPosition;
+    const haveAllFourFieldPosition =
+      homeOffFieldPosition != null && homeDefFieldPosition != null && awayOffFieldPosition != null && awayDefFieldPosition != null;
+
+    const homeOffFgMakeRate = game.homeOffFgMakeRate;
+    const homeDefFgMakeRate = game.homeDefFgMakeRate;
+    const awayOffFgMakeRate = game.awayOffFgMakeRate;
+    const awayDefFgMakeRate = game.awayDefFgMakeRate;
+    const haveAllFourFgMakeRate =
+      homeOffFgMakeRate != null && homeDefFgMakeRate != null && awayOffFgMakeRate != null && awayDefFgMakeRate != null;
+
     // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
     // doc. Applied AFTER the garbage-time resolution above, on top of
     // whichever EPA source (raw or no-garbage) was just selected, always
@@ -370,6 +399,16 @@ export function computeSeasonRatings(
       const homeNetFinishing = homeOffFinishingDrivesPpo! - homeDefFinishingDrivesPpo!;
       const awayNetFinishing = awayOffFinishingDrivesPpo! - awayDefFinishingDrivesPpo!;
       actualMargin += params.pointsPerFinishingDrives * (homeNetFinishing - awayNetFinishing);
+    }
+    if (params.pointsPerFieldPosition !== 0 && haveAllFourFieldPosition) {
+      const homeNetFieldPosition = homeOffFieldPosition! - homeDefFieldPosition!;
+      const awayNetFieldPosition = awayOffFieldPosition! - awayDefFieldPosition!;
+      actualMargin += params.pointsPerFieldPosition * (homeNetFieldPosition - awayNetFieldPosition);
+    }
+    if (params.pointsPerFgMakeRate !== 0 && haveAllFourFgMakeRate) {
+      const homeNetFg = homeOffFgMakeRate! - homeDefFgMakeRate!;
+      const awayNetFg = awayOffFgMakeRate! - awayDefFgMakeRate!;
+      actualMargin += params.pointsPerFgMakeRate * (homeNetFg - awayNetFg);
     }
 
     const error = actualMargin - predictedMargin;

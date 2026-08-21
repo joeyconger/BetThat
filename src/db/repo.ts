@@ -437,6 +437,33 @@ export async function upsertFinishingDrivesStats(input: UpsertFinishingDrivesSta
   );
 }
 
+export interface UpsertSpecialTeamsStatsInput {
+  gameId: number;
+  teamId: number;
+  /** Avg distance (yards) from this team's OWN goal line at the start of its own offensive drives -- higher = better starting position. Null if this team had zero drives (shouldn't happen in practice, but degrades gracefully). */
+  offFieldPosition: number | null;
+  /** Same metric, on the OPPONENT's drives when facing this team's defense -- higher = worse (means kickoff/punt coverage let the opponent start with good field position). Standard off/def sign convention (higher off = better, higher def = worse), unlike sack rate. */
+  defFieldPosition: number | null;
+  /** Made / (made+missed+blocked) for this team's own field goal attempts. Null when this team attempted zero FGs in the game -- a real, distinct fact from "made 0% of its kicks." */
+  offFgMakeRate: number | null;
+  /** Same metric for the OPPONENT's field goal attempts when facing this team's defense. Null when the opponent attempted zero FGs against this team. */
+  defFgMakeRate: number | null;
+}
+
+/**
+ * Same targeted-UPDATE shape as upsertFinishingDrivesStats: sourced from
+ * BOTH CFBD's /drives and /plays (see
+ * ingest/cfbd/syncSpecialTeamsStats.ts), aggregated per team per game. Not
+ * an upsert on its own -- a game with no prior team_game_stats row is a
+ * no-op.
+ */
+export async function upsertSpecialTeamsStats(input: UpsertSpecialTeamsStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats SET off_field_position = $3, def_field_position = $4, off_fg_make_rate = $5, def_fg_make_rate = $6 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offFieldPosition, input.defFieldPosition, input.offFgMakeRate, input.defFgMakeRate],
+  );
+}
+
 export interface UpsertGarbageTimeStatsInput {
   gameId: number;
   teamId: number;
@@ -565,6 +592,15 @@ export interface GameForRating {
   homeDefFinishingDrivesPpo: number | null;
   awayOffFinishingDrivesPpo: number | null;
   awayDefFinishingDrivesPpo: number | null;
+  /** Special teams: field position + FG make rate, from ingest/cfbd/syncSpecialTeamsStats.ts (both /drives and /plays). Standard off/def sign convention. Nullable both when ingestion hasn't run AND legitimately for zero-attempt games (FG rate) — see upsertSpecialTeamsStats' doc. */
+  homeOffFieldPosition: number | null;
+  homeDefFieldPosition: number | null;
+  awayOffFieldPosition: number | null;
+  awayDefFieldPosition: number | null;
+  homeOffFgMakeRate: number | null;
+  homeDefFgMakeRate: number | null;
+  awayOffFgMakeRate: number | null;
+  awayDefFgMakeRate: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -626,6 +662,14 @@ export async function getSeasonGamesForRating(
     home_def_finishing_drives_ppo: number | null;
     away_off_finishing_drives_ppo: number | null;
     away_def_finishing_drives_ppo: number | null;
+    home_off_field_position: number | null;
+    home_def_field_position: number | null;
+    away_off_field_position: number | null;
+    away_def_field_position: number | null;
+    home_off_fg_make_rate: number | null;
+    home_def_fg_make_rate: number | null;
+    away_off_fg_make_rate: number | null;
+    away_def_fg_make_rate: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -651,7 +695,11 @@ export async function getSeasonGamesForRating(
             home_stats.off_sack_rate AS home_off_sack_rate, home_stats.def_sack_rate AS home_def_sack_rate,
             away_stats.off_sack_rate AS away_off_sack_rate, away_stats.def_sack_rate AS away_def_sack_rate,
             home_stats.off_finishing_drives_ppo AS home_off_finishing_drives_ppo, home_stats.def_finishing_drives_ppo AS home_def_finishing_drives_ppo,
-            away_stats.off_finishing_drives_ppo AS away_off_finishing_drives_ppo, away_stats.def_finishing_drives_ppo AS away_def_finishing_drives_ppo
+            away_stats.off_finishing_drives_ppo AS away_off_finishing_drives_ppo, away_stats.def_finishing_drives_ppo AS away_def_finishing_drives_ppo,
+            home_stats.off_field_position AS home_off_field_position, home_stats.def_field_position AS home_def_field_position,
+            away_stats.off_field_position AS away_off_field_position, away_stats.def_field_position AS away_def_field_position,
+            home_stats.off_fg_make_rate AS home_off_fg_make_rate, home_stats.def_fg_make_rate AS home_def_fg_make_rate,
+            away_stats.off_fg_make_rate AS away_off_fg_make_rate, away_stats.def_fg_make_rate AS away_def_fg_make_rate
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -714,6 +762,14 @@ export async function getSeasonGamesForRating(
     homeDefFinishingDrivesPpo: r.home_def_finishing_drives_ppo,
     awayOffFinishingDrivesPpo: r.away_off_finishing_drives_ppo,
     awayDefFinishingDrivesPpo: r.away_def_finishing_drives_ppo,
+    homeOffFieldPosition: r.home_off_field_position,
+    homeDefFieldPosition: r.home_def_field_position,
+    awayOffFieldPosition: r.away_off_field_position,
+    awayDefFieldPosition: r.away_def_field_position,
+    homeOffFgMakeRate: r.home_off_fg_make_rate,
+    homeDefFgMakeRate: r.home_def_fg_make_rate,
+    awayOffFgMakeRate: r.away_off_fg_make_rate,
+    awayDefFgMakeRate: r.away_def_fg_make_rate,
   }));
 }
 

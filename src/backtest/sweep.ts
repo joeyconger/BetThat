@@ -643,7 +643,9 @@ export type ComponentParamKey =
   | "pointsPerStandardDownsSplit"
   | "pointsPerPassingDownsSplit"
   | "pointsPerSackRate"
-  | "pointsPerFinishingDrives";
+  | "pointsPerFinishingDrives"
+  | "pointsPerFieldPosition"
+  | "pointsPerFgMakeRate";
 
 const DEFAULT_COMPONENT_WEIGHT_GRID = [0, 1, 2, 4, 8];
 
