@@ -413,9 +413,17 @@ const CFB_PARAMS: RatingParams = {
   // pointsPerSackRate=15: best cover vs open in the refined sweep (52.3%),
   // avgClv tied with the best of the group (0.69).
   pointsPerSackRate: 15,
-  // Inherited 0 from NFL_PARAMS — Phase 2 of the component-model rebuild,
-  // untested. Needs cfb-finishingdrives-ingest then a real sweep.
-  pointsPerFinishingDrives: 0,
+  // Swept 0-20 (cfb-component-sweep-finishingdrives, run 323-327): unlike
+  // every other component, this one shows a real, steep, CLEAN monotonic
+  // decline in avgClv as weight increases (0.72 -> 0.64 -> 0.48 -> 0.34 ->
+  // 0.17, a ~75% drop by weight=20) while cover vs open stays roughly flat
+  // (52.0-52.4%) -- a genuine cost that gets worse with more weight, not
+  // just "no signal" like the others. Calibrated to the smallest tested
+  // nonzero value (closest to the 0-weight baseline on both metrics) per
+  // instruction to keep it in regardless, rather than a value the data
+  // argues for -- treat this as the deliberately-minimized end of a real
+  // trade-off, not a neutral pick.
+  pointsPerFinishingDrives: 2,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {
