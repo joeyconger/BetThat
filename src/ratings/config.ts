@@ -371,16 +371,32 @@ const CFB_PARAMS: RatingParams = {
   // actually the problem — real, fresh week-by-week SP+ still doesn't
   // add anything this model doesn't already have. Left at 0.
   weeklySpSignalPoints: 0,
-  // Untested — needs syncCfbdGameStats re-run (backfills explosiveness +
-  // down/distance splits into already-ingested games, no new API call)
-  // then a real sweep. Part of the component-model rebuild that replaced
-  // sosWeight above.
-  pointsPerExplosiveness: 0,
-  pointsPerStandardDownsSplit: 0,
-  pointsPerPassingDownsSplit: 0,
-  // Untested — needs cfb-sackrate-ingest (a real /plays pass) then a real
-  // sweep.
-  pointsPerSackRate: 0,
+  // Calibrated (not go/no-go — explicitly adopted regardless of whether
+  // each individually clears breakeven, per instruction) via
+  // cfb-component-ingest + cfb-component-sweep-* (run 279-322, two passes:
+  // an initial coarse grid, then a refined grid around each one's best
+  // region). Part of the component-model rebuild that replaced sosWeight
+  // above (see that param's doc). None of these moved cover-vs-open more
+  // than ~0.4pp from the sosWeight=0 baseline (52.0%) on its own — the
+  // real value here (if any) may be in how they combine, not any single
+  // one's isolated effect, which is exactly why they're being kept in
+  // rather than screened out one at a time.
+  //
+  // pointsPerExplosiveness=8: best cover vs open in the refined sweep
+  // (52.4%, tied with 12) with the best avgClv of that group (0.75).
+  pointsPerExplosiveness: 8,
+  // pointsPerStandardDownsSplit=10: cover vs open was flat/tied at 52.4%
+  // across the whole 10-50 refined range, but avgClv declined steadily as
+  // the weight increased (0.67 at 10 down to 0.58 at 50) — picked the
+  // lowest weight in the tied-cover group, since it has no CLV cost for
+  // the same cover rate.
+  pointsPerStandardDownsSplit: 10,
+  // pointsPerPassingDownsSplit=20: best cover vs open in the refined
+  // sweep (52.2%), avgClv tied with the 0-weight baseline (0.69).
+  pointsPerPassingDownsSplit: 20,
+  // pointsPerSackRate=15: best cover vs open in the refined sweep (52.3%),
+  // avgClv tied with the best of the group (0.69).
+  pointsPerSackRate: 15,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

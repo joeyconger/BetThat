@@ -581,7 +581,14 @@ test("computeSeasonRatings applies pointsPerSackRate with the INVERTED sign conv
   assert.notEqual(actualMargin, wrongConventionMargin, "inverted and naive sign conventions must diverge for this test to actually prove the sign is right");
 });
 
-test("computeSeasonRatings' new component signals (explosiveness/splits/sack rate) are all no-ops at default (0) weights, even with data present", () => {
+test("computeSeasonRatings' new component signals (explosiveness/splits/sack rate) are all no-ops when their weights are explicitly 0, even with data present", () => {
+  // CFB's real defaults for these four are now calibrated nonzero values
+  // (see config.ts) -- explicitly zero them here so this test isolates the
+  // no-op guard itself, not CFB's current calibration.
+  const zeroed = {
+    ...CFB, successRateWeight: 0,
+    pointsPerExplosiveness: 0, pointsPerStandardDownsSplit: 0, pointsPerPassingDownsSplit: 0, pointsPerSackRate: 0,
+  };
   const gameBase = {
     gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
     homeOffEpa: 0.1, homeDefEpa: 0.05, awayOffEpa: 0.05, awayDefEpa: 0.1,
@@ -593,10 +600,10 @@ test("computeSeasonRatings' new component signals (explosiveness/splits/sack rat
     homeOffPassingDownsSuccessRate: 0.3, homeDefPassingDownsSuccessRate: 0.35, awayOffPassingDownsSuccessRate: 0.25, awayDefPassingDownsSuccessRate: 0.4,
     homeOffSackRate: 0.15, homeDefSackRate: 0.12, awayOffSackRate: 0.02, awayDefSackRate: 0.03,
   };
-  const withComponents = computeSeasonRatings([gameWithComponents], new Map(), { ...CFB, successRateWeight: 0 });
-  const withoutComponents = computeSeasonRatings([gameBase], new Map(), { ...CFB, successRateWeight: 0 });
-  assert.equal(withComponents.get(1)!.rating, withoutComponents.get(1)!.rating, "home rating identical with all component weights at their 0 default");
-  assert.equal(withComponents.get(2)!.rating, withoutComponents.get(2)!.rating, "away rating identical with all component weights at their 0 default");
+  const withComponents = computeSeasonRatings([gameWithComponents], new Map(), zeroed);
+  const withoutComponents = computeSeasonRatings([gameBase], new Map(), zeroed);
+  assert.equal(withComponents.get(1)!.rating, withoutComponents.get(1)!.rating, "home rating identical with all component weights explicitly at 0");
+  assert.equal(withComponents.get(2)!.rating, withoutComponents.get(2)!.rating, "away rating identical with all component weights explicitly at 0");
 });
 
 test("computeSeasonRatings falls back to a no-op per component when that component's fields are missing, even with nonzero weights", () => {
