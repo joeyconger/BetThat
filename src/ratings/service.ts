@@ -4,6 +4,7 @@ import {
   getPriorSeasonSpRating,
   getCfbdEloDistributionForWeek,
   getCfbdSpDistributionForSeason,
+  getManualSpWeeklyDistributionForWeek,
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
@@ -20,6 +21,8 @@ const METHOD = "elo" as const;
 const MIN_ELO_SAMPLE = 20;
 /** Same reasoning as MIN_ELO_SAMPLE, for the prior season's SP+ distribution. */
 const MIN_SP_SAMPLE = 20;
+/** Same reasoning as MIN_ELO_SAMPLE, for the real weekly SP+ distribution — currently only ever satisfied for 2025. */
+const MIN_WEEKLY_SP_SAMPLE = 20;
 
 /**
  * Computes each team's rating as of the end of `throughWeek` and persists
@@ -95,6 +98,14 @@ async function predictAndStoreWeek(
   const spValues = [...spDistribution.values()];
   const hasSpSample = spValues.length >= MIN_SP_SAMPLE;
 
+  // Same as-of-end-of-prior-week invariant as CFBD Elo above. CFB only;
+  // currently only ever non-empty for season=2025 (the one season a real
+  // manual archive exists for — see ingest/manual/syncManualSpWeekly.ts).
+  const weeklySpDistribution =
+    sport === "cfb" ? await getManualSpWeeklyDistributionForWeek(sport, season, week - 1) : new Map<number, number>();
+  const weeklySpValues = [...weeklySpDistribution.values()];
+  const hasWeeklySpSample = weeklySpValues.length >= MIN_WEEKLY_SP_SAMPLE;
+
   let predicted = 0;
 
   for (const game of games) {
@@ -112,6 +123,11 @@ async function predictAndStoreWeek(
     const homeSpZ = hasSpSample && homeSp !== undefined ? zScore(homeSp, spValues) : undefined;
     const awaySpZ = hasSpSample && awaySp !== undefined ? zScore(awaySp, spValues) : undefined;
 
+    const homeWeeklySp = weeklySpDistribution.get(game.homeTeamId);
+    const awayWeeklySp = weeklySpDistribution.get(game.awayTeamId);
+    const homeWeeklySpZ = hasWeeklySpSample && homeWeeklySp !== undefined ? zScore(homeWeeklySp, weeklySpValues) : undefined;
+    const awayWeeklySpZ = hasWeeklySpSample && awayWeeklySp !== undefined ? zScore(awayWeeklySp, weeklySpValues) : undefined;
+
     const prediction = predictSpread(
       {
         homeRating: home.rating,
@@ -123,6 +139,8 @@ async function predictAndStoreWeek(
         awayEloZ,
         homeSpZ,
         awaySpZ,
+        homeWeeklySpZ,
+        awayWeeklySpZ,
         restDaysDiff: game.restDaysDiff,
       },
       params,

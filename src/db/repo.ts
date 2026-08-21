@@ -592,7 +592,7 @@ export interface ExternalRatingInput {
   season: number;
   /** null = season-final value (cfbd_sp, which has no week granularity). */
   week: number | null;
-  source: "cfbd_sp" | "cfbd_elo";
+  source: "cfbd_sp" | "cfbd_elo" | "manual_sp_weekly";
   rating: number;
 }
 
@@ -657,6 +657,29 @@ export async function getCfbdEloDistributionForWeek(
      FROM external_ratings er
      JOIN teams t ON t.id = er.team_id
      WHERE t.sport = $1 AND er.season = $2 AND er.week = $3 AND er.source = 'cfbd_elo'`,
+    [sport, season, week],
+  );
+  return new Map(result.rows.map((r) => [r.team_id, r.rating]));
+}
+
+/**
+ * Same shape as getCfbdEloDistributionForWeek, but for 'manual_sp_weekly' —
+ * real week-by-week SP+ from a manually-provided archive (see
+ * ingest/manual/syncManualSpWeekly.ts), not a live CFBD pull. Currently
+ * only populated for 2025 (the one season a real archive exists for) —
+ * any other season/week returns an empty map, same "not available yet"
+ * degrade as CFBD Elo's own early-season gap.
+ */
+export async function getManualSpWeeklyDistributionForWeek(
+  sport: Sport,
+  season: number,
+  week: number,
+): Promise<Map<number, number>> {
+  const result = await pool.query<{ team_id: number; rating: number }>(
+    `SELECT er.team_id, er.rating
+     FROM external_ratings er
+     JOIN teams t ON t.id = er.team_id
+     WHERE t.sport = $1 AND er.season = $2 AND er.week = $3 AND er.source = 'manual_sp_weekly'`,
     [sport, season, week],
   );
   return new Map(result.rows.map((r) => [r.team_id, r.rating]));

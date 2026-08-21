@@ -4,6 +4,7 @@ import { getPlays } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
+import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
 import { syncCfbdHistoricalWeather } from "./ingest/cfbd/syncHistoricalWeather.js";
@@ -19,6 +20,7 @@ import {
   runOpponentAdjustSweep,
   runRestDaySweep,
   runTurnoverLuckSweep,
+  runWeeklySpSignalSweep,
 } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -627,6 +629,52 @@ export function startCfbRestDayWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Ingests the manually-provided real week-by-week SP+ archive for CFB
+ * 2025 (weeks 1-15) -- see ingest/manual/syncManualSpWeekly.ts. Not a live
+ * API pull, unlike every other ingestion job here: reads a JSON file
+ * checked into the repo, built from a spreadsheet the user supplied,
+ * since CFBD's own /ratings/sp confirmed (via their real client docs) to
+ * have no week parameter at all. Run this BEFORE cfb-weeklyspsignal-sweep;
+ * without it, RatingParams.weeklySpSignalPoints is a silent no-op.
+ */
+export function startCfbManualSpIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-manual-sp-ingest", async (job) => {
+    const result = await syncManualSpWeekly2025();
+    log(job, `synced ${result.synced}, skipped ${result.skipped}`);
+  });
+}
+
+/**
+ * Sweeps weeklySpSignalPoints -- real week-by-week SP+ as an additive
+ * signal (see backtest/sweep.ts's runWeeklySpSignalSweep and
+ * RatingParams.weeklySpSignalPoints' doc). ALWAYS scoped to 2025 only
+ * (the manual archive only covers that season) regardless of what other
+ * jobs use -- see runWeeklySpSignalSweep's doc for why. Requires
+ * cfb-manual-sp-ingest to have run first.
+ *
+ * No walk-forward job for this one: with only a single season of real
+ * data, there's no untouched 2023-2024-style holdout to train on and
+ * validate against -- see weeklySpSignalPoints' doc in config.ts. Treat
+ * any positive result here as single-season, in-sample evidence, not a
+ * walk-forward-validated edge like successRateWeight's.
+ */
+export function startCfbWeeklySpSignalSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-weeklyspsignal-sweep", async (job) => {
+    log(job, "sweeping cfb weeklySpSignalPoints, 2025 only (real weekly SP+ archive covers just this season)");
+    const results = await runWeeklySpSignalSweep("cfb");
+    for (const r of results) {
+      log(
+        job,
+        `weeklySpSignalPoints=${r.weeklySpSignalPoints}: ${r.games} games, cover vs close=${fmtPct(r.coverRate)}, ` +
+          `cover vs open=${fmtPct(r.coverRateVsOpening)} (${r.openingGames} games w/ opening line), ` +
+          `avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`,
+      );
+    }
+    log(job, "breakeven vs. standard -110 vig is ~52.4% -- this is single-season/in-sample only, no holdout possible with just one season of real data.");
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -914,6 +962,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-turnover-ingest": startCfbTurnoverIngestJob,
   "cfb-turnoverluck-sweep": startCfbTurnoverLuckSweepJob,
   "cfb-turnoverluck-walkforward": startCfbTurnoverLuckWalkforwardJob,
+  "cfb-manual-sp-ingest": startCfbManualSpIngestJob,
+  "cfb-weeklyspsignal-sweep": startCfbWeeklySpSignalSweepJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,

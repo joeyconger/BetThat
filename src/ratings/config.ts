@@ -153,6 +153,28 @@ export interface RatingParams {
    * (no-op) — untested, needs ingestion + a real sweep.
    */
   turnoverLuckWeight: number;
+  /**
+   * Points of predicted-margin adjustment per unit z-score gap in REAL
+   * week-by-week SP+ (see ratings/elo.ts's predictSpread) — same additive-
+   * signal mechanism as eloSignalPoints/spSignalPoints, but sourced from
+   * ingest/manual/syncManualSpWeekly.ts's manually-provided archive
+   * instead of a live CFBD pull. Distinct from spSignalPoints (which
+   * uses CFBD's own /ratings/sp — confirmed via their real API docs to
+   * have NO week parameter at all, one frozen value per team per season)
+   * — spSignalPoints tested that frozen value and it came back flat/
+   * negative, plausibly because it's stale by the time it's applied
+   * in-season. This is the same idea retried with genuinely fresh,
+   * real in-season data, to see whether staleness (not SP+ itself) was
+   * the actual problem. CFB-only, and currently only meaningful for
+   * 2025 — the one season a real weekly archive exists for; any other
+   * season/week has no manual_sp_weekly data, so this signal is a
+   * silent no-op there regardless of the weight. Defaults to 0 (no-op)
+   * — untested pending ingestion, and only single-season (2025-only)
+   * validation is possible until archives for other seasons exist, so
+   * even a positive in-sample 2025 result can't get the normal walk-
+   * forward treatment — see README/adminJobs.ts for how that's handled.
+   */
+  weeklySpSignalPoints: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -176,6 +198,7 @@ const NFL_PARAMS: RatingParams = {
   excludeGarbageTime: false, // untested — no-garbage columns not ingested for NFL yet (nflverse-based, not CFBD)
   opponentAdjustWeight: 0, // untested — no-op until swept
   turnoverLuckWeight: 0, // untested — turnover stats not ingested for NFL yet (would need an nflverse play-by-play source, not CFBD)
+  weeklySpSignalPoints: 0, // no SP+ (weekly or otherwise) for NFL
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -262,6 +285,11 @@ const CFB_PARAMS: RatingParams = {
   // stripping turnovers out separately has little independent information
   // left to add. Left at 0.
   turnoverLuckWeight: 0,
+  // Inherited 0 from NFL_PARAMS — no-op until swept. Needs
+  // cfb-manual-sp-ingest first (only 2025 has a real weekly archive so
+  // far) — see weeklySpSignalPoints' doc for why this is worth retrying
+  // despite spSignalPoints' failure above.
+  weeklySpSignalPoints: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

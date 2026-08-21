@@ -359,6 +359,15 @@ export interface PredictionInput {
   homeSpZ?: number;
   awaySpZ?: number;
   /**
+   * z-scores of each team's REAL week-by-week SP+ (not CFBD's frozen
+   * season-final value — see RatingParams.weeklySpSignalPoints' doc)
+   * against that week's full FBS distribution — see ratings/service.ts.
+   * Undefined when no manual archive data exists for that team/week
+   * (currently: any season other than 2025, or week 0/16+).
+   */
+  homeWeeklySpZ?: number;
+  awayWeeklySpZ?: number;
+  /**
    * (home team's days since their prior game) - (away team's days since
    * theirs), from db/repo.ts's getGamesForWeek — a real, well-documented
    * rest-advantage effect (extra rest, especially a bye week, is a genuine
@@ -394,13 +403,15 @@ export interface Prediction {
 export function predictSpread(input: PredictionInput, params: RatingParams): Prediction {
   const eloSignal = params.eloSignalPoints * ((input.homeEloZ ?? 0) - (input.awayEloZ ?? 0));
   const spSignal = params.spSignalPoints * ((input.homeSpZ ?? 0) - (input.awaySpZ ?? 0));
+  const weeklySpSignal = params.weeklySpSignalPoints * ((input.homeWeeklySpZ ?? 0) - (input.awayWeeklySpZ ?? 0));
   // ?? 0 on the WHOLE differential (not each side separately, unlike
   // homeEloZ/awaySpZ above) -- restDaysDiff is already a single combined
   // number, and defaulting a missing differential to 0 means "no rest
   // advantage either way," not "assume 0 days rest," which is the correct
   // neutral fallback rather than reading as maximally fatigued.
   const restSignal = params.pointsPerRestDay * (input.restDaysDiff ?? 0);
-  const predictedMargin = input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal + spSignal + restSignal;
+  const predictedMargin =
+    input.homeRating - input.awayRating + params.homeFieldAdvantage + eloSignal + spSignal + weeklySpSignal + restSignal;
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;

@@ -2,7 +2,7 @@ import { getRatingParams } from "../ratings/config.js";
 import type { RatingParams } from "../ratings/config.js";
 import type { Sport } from "../db/repo.js";
 import { runBacktest } from "./run.js";
-import { getOverallReport, getConfidenceReport } from "./report.js";
+import { getOverallReport, getConfidenceReport, getOpeningCoverRate } from "./report.js";
 
 /**
  * Tries a grid of rating-model constants against the same season range and
@@ -566,5 +566,63 @@ export async function runTurnoverLuckSweep(
   }
 
   results.sort((a, b) => (b.coverRate ?? -1) - (a.coverRate ?? -1));
+  return results;
+}
+
+/**
+ * Sweeps weeklySpSignalPoints -- real week-by-week SP+ as an additive
+ * signal (see RatingParams doc). Requires cfb-manual-sp-ingest to have run
+ * first. Unlike every other sweep in this file, ALWAYS scoped to 2025 only
+ * regardless of the seasonStart/seasonEnd args -- the manual archive this
+ * signal depends on only exists for 2025, so any other season is a silent
+ * no-op that would just dilute the result with unaffected games. Reports
+ * cover vs. OPENING line directly (not just vs. closing) since that's the
+ * actual "would this make money" question this signal is being judged on,
+ * given there's no 2023-2024 data to walk-forward validate it against.
+ */
+const DEFAULT_WEEKLY_SP_SIGNAL_POINTS = [0, 0.5, 1, 1.5, 2, 3];
+
+export interface WeeklySpSignalSweepResult {
+  weeklySpSignalPoints: number;
+  runId: number;
+  games: number;
+  coverRate: number | null;
+  avgClv: number | null;
+  openingGames: number;
+  coverRateVsOpening: number | null;
+}
+
+export async function runWeeklySpSignalSweep(
+  sport: Sport,
+  weightGrid: number[] = DEFAULT_WEEKLY_SP_SIGNAL_POINTS,
+): Promise<WeeklySpSignalSweepResult[]> {
+  const base = getRatingParams(sport);
+  const results: WeeklySpSignalSweepResult[] = [];
+
+  for (const weeklySpSignalPoints of weightGrid) {
+    const paramsOverride: RatingParams = { ...base, weeklySpSignalPoints };
+    const name = `sweep-weeklyspsignal-${sport}-w${weeklySpSignalPoints}`;
+    const { backtestRunId, scored } = await runBacktest({ name, sport, seasonStart: 2025, seasonEnd: 2025, paramsOverride });
+    const overall = await getOverallReport(backtestRunId);
+    const opening = await getOpeningCoverRate(backtestRunId);
+    results.push({
+      weeklySpSignalPoints,
+      runId: backtestRunId,
+      games: scored,
+      coverRate: overall.coverRate,
+      avgClv: overall.avgClv,
+      openingGames: opening.games,
+      coverRateVsOpening: opening.coverRateVsOpening,
+    });
+    console.log(
+      `weeklySpSignalPoints=${weeklySpSignalPoints}: ${scored} games, cover vs close=${
+        overall.coverRate === null ? "n/a" : (overall.coverRate * 100).toFixed(1) + "%"
+      }, cover vs open=${
+        opening.coverRateVsOpening === null ? "n/a" : (opening.coverRateVsOpening * 100).toFixed(1) + "%"
+      } (${opening.games} games), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${backtestRunId})`,
+    );
+  }
+
+  results.sort((a, b) => (b.coverRateVsOpening ?? -1) - (a.coverRateVsOpening ?? -1));
   return results;
 }

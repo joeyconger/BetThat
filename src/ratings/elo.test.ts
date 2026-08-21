@@ -439,6 +439,44 @@ test("computeSeasonRatings strips turnover-play PPA via a reweighted average, ma
   assert.ok(Math.abs(state.get(2)!.rating - expectedAwayRating) < 1e-9, `away rating (${state.get(2)!.rating}) matches hand-computed turnover-stripped formula (${expectedAwayRating})`);
 });
 
+test("predictSpread's weeklySpSignal term actually moves the prediction when weeklySpSignalPoints > 0", () => {
+  // CFB_PARAMS.weeklySpSignalPoints defaults to 0 (untested, see config.ts)
+  // -- explicit override so this doesn't silently pass as a no-op.
+  const params = { ...CFB, weeklySpSignalPoints: 2 };
+  const result = predictSpread(
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, homeWeeklySpZ: 1, awayWeeklySpZ: -1 },
+    params,
+  );
+  const expectedMargin = CFB.homeFieldAdvantage + 2 * 2;
+  assert.ok(Math.abs(result.eloSpreadHome - -expectedMargin) < 1e-9);
+});
+
+test("predictSpread ignores weeklySpZ inputs entirely when weeklySpSignalPoints is 0 (today's default)", () => {
+  const withZ = predictSpread(
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, homeWeeklySpZ: 5, awayWeeklySpZ: -5 },
+    CFB,
+  );
+  const withoutZ = predictSpread(
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    CFB,
+  );
+  assert.equal(withZ.eloSpreadHome, withoutZ.eloSpreadHome);
+});
+
+test("predictSpread's spSignal and weeklySpSignal are independent, additive terms", () => {
+  const params = { ...CFB, spSignalPoints: 2, weeklySpSignalPoints: 3 };
+  const result = predictSpread(
+    {
+      homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null,
+      homeSpZ: 1, awaySpZ: -1, homeWeeklySpZ: 1, awayWeeklySpZ: -1,
+    },
+    params,
+  );
+  // spSignal = 2*(1-(-1)) = 4; weeklySpSignal = 3*(1-(-1)) = 6; predictedMargin = HFA + 4 + 6
+  const expectedMargin = CFB.homeFieldAdvantage + 4 + 6;
+  assert.ok(Math.abs(result.eloSpreadHome - -expectedMargin) < 1e-9);
+});
+
 test("computeSeasonRatings falls back to raw EPA when turnover-stats fields are missing, even with turnoverLuckWeight > 0", () => {
   const params = { ...CFB, turnoverLuckWeight: 1 };
   const gameNoTurnoverData = {
