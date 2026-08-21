@@ -204,7 +204,21 @@ const NFL_PARAMS: RatingParams = {
 const CFB_PARAMS: RatingParams = {
   ...NFL_PARAMS,
   homeFieldAdvantage: 2.5,
-  sosWeight: 0.4, // stronger SOS adjustment for CFB than NFL, per spec
+  // Removed (set to 0) as of the component-model rebuild below --
+  // sosWeight=0 makes homeSosMultiplier/awaySosMultiplier in elo.ts's
+  // computeSeasonRatings mathematically collapse to a flat 1 every time
+  // (1 + 0*rating = 1, clamped to [minSosMultiplier, maxSosMultiplier]
+  // which always contains 1), a clean no-op requiring no code change.
+  // Retired in favor of the new, broader opponent-adjustment system
+  // (Phase 4) being built to cover every new component stat at once,
+  // rather than keeping this old single-purpose SOS multiplier running
+  // alongside it -- tonight's own opponentAdjustWeight sweep already
+  // found a negative result plausibly caused by exactly this kind of
+  // double-counting (see opponentAdjustWeight's history below), so
+  // stacking a second, more thorough opponent-adjustment mechanism on
+  // top of this one rather than replacing it was judged too likely to
+  // repeat that mistake at a larger scale.
+  sosWeight: 0,
   marketShrinkageK: 6, // shallower CFB schedules (12 games) mean less time to prove the model out
   // pointsPerEpa/spPriorWeight/eloSignalPoints below: calibrated from the
   // cfb-external-sweep run (see README "External ratings" / backtest run

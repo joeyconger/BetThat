@@ -225,6 +225,25 @@ test("computeSeasonRatings clamps the SOS multiplier instead of letting an extre
   );
 });
 
+test("computeSeasonRatings' SOS multiplier is neutralized for CFB (sosWeight=0) -- an extreme opponent rating has zero effect on the update", () => {
+  const params = { ...CFB, successRateWeight: 0 };
+  const state = computeSeasonRatings(
+    [{ gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2, homeOffEpa: 0.1, homeDefEpa: -0.05, awayOffEpa: -0.05, awayDefEpa: 0.05 }],
+    new Map([[2, 100000]]), // extreme away rating -- would blow up homeSosMultiplier if sosWeight were nonzero
+    params,
+  );
+  // predictedMargin = 0 - 100000 + homeFieldAdvantage; actualMargin = pointsPerEpa*(0.15 - -0.1)
+  const actualMargin = params.pointsPerEpa * (0.15 - -0.1);
+  const error = actualMargin - (0 - 100000 + params.homeFieldAdvantage);
+  // sosWeight=0 -> multiplier is exactly 1 regardless of the away rating's magnitude.
+  const expectedHomeRating = params.baseK * error * 1;
+  const home = state.get(1)!;
+  assert.ok(
+    Math.abs(home.rating - expectedHomeRating) < 1e-6,
+    `expected unclamped, unmultiplied rating ${expectedHomeRating} (sosWeight=0 is a true no-op), got ${home.rating}`,
+  );
+});
+
 test("computeSeasonRatings ignores no-garbage fields entirely when excludeGarbageTime is false (today's default), even when present", () => {
   const gameBase = {
     gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2,
