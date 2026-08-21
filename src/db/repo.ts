@@ -735,6 +735,9 @@ export interface GameForRating {
   week: number;
   homeTeamId: number;
   awayTeamId: number;
+  /** Real final score -- NOT used by ratings/elo.ts's own update (which trains on an EPA/success-rate-implied proxy margin, deliberately lower-variance than the raw score). Added for backtest/jointRefit.ts's ridge regression, which needs the actual game outcome as its regression target. Always present here since getSeasonGamesForRating already filters to status='final'. */
+  homeScore: number;
+  awayScore: number;
   homeOffEpa: number;
   homeDefEpa: number;
   awayOffEpa: number;
@@ -817,6 +820,8 @@ export async function getSeasonGamesForRating(
     week: number;
     home_team_id: number;
     away_team_id: number;
+    home_score: number;
+    away_score: number;
     home_off_epa: number;
     home_def_epa: number;
     away_off_epa: number;
@@ -878,7 +883,7 @@ export async function getSeasonGamesForRating(
     away_off_adj: number | null;
     away_def_adj: number | null;
   }>(
-    `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
+    `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id, g.home_score, g.away_score,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
             away_stats.off_epa_play AS away_off_epa, away_stats.def_epa_play AS away_def_epa,
             home_stats.off_success_rate AS home_off_success, home_stats.def_success_rate AS home_def_success,
@@ -923,6 +928,8 @@ export async function getSeasonGamesForRating(
     week: r.week,
     homeTeamId: r.home_team_id,
     awayTeamId: r.away_team_id,
+    homeScore: r.home_score,
+    awayScore: r.away_score,
     homeOffEpa: r.home_off_epa,
     homeDefEpa: r.home_def_epa,
     awayOffEpa: r.away_off_epa,

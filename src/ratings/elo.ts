@@ -183,7 +183,7 @@ const MIN_SUCCESS_CONTEXT_GAMES = 3;
  * field's turnover stats not yet ingested) or the reweighting denominator
  * (plays remaining after removing turnover plays) would be non-positive.
  */
-function blendTurnoverStrip(
+export function blendTurnoverStrip(
   rawEpa: number,
   totalPlays: number | null | undefined,
   turnoverPpaSum: number | null | undefined,

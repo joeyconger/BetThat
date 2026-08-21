@@ -34,6 +34,7 @@ import {
   runComponentSweep,
   runComponentSweepWalkforward,
 } from "./backtest/sweep.js";
+import { runJointRefitHoldout } from "./backtest/jointRefit.js";
 import type { ComponentParamKey } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -951,6 +952,50 @@ export function startCfbWalkforwardAllComponentsJob(): Promise<JobStatus> {
 }
 
 /**
+ * The joint-refit answer to the architectural critique that one-at-a-time
+ * sweeps (holding every other weight fixed at values calibrated in the
+ * swept term's absence) can't distinguish "this component carries no
+ * information" from "this component is correlated with others that
+ * already got credit for it" -- see backtest/jointRefit.ts's full design
+ * doc. Fits all 8 component weights jointly via ridge regression on
+ * 2023-2024 (never touching 2025), then compares the CURRENT hand-tuned
+ * weights against the newly jointly-fit weights on the SAME untouched
+ * 2025 holdout.
+ */
+export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
+  return runJob("cfb-jointrefit-holdout", async (job) => {
+    log(job, "Fitting all 8 component weights jointly (ridge, CV-selected lambda) on 2023-2024, holding out 2025 entirely.");
+    const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025);
+
+    log(job, `\ntraining games used (complete-case, all 8 components present): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`);
+    log(job, `selected lambda (5-fold CV): ${result.refit.selectedLambda}`);
+    log(job, "CV grid (lambda: mse):");
+    for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
+
+    log(job, `\njointly-fit weights (intercept ${result.refit.intercept.toFixed(3)}):`);
+    for (const [key, value] of Object.entries(result.refit.weights)) {
+      log(job, `  ${key} = ${(value as number).toFixed(4)}`);
+    }
+
+    log(
+      job,
+      `\nHOLDOUT 2025, current hand-tuned weights: ${result.handTunedGames} games, ` +
+        `cover vs open=${fmtPct(result.handTunedCoverRateVsOpening)}, avgClv=${result.handTunedAvgClv === null ? "n/a" : result.handTunedAvgClv.toFixed(2)} (run ${result.handTunedHoldoutRunId})`,
+    );
+    log(
+      job,
+      `HOLDOUT 2025, jointly-fit weights: ${result.jointGames} games, ` +
+        `cover vs open=${fmtPct(result.jointCoverRateVsOpening)}, avgClv=${result.jointAvgClv === null ? "n/a" : result.jointAvgClv.toFixed(2)} (run ${result.jointHoldoutRunId})`,
+    );
+    log(
+      job,
+      "\nDid the joint refit's 2025 holdout numbers actually beat the hand-tuned weights' 2025 holdout numbers? " +
+        "This is the real test of whether joint (vs. one-at-a-time) calibration recovers value the sweep-based approach left on the table.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1254,6 +1299,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
+  "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
