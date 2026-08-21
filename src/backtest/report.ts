@@ -82,6 +82,57 @@ export async function getOpeningCoverRate(backtestRunId: number): Promise<Openin
   };
 }
 
+export interface ConfidenceOpeningStats {
+  maxConfidence: number;
+  games: number;
+  coverRateVsOpening: number | null;
+}
+
+/**
+ * getOpeningCoverRate, but restricted to predictions at or under a
+ * confidence ceiling — the actual "would betting only the model's most
+ * confident picks have made money" question, which getConfidenceReport
+ * alone can't answer since it only reports cover rate vs. the CLOSING
+ * line (diagnostic) and CLV (price movement only), not vs. the opening
+ * line (see getOpeningCoverRate's doc for why that distinction matters).
+ * Same games-with-a-real-opening-line restriction as getOpeningCoverRate.
+ */
+export async function getConfidenceReportVsOpening(
+  backtestRunId: number,
+  confidenceCeilings: number[] = DEFAULT_CONFIDENCE_CEILINGS,
+): Promise<ConfidenceOpeningStats[]> {
+  const results: ConfidenceOpeningStats[] = [];
+  for (const maxConfidence of confidenceCeilings) {
+    const rows = await query<{ games: string; cover_rate_vs_opening: string | null }>(
+      `SELECT count(*) AS games,
+         avg(
+           CASE
+             WHEN open_cover_margin = 0 THEN NULL
+             WHEN pick_side = 'home' AND open_cover_margin > 0 THEN 1
+             WHEN pick_side = 'away' AND open_cover_margin < 0 THEN 1
+             ELSE 0
+           END
+         ) AS cover_rate_vs_opening
+       FROM (
+         SELECT
+           CASE WHEN (br.opening_spread_home - br.model_spread_home) >= 0 THEN 'home' ELSE 'away' END AS pick_side,
+           (br.actual_margin_home + br.opening_spread_home) AS open_cover_margin
+         FROM backtest_results br
+         WHERE br.backtest_run_id = $1 AND br.opening_spread_home IS NOT NULL
+           AND br.confidence IS NOT NULL AND br.confidence <= $2
+       ) picks`,
+      [backtestRunId, maxConfidence],
+    );
+    const row = rows[0]!;
+    results.push({
+      maxConfidence,
+      games: Number(row.games),
+      coverRateVsOpening: row.cover_rate_vs_opening === null ? null : Number(row.cover_rate_vs_opening),
+    });
+  }
+  return results;
+}
+
 /** Overall stats for every run at once — one query instead of N, for a run-list page. */
 export async function getOverallStatsByRun(): Promise<Map<number, AggregateStats>> {
   const rows = await query<AggregateRow & { backtest_run_id: number }>(

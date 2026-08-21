@@ -31,6 +31,8 @@ import {
   getKeyNumberReport,
   getWeatherReport,
   getPrecipitationReport,
+  getConfidenceReport,
+  getConfidenceReportVsOpening,
 } from "./backtest/report.js";
 import { getRatingParams } from "./ratings/config.js";
 import type { Sport } from "./db/repo.js";
@@ -699,6 +701,74 @@ export function startCfbTurnoverLuckWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * Answers a different question than every sweep tonight: not "does a new
+ * signal beat the baseline overall," but "does the model already make
+ * money on the subset of picks it's most confident about" — using
+ * TODAY's default cfb params (successRateWeight=0.75 adopted;
+ * opponentAdjustWeight/pointsPerRestDay/turnoverLuckWeight all swept flat
+ * and left at 0), not a param override. Reports BOTH getConfidenceReport
+ * (cover vs. CLOSING line — diagnostic, what the earlier bigSpreadShrinkRef
+ * investigation already looked at, see README) and the new
+ * getConfidenceReportVsOpening (cover vs. OPENING line — the actual
+ * "would this have made money" question, which nothing before tonight
+ * checked broken out by confidence). In-sample only; see
+ * cfb-confidence-walkforward for the real test.
+ */
+export function startCfbConfidenceReportJob(): Promise<JobStatus> {
+  return runJob("cfb-confidence-report", async (job) => {
+    log(job, "running cfb 2023-2025 backtest with today's default params");
+    const holdout = await runBacktest({ name: "cfb-confidence-report-2023-2025", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
+    log(job, `${holdout.scored} games scored (run ${holdout.backtestRunId})`);
+
+    const closing = await getConfidenceReport(holdout.backtestRunId);
+    for (const c of closing) {
+      log(job, `[vs close] confidence<=${c.maxConfidence}: ${c.games} games, cover=${fmtPct(c.coverRate)}, avgClv=${c.avgClv === null ? "n/a" : c.avgClv.toFixed(2)}`);
+    }
+
+    const opening = await getConfidenceReportVsOpening(holdout.backtestRunId);
+    for (const c of opening) {
+      log(job, `[vs open, the real question] confidence<=${c.maxConfidence}: ${c.games} games, cover=${fmtPct(c.coverRateVsOpening)}`);
+    }
+    log(job, "breakeven vs. standard -110 vig is ~52.4% — that's the bar the [vs open] numbers need to clear, and only trust a bucket with a real sample (30+ games).");
+  });
+}
+
+/**
+ * Walk-forward validation for the confidence-filter idea above, same
+ * discipline as every other rating-param change tonight: pick the best
+ * confidence ceiling on 2023-2024 (restricted to buckets with >=30 games,
+ * so a tiny high-confidence sample can't win on noise alone), then check
+ * that EXACT ceiling against the untouched 2025 season.
+ */
+export function startCfbConfidenceWalkforwardJob(): Promise<JobStatus> {
+  return runJob("cfb-confidence-walkforward", async (job) => {
+    log(job, "training: sweeping confidence ceilings (vs. opening line) on 2023-2024 only");
+    const train = await runBacktest({ name: "cfb-confidence-walkforward-train-2023-2024", sport: "cfb", seasonStart: 2023, seasonEnd: 2024 });
+    const trainReport = await getConfidenceReportVsOpening(train.backtestRunId);
+    for (const c of trainReport) {
+      log(job, `train: confidence<=${c.maxConfidence}: ${c.games} games, cover=${fmtPct(c.coverRateVsOpening)}`);
+    }
+    const eligible = trainReport.filter((c) => c.games >= 30);
+    if (eligible.length === 0) {
+      log(job, "no confidence ceiling had >=30 games in the training set -- stopping, nothing trustworthy to hold out");
+      return;
+    }
+    const best = eligible.reduce((a, b) => ((b.coverRateVsOpening ?? -1) > (a.coverRateVsOpening ?? -1) ? b : a));
+    log(job, `best training ceiling: confidence<=${best.maxConfidence} (train cover vs open ${fmtPct(best.coverRateVsOpening)}, ${best.games} games)`);
+
+    log(job, "holdout: checking that exact ceiling against the untouched 2025 season");
+    const holdout = await runBacktest({ name: "cfb-confidence-walkforward-holdout-2025", sport: "cfb", seasonStart: 2025, seasonEnd: 2025 });
+    const holdoutReport = await getConfidenceReportVsOpening(holdout.backtestRunId, [best.maxConfidence]);
+    const holdoutStat = holdoutReport[0]!;
+    log(
+      job,
+      `holdout 2025 at confidence<=${best.maxConfidence}: ${holdoutStat.games} games, cover vs open=${fmtPct(holdoutStat.coverRateVsOpening)} ` +
+        `(compare: unfiltered 2025 holdout was 50.7% vs open on cfb-successrate-walkforward; breakeven vs. -110 vig is ~52.4%)`,
+    );
+  });
+}
+
+/**
  * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
  * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
  * extreme spreads" fix added after backtest data showed the model
@@ -826,6 +896,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-turnover-ingest": startCfbTurnoverIngestJob,
   "cfb-turnoverluck-sweep": startCfbTurnoverLuckSweepJob,
   "cfb-turnoverluck-walkforward": startCfbTurnoverLuckWalkforwardJob,
+  "cfb-confidence-report": startCfbConfidenceReportJob,
+  "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
   "weather-backfill": startWeatherBackfillJob,
   "cfb-more-segments": startCfbMoreSegmentsJob,
