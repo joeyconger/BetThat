@@ -74,6 +74,8 @@ function baseGame(overrides: Partial<GameForRating> = {}): GameForRating {
     homeDefAdj: null,
     awayOffAdj: null,
     awayDefAdj: null,
+    homeAdjGamesPlayed: null,
+    awayAdjGamesPlayed: null,
     ...overrides,
   };
 }

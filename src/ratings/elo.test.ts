@@ -630,26 +630,75 @@ test("computeSeasonRatings applies pointsPerFieldPosition and pointsPerFgMakeRat
   );
 });
 
-test("computeSeasonRatings applies pointsPerOpponentAdj as an additive term, with the standard (non-inverted) sign convention", () => {
-  const params = { ...CFB, successRateWeight: 0, pointsPerOpponentAdj: 10 };
+test("computeSeasonRatings applies pointsPerOpponentAdj as an additive term, with the standard (non-inverted) sign convention, shrunk by games played", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerOpponentAdj: 10, opponentAdjShrinkageK: 4 };
   const game = {
     gameId: 1, week: 3, homeTeamId: 1, awayTeamId: 2,
     homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
     // Home's opponent-adjusted profile: strong offense, strong defense (both as-of-week-3 snapshots from prior weeks).
-    homeOffAdj: 0.08, homeDefAdj: -0.06,
+    homeOffAdj: 0.08, homeDefAdj: -0.06, homeAdjGamesPlayed: 16, // shrink = 16/(16+4) = 0.8
     // Away: below-average offense, below-average defense.
-    awayOffAdj: -0.02, awayDefAdj: 0.03,
+    awayOffAdj: -0.02, awayDefAdj: 0.03, awayAdjGamesPlayed: 36, // shrink = 36/(36+4) = 0.9
   };
   const state = computeSeasonRatings([game], new Map(), params);
 
-  // homeNetAdj = 0.08 - (-0.06) = 0.14; awayNetAdj = -0.02 - 0.03 = -0.05 -> diff 0.19 -> term = 10 * 0.19 = 1.9
-  const actualMargin = params.pointsPerOpponentAdj * (0.14 - -0.05);
+  // homeNetAdj (shrunk) = 0.8*(0.08-(-0.06)) = 0.8*0.14 = 0.112
+  // awayNetAdj (shrunk) = 0.9*(-0.02-0.03) = 0.9*-0.05 = -0.045
+  // diff = 0.112 - (-0.045) = 0.157 -> term = 10*0.157 = 1.57
+  const actualMargin = params.pointsPerOpponentAdj * (0.112 - -0.045);
   const error = actualMargin - params.homeFieldAdvantage;
   const expectedHomeRating = params.baseK * error;
 
   assert.ok(
     Math.abs(state.get(1)!.rating - expectedHomeRating) < 1e-9,
-    `home rating (${state.get(1)!.rating}) matches hand-computed opponent-adjustment formula (${expectedHomeRating})`,
+    `home rating (${state.get(1)!.rating}) matches hand-computed shrunk opponent-adjustment formula (${expectedHomeRating})`,
+  );
+});
+
+test("computeSeasonRatings' pointsPerOpponentAdj term no-ops when adj_games_played is missing, even with the 4 raw off/def values present", () => {
+  const params = { ...CFB, successRateWeight: 0, pointsPerOpponentAdj: 10, opponentAdjShrinkageK: 4 };
+  const gameNoGamesPlayed = {
+    gameId: 1, week: 3, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffAdj: 0.08, homeDefAdj: -0.06, awayOffAdj: -0.02, awayDefAdj: 0.03,
+    // homeAdjGamesPlayed/awayAdjGamesPlayed deliberately omitted.
+  };
+  const gameBaseline = {
+    gameId: 1, week: 3, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+  };
+  const withMissingGamesPlayed = computeSeasonRatings([gameNoGamesPlayed], new Map(), params);
+  const withoutAdjData = computeSeasonRatings([gameBaseline], new Map(), params);
+  assert.equal(
+    withMissingGamesPlayed.get(1)!.rating,
+    withoutAdjData.get(1)!.rating,
+    "missing adj_games_played degrades to a full no-op, same as missing the raw off_adj/def_adj values entirely",
+  );
+});
+
+test("computeSeasonRatings' pointsPerOpponentAdj shrinkage: a thin sample (few games played) contributes much less than a deep one, for the identical raw off_adj/def_adj values", () => {
+  // homeFieldAdvantage zeroed out here specifically so the comparison
+  // below isolates the shrinkage effect on actualMargin -- with it left
+  // at its real nonzero value, a SMALLER actualMargin can produce a
+  // LARGER-magnitude error/rating shift purely because it's further from
+  // that constant baseline, which would confound (and could even invert)
+  // this comparison.
+  const params = { ...CFB, successRateWeight: 0, pointsPerOpponentAdj: 10, opponentAdjShrinkageK: 4, homeFieldAdvantage: 0 };
+  const gameThin = {
+    gameId: 1, week: 2, homeTeamId: 1, awayTeamId: 2,
+    homeOffEpa: 0, homeDefEpa: 0, awayOffEpa: 0, awayDefEpa: 0,
+    homeOffAdj: 0.1, homeDefAdj: -0.1, homeAdjGamesPlayed: 2, // shrink = 2/6 ~= 0.333
+    awayOffAdj: 0, awayDefAdj: 0, awayAdjGamesPlayed: 2,
+  };
+  const gameDeep = {
+    ...gameThin,
+    homeAdjGamesPlayed: 96, // shrink = 96/100 = 0.96
+  };
+  const stateThin = computeSeasonRatings([gameThin], new Map(), params);
+  const stateDeep = computeSeasonRatings([gameDeep], new Map(), params);
+  assert.ok(
+    Math.abs(stateThin.get(1)!.rating) < Math.abs(stateDeep.get(1)!.rating),
+    `thin-sample rating shift (${stateThin.get(1)!.rating}) should be smaller in magnitude than deep-sample (${stateDeep.get(1)!.rating}) for identical raw off_adj/def_adj`,
   );
 });
 
@@ -675,7 +724,7 @@ test("computeSeasonRatings' new component signals (explosiveness/splits/sack rat
     homeOffFinishingDrivesPpo: 5.5, homeDefFinishingDrivesPpo: 4.0, awayOffFinishingDrivesPpo: 3.0, awayDefFinishingDrivesPpo: 2.0,
     homeOffFieldPosition: 35, homeDefFieldPosition: 40, awayOffFieldPosition: 28, awayDefFieldPosition: 22,
     homeOffFgMakeRate: 0.8, homeDefFgMakeRate: 0.6, awayOffFgMakeRate: 0.5, awayDefFgMakeRate: 0.5,
-    homeOffAdj: 0.08, homeDefAdj: -0.06, awayOffAdj: -0.02, awayDefAdj: 0.03,
+    homeOffAdj: 0.08, homeDefAdj: -0.06, awayOffAdj: -0.02, awayDefAdj: 0.03, homeAdjGamesPlayed: 16, awayAdjGamesPlayed: 16,
   };
   const withComponents = computeSeasonRatings([gameWithComponents], new Map(), zeroed);
   const withoutComponents = computeSeasonRatings([gameBase], new Map(), zeroed);

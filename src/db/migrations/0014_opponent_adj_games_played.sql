@@ -1,0 +1,17 @@
+-- Games-played shrinkage for off_adj/def_adj (migration 0013), per a
+-- direct architectural critique: a team's off_adj computed from 1 prior
+-- game (week 2) was getting the exact same weight in the rating update as
+-- one computed from 11 prior games (week 12), despite the former being
+-- far noisier. computeOpponentAdjustedRatings already tracks this via
+-- teamDiagnostics.gamesPlayed -- this column just persists it alongside
+-- off_adj/def_adj so ratings/elo.ts can shrink toward 0 (league average)
+-- when the underlying sample is thin, instead of trusting every off_adj
+-- value at full strength regardless of how much data produced it.
+--
+-- adj_games_played is a SINGLE combined count (offensive + defensive
+-- appearances -- see opponentAdjust.ts's TeamDiagnostic doc: for a team
+-- with G real games played, this is 2G, not G), since a team's OFF and
+-- DEF ratings come from the same iterative solve pass and share the same
+-- underlying connectivity. Nullable for the same reason off_adj/def_adj
+-- themselves are: no prior-week data means nothing to compute at all.
+ALTER TABLE team_game_stats ADD COLUMN adj_games_played int;

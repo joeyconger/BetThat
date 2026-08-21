@@ -59,7 +59,7 @@ export async function syncOpponentAdjustedStats(
     }
 
     const performances = buildTeamPerformances([...gamesById.values()]);
-    const { off, def } = computeOpponentAdjustedRatings(performances);
+    const { off, def, teamDiagnostics } = computeOpponentAdjustedRatings(performances);
 
     const weekGames = await getGamesForWeek("cfb", season, week);
     for (const game of weekGames) {
@@ -67,13 +67,15 @@ export async function syncOpponentAdjustedStats(
       const homeDefAdj = def.get(game.homeTeamId) ?? null;
       const awayOffAdj = off.get(game.awayTeamId) ?? null;
       const awayDefAdj = def.get(game.awayTeamId) ?? null;
+      const homeGamesPlayed = teamDiagnostics.get(game.homeTeamId)?.gamesPlayed ?? null;
+      const awayGamesPlayed = teamDiagnostics.get(game.awayTeamId)?.gamesPlayed ?? null;
 
       if (homeOffAdj !== null && homeDefAdj !== null) {
-        await upsertOpponentAdjustedStats({ gameId: game.id, teamId: game.homeTeamId, offAdj: homeOffAdj, defAdj: homeDefAdj });
+        await upsertOpponentAdjustedStats({ gameId: game.id, teamId: game.homeTeamId, offAdj: homeOffAdj, defAdj: homeDefAdj, gamesPlayed: homeGamesPlayed });
         teamSidesUpdated += 1;
       }
       if (awayOffAdj !== null && awayDefAdj !== null) {
-        await upsertOpponentAdjustedStats({ gameId: game.id, teamId: game.awayTeamId, offAdj: awayOffAdj, defAdj: awayDefAdj });
+        await upsertOpponentAdjustedStats({ gameId: game.id, teamId: game.awayTeamId, offAdj: awayOffAdj, defAdj: awayDefAdj, gamesPlayed: awayGamesPlayed });
         teamSidesUpdated += 1;
       }
       if ((homeOffAdj !== null && homeDefAdj !== null) || (awayOffAdj !== null && awayDefAdj !== null)) {

@@ -6,9 +6,9 @@ import { ridgeFit, selectLambda } from "../stats/ridge.js";
 import type { ComponentParamKey } from "./sweep.js";
 import { runBacktest } from "./run.js";
 import { getOverallReport, getOpeningCoverRate } from "./report.js";
-import { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeBaseMargin } from "./jointRefitMath.js";
+import { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin } from "./jointRefitMath.js";
 
-export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeBaseMargin } from "./jointRefitMath.js";
+export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin } from "./jointRefitMath.js";
 
 /**
  * Joint refit of the 8 component pointsPerX weights, replacing the
@@ -79,7 +79,12 @@ export async function fitJointComponentWeights(
   const y: number[] = [];
 
   for (const game of allGames) {
-    const features = JOINT_REFIT_COMPONENTS.map((c) => computeComponentFeature(game, c.key, c.invert));
+    // opponentAdj uses the SHRUNK feature (games-played shrinkage applied),
+    // matching exactly what elo.ts will consume once the fitted weight is
+    // plugged in -- every other component uses the raw differential.
+    const features = JOINT_REFIT_COMPONENTS.map((c) =>
+      c.key === "pointsPerOpponentAdj" ? computeShrunkOpponentAdjFeature(game, base.opponentAdjShrinkageK) : computeComponentFeature(game, c.key, c.invert),
+    );
     if (features.some((f) => f === null)) continue;
 
     const baseMargin = computeBaseMargin(game, base);

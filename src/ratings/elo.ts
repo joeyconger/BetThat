@@ -138,6 +138,9 @@ export interface GameForRating {
   homeDefAdj?: number | null;
   awayOffAdj?: number | null;
   awayDefAdj?: number | null;
+  /** How much prior-week data each side's off_adj/def_adj was computed from -- see RatingParams.opponentAdjShrinkageK's doc. */
+  homeAdjGamesPlayed?: number | null;
+  awayAdjGamesPlayed?: number | null;
 }
 
 export interface TeamRatingState {
@@ -317,7 +320,21 @@ export function computeSeasonRatings(
     const homeDefAdj = game.homeDefAdj;
     const awayOffAdj = game.awayOffAdj;
     const awayDefAdj = game.awayDefAdj;
-    const haveAllFourAdj = homeOffAdj != null && homeDefAdj != null && awayOffAdj != null && awayDefAdj != null;
+    const homeAdjGamesPlayed = game.homeAdjGamesPlayed;
+    const awayAdjGamesPlayed = game.awayAdjGamesPlayed;
+    // gamesPlayed is required alongside the off/def values themselves (not
+    // just the 4 raw values) -- see RatingParams.opponentAdjShrinkageK's
+    // doc: without knowing how much prior-week data produced a given
+    // off_adj/def_adj, there's no sound way to shrink it, so a game
+    // missing either count degrades the same way as missing the raw
+    // values entirely, rather than silently using them unshrunk.
+    const haveAllFourAdj =
+      homeOffAdj != null &&
+      homeDefAdj != null &&
+      awayOffAdj != null &&
+      awayDefAdj != null &&
+      homeAdjGamesPlayed != null &&
+      awayAdjGamesPlayed != null;
 
     // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
     // doc. Applied AFTER the garbage-time resolution above, on top of
@@ -430,8 +447,17 @@ export function computeSeasonRatings(
       actualMargin += params.pointsPerFgMakeRate * (homeNetFg - awayNetFg);
     }
     if (params.pointsPerOpponentAdj !== 0 && haveAllFourAdj) {
-      const homeNetAdj = homeOffAdj! - homeDefAdj!;
-      const awayNetAdj = awayOffAdj! - awayDefAdj!;
+      // Games-played shrinkage: an off_adj/def_adj computed from a
+      // thin sample (a team's week-2 value, from just 1 prior game) is
+      // far noisier than one from a deep sample (week 12, 11 prior
+      // games), but without this, both entered the update at full
+      // strength -- see RatingParams.opponentAdjShrinkageK's doc. Shrinks
+      // each side's own off_adj/def_adj toward 0 (league average) by
+      // gamesPlayed/(gamesPlayed+k) BEFORE computing the net differential.
+      const homeShrink = homeAdjGamesPlayed! / (homeAdjGamesPlayed! + params.opponentAdjShrinkageK);
+      const awayShrink = awayAdjGamesPlayed! / (awayAdjGamesPlayed! + params.opponentAdjShrinkageK);
+      const homeNetAdj = homeOffAdj! * homeShrink - homeDefAdj! * homeShrink;
+      const awayNetAdj = awayOffAdj! * awayShrink - awayDefAdj! * awayShrink;
       actualMargin += params.pointsPerOpponentAdj * (homeNetAdj - awayNetAdj);
     }
 

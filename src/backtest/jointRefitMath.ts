@@ -80,6 +80,34 @@ export function computeComponentFeature(game: GameForRating, key: ComponentParam
 }
 
 /**
+ * The opponentAdj feature, WITH games-played shrinkage applied -- mirrors
+ * elo.ts's pointsPerOpponentAdj block exactly (each side's own off_adj/
+ * def_adj shrunk toward 0 by its own adj_games_played before the net
+ * differential is computed), so the joint refit trains on the identical
+ * quantity elo.ts will actually consume once the fitted weight is
+ * plugged in. Returns null if any of the 4 raw values OR either side's
+ * adj_games_played is missing -- same stricter guard elo.ts's
+ * haveAllFourAdj now uses.
+ */
+export function computeShrunkOpponentAdjFeature(game: GameForRating, shrinkageK: number): number | null {
+  if (
+    game.homeOffAdj == null ||
+    game.homeDefAdj == null ||
+    game.awayOffAdj == null ||
+    game.awayDefAdj == null ||
+    game.homeAdjGamesPlayed == null ||
+    game.awayAdjGamesPlayed == null
+  ) {
+    return null;
+  }
+  const homeShrink = game.homeAdjGamesPlayed / (game.homeAdjGamesPlayed + shrinkageK);
+  const awayShrink = game.awayAdjGamesPlayed / (game.awayAdjGamesPlayed + shrinkageK);
+  const homeNet = game.homeOffAdj * homeShrink - game.homeDefAdj * homeShrink;
+  const awayNet = game.awayOffAdj * awayShrink - game.awayDefAdj * awayShrink;
+  return homeNet - awayNet;
+}
+
+/**
  * Replicates elo.ts's actualMargin computation UP TO (not including) the
  * 8 component additive terms -- i.e. epaMargin, turnover-luck-stripped if
  * applicable, blended with successMargin per successRateWeight. Assumes

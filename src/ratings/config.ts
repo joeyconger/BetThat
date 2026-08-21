@@ -277,6 +277,27 @@ export interface RatingParams {
    * and run, then a real sweep.
    */
   pointsPerOpponentAdj: number;
+  /**
+   * Games-played shrinkage for off_adj/def_adj, per a direct
+   * architectural critique: a team's off_adj computed from just 1 prior
+   * game (week 2) was getting the exact same weight in the additive term
+   * as one computed from 11 prior games (week 12) -- the existing
+   * modelWeight/marketShrinkageK mechanism in predictSpread shrinks the
+   * FINAL prediction toward market based on total games played, but
+   * that's a separate thing from shrinking an individual COMPONENT's
+   * value toward its own prior (0 = league average) based on how much
+   * data went into computing IT specifically. Applied as
+   * gamesPlayed/(gamesPlayed+k) -- the standard empirical-Bayes shrinkage
+   * shape -- to each side's off_adj/def_adj independently, using that
+   * side's own adj_games_played, before computing the net differential.
+   * Only applies to opponentAdj (the one component computed as an
+   * accumulated, connectivity-dependent RATING via an iterative solve,
+   * not a raw per-game measured stat) -- generalizing this to the other
+   * 7 components would need a different mechanism (they don't have an
+   * analogous "how many games of history" concept the way an iterative
+   * opponent-adjustment solve does). Untested -- needs a real sweep.
+   */
+  opponentAdjShrinkageK: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -309,6 +330,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerFieldPosition: 0, // no special-teams ingestion for NFL yet
   pointsPerFgMakeRate: 0,
   pointsPerOpponentAdj: 0, // no raw-play ingestion for NFL yet
+  opponentAdjShrinkageK: 4, // irrelevant while pointsPerOpponentAdj is 0 -- placeholder matching CFB's untested default
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -528,6 +550,12 @@ const CFB_PARAMS: RatingParams = {
   // holdout, not closed -- reopening is cheap if that holdout tells a
   // different story.
   pointsPerOpponentAdj: 0,
+  // Untested placeholder -- k=4 means a team's off_adj/def_adj is
+  // shrunk to half strength at 4 prior games (recall adj_games_played
+  // counts BOTH offensive and defensive appearances, so 4 = roughly 2
+  // real games played, i.e. still very early season). Irrelevant while
+  // pointsPerOpponentAdj is 0; needs a real sweep once/if that changes.
+  opponentAdjShrinkageK: 4,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

@@ -470,6 +470,8 @@ export interface UpsertOpponentAdjustedStatsInput {
   /** Null when this team has no completed prior-week games this season to compute an as-of-week snapshot from (week 1, a transfer, first FBS season). */
   offAdj: number | null;
   defAdj: number | null;
+  /** From computeOpponentAdjustedRatings' teamDiagnostics.gamesPlayed -- how much prior-week data this specific off_adj/def_adj value was computed from, so ratings/elo.ts can shrink thin-sample values toward 0 instead of trusting a 1-prior-game estimate as much as an 11-prior-game one. Null in lockstep with offAdj/defAdj (migration 0014). */
+  gamesPlayed: number | null;
 }
 
 /**
@@ -484,8 +486,8 @@ export interface UpsertOpponentAdjustedStatsInput {
  */
 export async function upsertOpponentAdjustedStats(input: UpsertOpponentAdjustedStatsInput): Promise<void> {
   await pool.query(
-    `UPDATE team_game_stats SET off_adj = $3, def_adj = $4 WHERE game_id = $1 AND team_id = $2`,
-    [input.gameId, input.teamId, input.offAdj, input.defAdj],
+    `UPDATE team_game_stats SET off_adj = $3, def_adj = $4, adj_games_played = $5 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offAdj, input.defAdj, input.gamesPlayed],
   );
 }
 
@@ -807,6 +809,9 @@ export interface GameForRating {
   homeDefAdj: number | null;
   awayOffAdj: number | null;
   awayDefAdj: number | null;
+  /** How much prior-week data each side's off_adj/def_adj was computed from -- see upsertOpponentAdjustedStats' gamesPlayed doc. Used by ratings/elo.ts to shrink thin-sample values toward 0 (league average) rather than trusting them at full strength regardless of sample size. */
+  homeAdjGamesPlayed: number | null;
+  awayAdjGamesPlayed: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -882,6 +887,8 @@ export async function getSeasonGamesForRating(
     home_def_adj: number | null;
     away_off_adj: number | null;
     away_def_adj: number | null;
+    home_adj_games_played: number | null;
+    away_adj_games_played: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id, g.home_score, g.away_score,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -913,7 +920,8 @@ export async function getSeasonGamesForRating(
             home_stats.off_fg_make_rate AS home_off_fg_make_rate, home_stats.def_fg_make_rate AS home_def_fg_make_rate,
             away_stats.off_fg_make_rate AS away_off_fg_make_rate, away_stats.def_fg_make_rate AS away_def_fg_make_rate,
             home_stats.off_adj AS home_off_adj, home_stats.def_adj AS home_def_adj,
-            away_stats.off_adj AS away_off_adj, away_stats.def_adj AS away_def_adj
+            away_stats.off_adj AS away_off_adj, away_stats.def_adj AS away_def_adj,
+            home_stats.adj_games_played AS home_adj_games_played, away_stats.adj_games_played AS away_adj_games_played
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -990,6 +998,8 @@ export async function getSeasonGamesForRating(
     homeDefAdj: r.home_def_adj,
     awayOffAdj: r.away_off_adj,
     awayDefAdj: r.away_def_adj,
+    homeAdjGamesPlayed: r.home_adj_games_played,
+    awayAdjGamesPlayed: r.away_adj_games_played,
   }));
 }
 
