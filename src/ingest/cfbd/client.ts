@@ -45,6 +45,13 @@ export interface CfbdGame {
   venueId: number | null;
 }
 
+// NOTE: `division: "fbs"` does NOT actually filter server-side -- confirmed
+// against a real response (cfb-verify-plays, 2026-08-21): it still returned
+// hundreds of non-FBS games for a single week. syncGames.ts is unaffected
+// (it resolves teams by ID against the FBS-only `teams` table and drops
+// anything that doesn't resolve), but any OTHER caller of getGames must do
+// its own client-side classification filter -- see syncTeams.ts's identical
+// gotcha with /teams, and cfb-verify-plays's fbsNames filter for the pattern.
 export function getGames(year: number, seasonType: "regular" | "postseason" = "regular"): Promise<CfbdGame[]> {
   return cfbdGet<CfbdGame[]>("/games", { year, seasonType, division: "fbs" });
 }

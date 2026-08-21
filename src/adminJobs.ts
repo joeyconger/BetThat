@@ -1,6 +1,6 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
-import { getPlays, getGames, getWinProbabilityData } from "./ingest/cfbd/client.js";
+import { getPlays, getGames, getTeams, getWinProbabilityData } from "./ingest/cfbd/client.js";
 import type { CfbdPlayWinProbability } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
@@ -1229,10 +1229,24 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     const year = 2024;
     const week = 8;
 
+    // getGames's `division: "fbs"` param does NOT actually filter
+    // server-side (confirmed against a real response the first time this
+    // job ran: it returned 306 "completed" week-8 games spanning FBS down
+    // to D3/NAIA). This is the exact same gotcha syncTeams.ts's comment
+    // already documents for /teams -- the real ingestion path
+    // (syncGames.ts) is unaffected because it resolves teams by ID
+    // against the FBS-only `teams` table and drops anything that doesn't
+    // resolve, but this diagnostic picks a game directly from the raw
+    // response, so it needs the same client-side FBS filter.
+    log(job, `fetching ${year} teams to build an FBS name filter`);
+    const teams = await getTeams(year);
+    const fbsNames = new Set(teams.filter((t) => t.classification === "fbs").map((t) => t.school));
+    log(job, `${fbsNames.size} FBS teams found`);
+
     log(job, `fetching ${year} games to find week ${week}'s slate`);
     const games = await getGames(year);
-    const weekGames = games.filter((g) => g.week === week && g.completed);
-    log(job, `${weekGames.length} completed games in week ${week}`);
+    const weekGames = games.filter((g) => g.week === week && g.completed && fbsNames.has(g.homeTeam) && fbsNames.has(g.awayTeam));
+    log(job, `${weekGames.length} completed FBS-vs-FBS games in week ${week}`);
     for (const g of weekGames) {
       log(job, `  ${g.awayTeam} ${g.awayPoints} @ ${g.homeTeam} ${g.homePoints}  (gameId=${g.id})`);
     }
