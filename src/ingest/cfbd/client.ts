@@ -225,3 +225,32 @@ export function getPlays(
 ): Promise<CfbdPlay[]> {
   return cfbdGet<CfbdPlay[]>("/plays", { year, week, seasonType });
 }
+
+export interface CfbdDrive {
+  offense: string;
+  defense: string;
+  gameId: number;
+  driveNumber: number;
+  startYardsToGoal: number;
+  endYardsToGoal: number;
+  driveResult: string;
+  startOffenseScore: number;
+  startDefenseScore: number;
+  endOffenseScore: number;
+  endDefenseScore: number;
+}
+
+/**
+ * Drive-level data — UNLIKE /plays, `week` is optional here (confirmed via
+ * CFBD's real client library docs: only `year` is required) so a whole
+ * season comes back in ONE call, same "omit week for the full season"
+ * shape as getGameAdvancedStats — not verified against a real response in
+ * this sandbox (still no network route to CFBD itself), so
+ * syncFinishingDrivesStats logs a raw drive count on first use as a sanity
+ * check rather than trusting this blind. Used for the "finishing drives"
+ * (points per scoring opportunity) component — see
+ * RatingParams.pointsPerFinishingDrives' doc.
+ */
+export function getDrives(year: number, seasonType: "regular" | "postseason" = "regular"): Promise<CfbdDrive[]> {
+  return cfbdGet<CfbdDrive[]>("/drives", { year, seasonType });
+}

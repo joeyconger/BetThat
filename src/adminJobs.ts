@@ -5,6 +5,7 @@ import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
 import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
 import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
+import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesStats.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
@@ -702,6 +703,27 @@ export function startCfbComponentIngestJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Phase 2 of the component-model rebuild: "finishing drives" (points per
+ * scoring opportunity), from CFBD's /drives endpoint -- a genuinely
+ * separate call from cfb-component-ingest's /stats/game/advanced and
+ * /plays sources. Only 3 calls total (one per season, week is optional
+ * on this endpoint) -- far cheaper than the turnover/sack-rate ingestion.
+ * Logs the raw drive count per season as a sanity check, since this
+ * sandbox never confirmed the "omit week -> whole season" behavior
+ * against a real response (see client.ts's getDrives doc). Run this
+ * before cfb-component-sweep-finishingdrives.
+ */
+export function startCfbFinishingDrivesIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-finishingdrives-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: finishing drives`);
+      const result = await syncCfbdFinishingDrivesStats(year);
+      log(job, `${year}: fetched ${result.drivesFetched} raw drives, synced ${result.synced}, skipped ${result.skipped}`);
+    }
+  });
+}
+
 const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }> = [
   // Refined after the first coarse pass (run 279-298): explosiveness was
   // flat across 0-20 (best near 10) -- narrowed grid for a slightly finer
@@ -716,23 +738,30 @@ const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey
   { jobName: "cfb-component-sweep-standarddowns", paramKey: "pointsPerStandardDownsSplit", grid: [0, 10, 20, 30, 40, 50], label: "pointsPerStandardDownsSplit" },
   { jobName: "cfb-component-sweep-passingdowns", paramKey: "pointsPerPassingDownsSplit", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerPassingDownsSplit" },
   { jobName: "cfb-component-sweep-sackrate", paramKey: "pointsPerSackRate", grid: [0, 5, 10, 15, 20, 25], label: "pointsPerSackRate" },
+  // Phase 2: finishing drives. Points-per-opportunity magnitude is
+  // EPA/points-scale, not a 0-1 rate -- grid centered more like
+  // pointsPerEpa=20's magnitude than the success-rate-scale splits above.
+  { jobName: "cfb-component-sweep-finishingdrives", paramKey: "pointsPerFinishingDrives", grid: [0, 2, 5, 10, 20], label: "pointsPerFinishingDrives" },
 ];
 
 /**
- * Four component sweeps (explosiveness, standard-downs split, passing-
- * downs split, sack rate), each varying ONE param in isolation while every
- * other component stays at its 0 default -- same "one param at a time"
- * discipline as every other sweep tonight, not an expensive 4-dimensional
- * grid. See backtest/sweep.ts's runComponentSweep. Requires
- * cfb-component-ingest to have run first. No walk-forward job yet for any
- * of these -- built on demand for whichever component(s) actually show a
- * real in-sample trend, same pattern as excludeGarbageTime/pointsPerRestDay
- * (walk-forward only run when the sweep result looked worth confirming).
+ * Five component sweeps (explosiveness, standard-downs split, passing-
+ * downs split, sack rate, finishing drives), each varying ONE param in
+ * isolation while every other component stays at its 0 default -- same
+ * "one param at a time" discipline as every other sweep tonight, not an
+ * expensive multi-dimensional grid. See backtest/sweep.ts's
+ * runComponentSweep. Requires cfb-component-ingest (Phase 1 fields) or
+ * cfb-finishingdrives-ingest (Phase 2) to have run first, respectively. No
+ * walk-forward job yet for any of these -- built on demand for whichever
+ * component(s) actually show a real in-sample trend, same pattern as
+ * excludeGarbageTime/pointsPerRestDay (walk-forward only run when the
+ * sweep result looked worth confirming).
  */
 export const startCfbComponentSweepExplosivenessJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[0]!);
 export const startCfbComponentSweepStandardDownsJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[1]!);
 export const startCfbComponentSweepPassingDownsJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[2]!);
 export const startCfbComponentSweepSackRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[3]!);
+export const startCfbComponentSweepFinishingDrivesJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[4]!);
 
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
@@ -1045,6 +1074,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-standarddowns": startCfbComponentSweepStandardDownsJob,
   "cfb-component-sweep-passingdowns": startCfbComponentSweepPassingDownsJob,
   "cfb-component-sweep-sackrate": startCfbComponentSweepSackRateJob,
+  "cfb-finishingdrives-ingest": startCfbFinishingDrivesIngestJob,
+  "cfb-component-sweep-finishingdrives": startCfbComponentSweepFinishingDrivesJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,

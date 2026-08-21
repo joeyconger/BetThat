@@ -96,6 +96,20 @@ export interface GameForRating {
   homeDefSackRate?: number | null;
   awayOffSackRate?: number | null;
   awayDefSackRate?: number | null;
+  /**
+   * "Finishing drives" (points per scoring opportunity), from a separate
+   * CFBD /drives ingestion pass (see
+   * ingest/cfbd/syncFinishingDrivesStats.ts). Standard off/def sign
+   * convention (higher off = better, higher def = worse), unlike sack
+   * rate. Only used when params.pointsPerFinishingDrives is nonzero and
+   * all four fields are present — also legitimately absent for a game
+   * where a team had zero scoring opportunities, not just where
+   * ingestion hasn't run.
+   */
+  homeOffFinishingDrivesPpo?: number | null;
+  homeDefFinishingDrivesPpo?: number | null;
+  awayOffFinishingDrivesPpo?: number | null;
+  awayDefFinishingDrivesPpo?: number | null;
 }
 
 export interface TeamRatingState {
@@ -247,6 +261,16 @@ export function computeSeasonRatings(
     const awayDefSackRate = game.awayDefSackRate;
     const haveAllFourSackRate = homeOffSackRate != null && homeDefSackRate != null && awayOffSackRate != null && awayDefSackRate != null;
 
+    const homeOffFinishingDrivesPpo = game.homeOffFinishingDrivesPpo;
+    const homeDefFinishingDrivesPpo = game.homeDefFinishingDrivesPpo;
+    const awayOffFinishingDrivesPpo = game.awayOffFinishingDrivesPpo;
+    const awayDefFinishingDrivesPpo = game.awayDefFinishingDrivesPpo;
+    const haveAllFourFinishingDrives =
+      homeOffFinishingDrivesPpo != null &&
+      homeDefFinishingDrivesPpo != null &&
+      awayOffFinishingDrivesPpo != null &&
+      awayDefFinishingDrivesPpo != null;
+
     // Turnover-luck-stripped EPA -- see RatingParams.turnoverLuckWeight's
     // doc. Applied AFTER the garbage-time resolution above, on top of
     // whichever EPA source (raw or no-garbage) was just selected, always
@@ -341,6 +365,11 @@ export function computeSeasonRatings(
       const homeNetSack = homeDefSackRate! - homeOffSackRate!;
       const awayNetSack = awayDefSackRate! - awayOffSackRate!;
       actualMargin += params.pointsPerSackRate * (homeNetSack - awayNetSack);
+    }
+    if (params.pointsPerFinishingDrives !== 0 && haveAllFourFinishingDrives) {
+      const homeNetFinishing = homeOffFinishingDrivesPpo! - homeDefFinishingDrivesPpo!;
+      const awayNetFinishing = awayOffFinishingDrivesPpo! - awayDefFinishingDrivesPpo!;
+      actualMargin += params.pointsPerFinishingDrives * (homeNetFinishing - awayNetFinishing);
     }
 
     const error = actualMargin - predictedMargin;

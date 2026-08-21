@@ -229,6 +229,21 @@ export interface RatingParams {
    * sweep.
    */
   pointsPerSackRate: number;
+  /**
+   * Same additive-term shape as pointsPerExplosiveness, for "finishing
+   * drives" (points per scoring opportunity, net home-minus-away — see
+   * ingest/cfbd/syncFinishingDrivesStats.ts's doc for the exact
+   * definition: avg points scored per drive that started inside the
+   * opponent's 40). Phase 2 of the component-model rebuild — a genuinely
+   * separate CFBD endpoint (/drives) from every other component so far,
+   * capturing red-zone/short-field execution specifically, distinct from
+   * general play-level efficiency (success rate, explosiveness) or
+   * situational splits (down/distance). Standard off/def sign convention
+   * (higher off = better, higher def = worse), unlike pointsPerSackRate.
+   * CFB-only. Defaults to 0 (no-op) — untested, needs ingestion
+   * (cfb-finishingdrives-ingest) + a real sweep.
+   */
+  pointsPerFinishingDrives: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -257,6 +272,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerStandardDownsSplit: 0, // same — no down/distance splits ingested for NFL yet
   pointsPerPassingDownsSplit: 0,
   pointsPerSackRate: 0, // no sack-rate ingestion for NFL yet (would need an nflverse play-by-play source, not CFBD)
+  pointsPerFinishingDrives: 0, // no finishing-drives ingestion for NFL yet (would need an nflverse drive-level source, not CFBD)
 };
 
 const CFB_PARAMS: RatingParams = {
@@ -397,6 +413,9 @@ const CFB_PARAMS: RatingParams = {
   // pointsPerSackRate=15: best cover vs open in the refined sweep (52.3%),
   // avgClv tied with the best of the group (0.69).
   pointsPerSackRate: 15,
+  // Inherited 0 from NFL_PARAMS — Phase 2 of the component-model rebuild,
+  // untested. Needs cfb-finishingdrives-ingest then a real sweep.
+  pointsPerFinishingDrives: 0,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

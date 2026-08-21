@@ -414,6 +414,29 @@ export async function upsertSackRateStats(input: UpsertSackRateStatsInput): Prom
   );
 }
 
+export interface UpsertFinishingDrivesStatsInput {
+  gameId: number;
+  teamId: number;
+  /** Null when this team's offense had zero scoring opportunities in the game -- a real, distinct fact from "scored 0 points per opportunity." */
+  offFinishingDrivesPpo: number | null;
+  /** Null when this team's defense faced zero scoring opportunities in the game. */
+  defFinishingDrivesPpo: number | null;
+}
+
+/**
+ * Same targeted-UPDATE shape as upsertSackRateStats: sourced from CFBD's
+ * /drives (yet another endpoint, distinct from /plays and /stats/game/
+ * advanced), aggregated per team per game by
+ * ingest/cfbd/syncFinishingDrivesStats.ts. Not an upsert on its own -- a
+ * game with no prior team_game_stats row is a no-op.
+ */
+export async function upsertFinishingDrivesStats(input: UpsertFinishingDrivesStatsInput): Promise<void> {
+  await pool.query(
+    `UPDATE team_game_stats SET off_finishing_drives_ppo = $3, def_finishing_drives_ppo = $4 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offFinishingDrivesPpo, input.defFinishingDrivesPpo],
+  );
+}
+
 export interface UpsertGarbageTimeStatsInput {
   gameId: number;
   teamId: number;
@@ -537,6 +560,11 @@ export interface GameForRating {
   homeDefSackRate: number | null;
   awayOffSackRate: number | null;
   awayDefSackRate: number | null;
+  /** "Finishing drives" (points per scoring opportunity), from a separate CFBD /drives ingestion pass (see ingest/cfbd/syncFinishingDrivesStats.ts). Standard off/def sign convention (higher off = better, higher def = worse), unlike sack rate. Nullable both when the ingestion pass hasn't run AND legitimately when a team had zero scoring opportunities in a game (a real, distinct fact — see upsertFinishingDrivesStats' doc). */
+  homeOffFinishingDrivesPpo: number | null;
+  homeDefFinishingDrivesPpo: number | null;
+  awayOffFinishingDrivesPpo: number | null;
+  awayDefFinishingDrivesPpo: number | null;
 }
 
 /** Completed games with both teams' EPA/play stats present — what the rating engine consumes. */
@@ -594,6 +622,10 @@ export async function getSeasonGamesForRating(
     home_def_sack_rate: number | null;
     away_off_sack_rate: number | null;
     away_def_sack_rate: number | null;
+    home_off_finishing_drives_ppo: number | null;
+    home_def_finishing_drives_ppo: number | null;
+    away_off_finishing_drives_ppo: number | null;
+    away_def_finishing_drives_ppo: number | null;
   }>(
     `SELECT g.id AS game_id, g.week, g.home_team_id, g.away_team_id,
             home_stats.off_epa_play AS home_off_epa, home_stats.def_epa_play AS home_def_epa,
@@ -617,7 +649,9 @@ export async function getSeasonGamesForRating(
             home_stats.off_passing_downs_success_rate AS home_off_passing_downs_success_rate, home_stats.def_passing_downs_success_rate AS home_def_passing_downs_success_rate,
             away_stats.off_passing_downs_success_rate AS away_off_passing_downs_success_rate, away_stats.def_passing_downs_success_rate AS away_def_passing_downs_success_rate,
             home_stats.off_sack_rate AS home_off_sack_rate, home_stats.def_sack_rate AS home_def_sack_rate,
-            away_stats.off_sack_rate AS away_off_sack_rate, away_stats.def_sack_rate AS away_def_sack_rate
+            away_stats.off_sack_rate AS away_off_sack_rate, away_stats.def_sack_rate AS away_def_sack_rate,
+            home_stats.off_finishing_drives_ppo AS home_off_finishing_drives_ppo, home_stats.def_finishing_drives_ppo AS home_def_finishing_drives_ppo,
+            away_stats.off_finishing_drives_ppo AS away_off_finishing_drives_ppo, away_stats.def_finishing_drives_ppo AS away_def_finishing_drives_ppo
      FROM games g
      JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -676,6 +710,10 @@ export async function getSeasonGamesForRating(
     homeDefSackRate: r.home_def_sack_rate,
     awayOffSackRate: r.away_off_sack_rate,
     awayDefSackRate: r.away_def_sack_rate,
+    homeOffFinishingDrivesPpo: r.home_off_finishing_drives_ppo,
+    homeDefFinishingDrivesPpo: r.home_def_finishing_drives_ppo,
+    awayOffFinishingDrivesPpo: r.away_off_finishing_drives_ppo,
+    awayDefFinishingDrivesPpo: r.away_def_finishing_drives_ppo,
   }));
 }
 
