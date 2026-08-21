@@ -9,6 +9,7 @@ import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
 import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesStats.js";
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
+import { syncOpponentAdjustedStats } from "./ingest/cfbd/syncOpponentAdjustedStats.js";
 import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap } from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
@@ -748,6 +749,25 @@ export function startCfbSpecialTeamsIngestJob(): Promise<JobStatus> {
 }
 
 /**
+ * Populates off_adj/def_adj (migration 0013) for every game of 2023-2025,
+ * from the raw plays cfb-rawplays-ingest already stored -- no CFBD API
+ * calls, pure DB computation via ratings/opponentAdjust.ts's iterative
+ * solve, re-run fresh per week over prior weeks only (see
+ * ingest/cfbd/syncOpponentAdjustedStats.ts's doc). This is what actually
+ * feeds the pointsPerOpponentAdj rating-engine term -- currently 0/untested
+ * until this has run and a real sweep follows.
+ */
+export function startCfbOpponentAdjustedIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-opponentadjusted-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: opponent-adjusted stats (as-of-week, from ingested plays)`);
+      const result = await syncOpponentAdjustedStats(year);
+      log(job, `${year}: weeksProcessed=${result.weeksProcessed} gamesUpdated=${result.gamesUpdated} teamSidesUpdated=${result.teamSidesUpdated}`);
+    }
+  });
+}
+
+/**
  * Foundation for the SP+-style rebuild: raw play-by-play storage (see
  * migration 0012 and ingest/cfbd/syncRawPlays.ts) -- our own success-rate/
  * situational-split definitions and weighted garbage-time both need
@@ -1158,6 +1178,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-finishingdrives-ingest": startCfbFinishingDrivesIngestJob,
   "cfb-component-sweep-finishingdrives": startCfbComponentSweepFinishingDrivesJob,
   "cfb-specialteams-ingest": startCfbSpecialTeamsIngestJob,
+  "cfb-opponentadjusted-ingest": startCfbOpponentAdjustedIngestJob,
   "cfb-rawplays-ingest": startCfbRawPlaysIngestJob,
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
