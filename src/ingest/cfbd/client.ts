@@ -197,6 +197,11 @@ export function getEloRatings(
   return cfbdGet<CfbdTeamElo[]>("/ratings/elo", { year, week, seasonType });
 }
 
+export interface CfbdPlayClock {
+  minutes: number | null;
+  seconds: number | null;
+}
+
 export interface CfbdPlay {
   id: string;
   gameId: number;
@@ -208,6 +213,27 @@ export interface CfbdPlay {
   yardsGained: number;
   playType: string;
   ppa: number | null;
+  /**
+   * Fields beyond the original turnover/sack-rate-era set, added for raw
+   * play-by-play storage (see db/migrations for the `plays` table) —
+   * confirmed real fields via CFBD's actual Play model docs (not guessed).
+   * Confirmed NOT present on this endpoint: a first-down indicator (derive
+   * via yardsGained >= distance, a standard approximation — doesn't
+   * account for penalties/other edge cases) and win probability (a
+   * genuinely separate endpoint, getWinProbabilityData, ONE CALL PER GAME
+   * — not pulled by default given the cost, ~800+ calls/season).
+   */
+  driveId: number;
+  driveNumber: number;
+  playNumber: number;
+  home: string;
+  away: string;
+  offenseScore: number;
+  defenseScore: number;
+  yardLine: number;
+  yardsToGoal: number;
+  scoring: boolean;
+  clock: CfbdPlayClock | null;
 }
 
 /**
@@ -224,6 +250,42 @@ export function getPlays(
   seasonType: "regular" | "postseason" = "regular",
 ): Promise<CfbdPlay[]> {
   return cfbdGet<CfbdPlay[]>("/plays", { year, week, seasonType });
+}
+
+export interface CfbdPlayWinProbability {
+  gamesId: number;
+  playId: number;
+  homeId: number;
+  home: string;
+  awayId: number;
+  away: string;
+  spread: number | null;
+  homeBall: boolean;
+  homeScore: number;
+  awayScore: number;
+  timeRemaining: number;
+  yardLine: number;
+  down: number;
+  distance: number;
+  homeWinProb: number | null;
+  playNumber: number;
+}
+
+/**
+ * Play-by-play win probability — confirmed real via CFBD's client docs
+ * (GET /metrics/wp), joinable back to a specific /plays row via playId or
+ * playNumber. UNLIKE every other endpoint this project uses, this takes a
+ * single gameId, not a year/week — there is no season-wide pull at all,
+ * meaning a full season needs ~800+ calls (one per FBS game), not ~15.
+ * Not wired into any ingestion job yet given that cost — build a job
+ * scoped to a specific week/slate first if live win-probability-based
+ * garbage-time weighting is wanted, rather than a blanket full-history
+ * backfill. See RatingParams' garbage-time weighting doc for how the
+ * score-differential/time-remaining fields already on /plays cover most
+ * of the same signal without this endpoint.
+ */
+export function getWinProbabilityData(gameId: number): Promise<CfbdPlayWinProbability[]> {
+  return cfbdGet<CfbdPlayWinProbability[]>("/metrics/wp", { gameId });
 }
 
 export interface CfbdDrive {

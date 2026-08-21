@@ -464,6 +464,99 @@ export async function upsertSpecialTeamsStats(input: UpsertSpecialTeamsStatsInpu
   );
 }
 
+/**
+ * Bulk name -> team id map for a whole sport, one query instead of N --
+ * needed for raw play ingestion (~15-20k rows per week, ~150k+ per season),
+ * where a per-row findTeamIdByName call would be prohibitively slow (and
+ * expensive) at that volume. Every other ingestion module in this project
+ * is low-volume enough (team-game-level, not play-level) that the N-query
+ * pattern is fine; this is the first one that genuinely needs bulk lookup.
+ */
+export async function getTeamNameToIdMap(sport: Sport): Promise<Map<string, number>> {
+  const result = await pool.query<{ id: number; name: string }>(`SELECT id, name FROM teams WHERE sport = $1`, [sport]);
+  return new Map(result.rows.map((r) => [r.name, r.id]));
+}
+
+/** Same bulk-lookup reasoning as getTeamNameToIdMap, for CFBD's own game source_id -> our game id, scoped to one season. */
+export async function getGameSourceIdToIdMap(sport: Sport, season: number): Promise<Map<string, number>> {
+  const result = await pool.query<{ id: number; source_id: string }>(
+    `SELECT id, source_id FROM games WHERE sport = $1 AND season = $2`,
+    [sport, season],
+  );
+  return new Map(result.rows.map((r) => [r.source_id, r.id]));
+}
+
+export interface InsertPlayInput {
+  cfbdPlayId: string;
+  gameId: number;
+  offenseTeamId: number | null;
+  defenseTeamId: number | null;
+  driveId: number | null;
+  driveNumber: number | null;
+  playNumber: number | null;
+  period: number;
+  clockMinutes: number | null;
+  clockSeconds: number | null;
+  offenseScore: number | null;
+  defenseScore: number | null;
+  yardLine: number | null;
+  yardsToGoal: number | null;
+  down: number | null;
+  distance: number | null;
+  yardsGained: number | null;
+  playType: string;
+  scoring: boolean;
+  ppa: number | null;
+}
+
+const PLAY_INSERT_COLUMNS = [
+  "cfbd_play_id", "game_id", "offense_team_id", "defense_team_id", "drive_id", "drive_number",
+  "play_number", "period", "clock_minutes", "clock_seconds", "offense_score", "defense_score",
+  "yard_line", "yards_to_goal", "down", "distance", "yards_gained", "play_type", "scoring", "ppa",
+];
+/** Chunk size for the multi-row INSERT below -- 500 rows * 20 columns = 10,000 params, safely under Postgres's 65,535-param limit (a full week's ~15-20k plays would blow that limit in one statement). */
+const PLAY_INSERT_CHUNK_SIZE = 500;
+
+function playInputToRow(p: InsertPlayInput): unknown[] {
+  return [
+    p.cfbdPlayId, p.gameId, p.offenseTeamId, p.defenseTeamId, p.driveId, p.driveNumber,
+    p.playNumber, p.period, p.clockMinutes, p.clockSeconds, p.offenseScore, p.defenseScore,
+    p.yardLine, p.yardsToGoal, p.down, p.distance, p.yardsGained, p.playType, p.scoring, p.ppa,
+  ];
+}
+
+/**
+ * Batch-inserts raw plays in chunks (see PLAY_INSERT_CHUNK_SIZE), skipping
+ * (not updating) any play whose cfbd_play_id already exists -- plays are
+ * immutable historical facts once ingested, unlike a team's season
+ * aggregate stats, so there's nothing to reconcile on a re-run the way
+ * upsertTeamGameStats' ON CONFLICT DO UPDATE handles for evolving season
+ * totals. Returns the total number of rows actually inserted (excludes
+ * conflicts skipped).
+ */
+export async function insertPlaysBatch(plays: InsertPlayInput[]): Promise<number> {
+  let inserted = 0;
+  for (let i = 0; i < plays.length; i += PLAY_INSERT_CHUNK_SIZE) {
+    const chunk = plays.slice(i, i + PLAY_INSERT_CHUNK_SIZE);
+    const values: unknown[] = [];
+    const rowPlaceholders: string[] = [];
+    for (const play of chunk) {
+      const row = playInputToRow(play);
+      const placeholders = row.map((_, colIdx) => `$${values.length + colIdx + 1}`);
+      rowPlaceholders.push(`(${placeholders.join(",")})`);
+      values.push(...row);
+    }
+    const result = await pool.query(
+      `INSERT INTO plays (${PLAY_INSERT_COLUMNS.join(", ")})
+       VALUES ${rowPlaceholders.join(",\n")}
+       ON CONFLICT (cfbd_play_id) DO NOTHING`,
+      values,
+    );
+    inserted += result.rowCount ?? 0;
+  }
+  return inserted;
+}
+
 export interface UpsertGarbageTimeStatsInput {
   gameId: number;
   teamId: number;

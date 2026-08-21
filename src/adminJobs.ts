@@ -7,6 +7,7 @@ import { syncCfbdTurnoverStats } from "./ingest/cfbd/syncTurnoverStats.js";
 import { syncCfbdSackRateStats } from "./ingest/cfbd/syncSackRateStats.js";
 import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesStats.js";
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
+import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
@@ -742,6 +743,28 @@ export function startCfbSpecialTeamsIngestJob(): Promise<JobStatus> {
 }
 
 /**
+ * Foundation for the SP+-style rebuild: raw play-by-play storage (see
+ * migration 0012 and ingest/cfbd/syncRawPlays.ts) -- our own success-rate/
+ * situational-split definitions and weighted garbage-time both need
+ * individual play rows, not CFBD's pre-aggregated /stats/game/advanced
+ * numbers everything up to this point has relied on. Same ~15-calls-per-
+ * year /plays shape as syncTurnoverStats.ts, but MUCH heavier on DB writes
+ * -- a full season is roughly 250-300k plays (a single real week sampled
+ * this session had 19,574), so expect this to take noticeably longer than
+ * any other ingestion job tonight. Run this before anything that reads
+ * from the `plays` table directly.
+ */
+export function startCfbRawPlaysIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-rawplays-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: raw play-by-play (weeks 1-15) -- this will take a while`);
+      const result = await syncCfbdRawPlays(year);
+      log(job, `${year}: fetched ${result.playsFetched} raw plays, synced ${result.synced}, skipped (no game match) ${result.skippedNoGame}`);
+    }
+  });
+}
+
+/**
  * Runs today's default CFB params (SOS removed, all six Phase 1-3
  * component weights calibrated) against 2025 alone. NOT a true blind
  * walk-forward holdout the way cfb-successrate-walkforward's was: every
@@ -1130,6 +1153,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-finishingdrives-ingest": startCfbFinishingDrivesIngestJob,
   "cfb-component-sweep-finishingdrives": startCfbComponentSweepFinishingDrivesJob,
   "cfb-specialteams-ingest": startCfbSpecialTeamsIngestJob,
+  "cfb-rawplays-ingest": startCfbRawPlaysIngestJob,
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-2025-check": startCfb2025CheckJob,
