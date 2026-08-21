@@ -1265,35 +1265,29 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     const gamePlays = allPlays.filter((p) => p.gameId === target.id);
     log(job, `${gamePlays.length} total plays found for this game`);
 
-    let wpByPlayNumber = new Map<number, CfbdPlayWinProbability>();
+    // Join key is playId (wp) <-> id (play), NOT playNumber on either side
+    // -- confirmed real (cfb-verify-plays run #4, 2026-08-21): wp.playId
+    // matched play.id exactly with matching down/distance on every pair
+    // checked, while wp.playNumber turned out to be the WP model's own
+    // unrelated internal sequential index. Types differ across endpoints
+    // (playId: number vs CfbdPlay.id: string), so key on the string form.
+    let wpByPlayId = new Map<string, CfbdPlayWinProbability>();
     let wpRows: CfbdPlayWinProbability[] = [];
     try {
       wpRows = await getWinProbabilityData(target.id);
-      wpByPlayNumber = new Map(wpRows.map((row) => [row.playNumber, row]));
+      wpByPlayId = new Map(wpRows.map((row) => [String(row.playId), row]));
       log(job, `${wpRows.length} win-probability rows found`);
     } catch (err) {
       log(job, `could not fetch win probability data: ${(err as Error).message} -- continuing without it`);
     }
 
-    // Diagnosing the join: dump the raw id fields from both endpoints
-    // side by side so the actual correspondence (if any) is visible,
-    // rather than assuming playNumber is the right key.
-    log(job, "\nraw join-key diagnostic -- first 10 /plays id/playNumber:");
-    for (const p of gamePlays.slice(0, 10)) {
-      log(job, `  play.id=${p.id} play.playNumber=${p.playNumber} down=${p.down} distance=${p.distance} clock=${p.clock?.minutes}:${p.clock?.seconds}`);
-    }
-    log(job, "raw join-key diagnostic -- first 10 /metrics/wp playId/playNumber:");
-    for (const w of wpRows.slice(0, 10)) {
-      log(job, `  wp.playId=${w.playId} wp.playNumber=${w.playNumber} down=${w.down} distance=${w.distance} homeScore=${w.homeScore} awayScore=${w.awayScore} timeRemaining=${w.timeRemaining}`);
-    }
-
     const maxPlays = 20;
     const shown = gamePlays.slice(0, maxPlays);
     log(job, `\nfirst ${shown.length} of ${gamePlays.length} plays -- hand-check against the real box score/broadcast:`);
-    log(job, "period clock  off        def        down-dist yards playType                  score(off-def) ppa     scoring wp(home)");
+    log(job, "period clock  off        def        down-dist yards playType                  score(off-def) ppa     scoring wp(home) wp-down-dist wp-score(h-a)");
     for (const play of shown) {
       const clock = play.clock ? `${play.clock.minutes}:${String(play.clock.seconds ?? 0).padStart(2, "0")}` : "?";
-      const wpRow = wpByPlayNumber.get(play.playNumber);
+      const wpRow = wpByPlayId.get(play.id);
       const wpStr = wpRow ? (wpRow.homeWinProb == null ? "null" : wpRow.homeWinProb.toFixed(3)) : "(none)";
       log(
         job,
@@ -1308,7 +1302,9 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
           `${play.offenseScore}-${play.defenseScore}`.padEnd(14),
           String(play.ppa ?? "null").padEnd(7),
           String(play.scoring).padEnd(7),
-          wpStr,
+          wpStr.padEnd(8),
+          wpRow ? `${wpRow.down}-${wpRow.distance}`.padEnd(12) : "(none)".padEnd(12),
+          wpRow ? `${wpRow.homeScore}-${wpRow.awayScore}` : "(none)",
         ].join(" "),
       );
     }

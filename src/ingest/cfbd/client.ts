@@ -270,7 +270,12 @@ export interface CfbdPlayWinProbability {
   homeBall: boolean;
   homeScore: number;
   awayScore: number;
-  timeRemaining: number;
+  // Confirmed real (cfb-verify-plays, 2026-08-21): came back JS-undefined
+  // on every single row of a real fetch despite the declared non-nullable
+  // `number` -- either this field genuinely isn't populated for this era
+  // of data, or its real name differs. Don't rely on it without re-
+  // checking against a fresh real response first.
+  timeRemaining?: number;
   yardLine: number;
   down: number;
   distance: number;
@@ -280,13 +285,26 @@ export interface CfbdPlayWinProbability {
   // this since JSON.parse's result is cast, not validated. Always check
   // with `== null`, not `=== null`, for both cases at once.
   homeWinProb?: number | null;
+  // playNumber here is the WIN-PROBABILITY MODEL's own sequential index
+  // (0, 1, 2, ...) over the plays it scored -- confirmed real
+  // (cfb-verify-plays, 2026-08-21) that this does NOT correspond to
+  // CfbdPlay.playNumber at all (they're unrelated small counters that
+  // happen to overlap in range). The correct join key is playId against
+  // CfbdPlay.id (confirmed matching down/distance on the joined rows) --
+  // see getWinProbabilityData's doc comment.
   playNumber: number;
 }
 
 /**
  * Play-by-play win probability — confirmed real via CFBD's client docs
- * (GET /metrics/wp), joinable back to a specific /plays row via playId or
- * playNumber. UNLIKE every other endpoint this project uses, this takes a
+ * (GET /metrics/wp), joinable back to a specific /plays row via playId
+ * ONLY -- confirmed against a real response (cfb-verify-plays,
+ * 2026-08-21) that playNumber on this endpoint is NOT the same counter
+ * as CfbdPlay.playNumber (it's the WP model's own internal sequential
+ * index over the plays it scored). Join on
+ * `String(wpRow.playId) === play.id` (types differ across the two
+ * endpoints -- playId is typed number here, CfbdPlay.id is typed
+ * string -- coerce before comparing). UNLIKE every other endpoint this project uses, this takes a
  * single gameId, not a year/week — there is no season-wide pull at all,
  * meaning a full season needs ~800+ calls (one per FBS game), not ~15.
  * Not wired into any ingestion job yet given that cost — build a job

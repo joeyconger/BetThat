@@ -75,11 +75,14 @@ async function main(): Promise<void> {
   }
   console.log(`Found ${gamePlays.length} total plays for this game.`);
 
-  const wpByPlayNumber = new Map<number, CfbdPlayWinProbability>();
+  // Join key is playId (wp) <-> id (play), NOT playNumber on either side --
+  // confirmed real (cfb-verify-plays run #4, 2026-08-21): see
+  // CfbdPlayWinProbability's doc comment in client.ts.
+  const wpByPlayId = new Map<string, CfbdPlayWinProbability>();
   try {
     console.log(`\nFetching win probability data for gameId=${game.id}...`);
     const wp = await getWinProbabilityData(game.id);
-    for (const row of wp) wpByPlayNumber.set(row.playNumber, row);
+    for (const row of wp) wpByPlayId.set(String(row.playId), row);
     console.log(`Found ${wp.length} win-probability rows.`);
   } catch (err) {
     console.log(`(Could not fetch win probability data: ${(err as Error).message} -- continuing without it.)`);
@@ -92,7 +95,7 @@ async function main(): Promise<void> {
   );
   for (const play of shown) {
     const clock = play.clock ? `${play.clock.minutes}:${String(play.clock.seconds ?? 0).padStart(2, "0")}` : "?";
-    const wpRow = wpByPlayNumber.get(play.playNumber);
+    const wpRow = wpByPlayId.get(play.id);
     const wpStr = wpRow ? (wpRow.homeWinProb == null ? "null" : wpRow.homeWinProb.toFixed(3)) : "(none)";
     console.log(
       [
