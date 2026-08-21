@@ -741,6 +741,33 @@ export function startCfbSpecialTeamsIngestJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Runs today's default CFB params (SOS removed, all six Phase 1-3
+ * component weights calibrated) against 2025 alone. NOT a true blind
+ * walk-forward holdout the way cfb-successrate-walkforward's was: every
+ * component sweep tonight (Phase 1-3) calibrated its weight against the
+ * FULL 2023-2025 sample, including 2025 itself -- so this only shows how
+ * the combined package performs on that season, not out-of-sample
+ * generalization. A real train-blind/test-blind version would mean
+ * re-sweeping every one of the six new params on 2023-2024 only first,
+ * a much larger undertaking not done here.
+ */
+export function startCfb2025CheckJob(): Promise<JobStatus> {
+  return runJob("cfb-2025-check", async (job) => {
+    log(job, "running cfb 2025-only backtest with today's default params (SOS removed, all Phase 1-3 components calibrated)");
+    const result = await runBacktest({ name: "cfb-2025-check", sport: "cfb", seasonStart: 2025, seasonEnd: 2025 });
+    const overall = await getOverallReport(result.backtestRunId);
+    const openingCover = await getOpeningCoverRate(result.backtestRunId);
+    log(
+      job,
+      `2025: ${result.scored} games, cover vs close=${fmtPct(overall.coverRate)}, ` +
+        `cover vs open=${fmtPct(openingCover.coverRateVsOpening)} (${openingCover.games} games w/ opening line), ` +
+        `avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)} (run ${result.backtestRunId})`,
+    );
+    log(job, "NOT a true blind holdout -- every component weight above was calibrated against the full 2023-2025 sample, including 2025 itself. Breakeven vs. -110 vig is ~52.4%.");
+  });
+}
+
 const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }> = [
   // Refined after the first coarse pass (run 279-298): explosiveness was
   // flat across 0-20 (best near 10) -- narrowed grid for a slightly finer
@@ -1105,6 +1132,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-specialteams-ingest": startCfbSpecialTeamsIngestJob,
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
+  "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
   "cfb-no-rivalry-week": startCfbNoRivalryWeekJob,
