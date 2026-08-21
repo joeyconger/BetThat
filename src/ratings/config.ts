@@ -476,26 +476,57 @@ const CFB_PARAMS: RatingParams = {
   // declined 0.61 -> 0.48 as weight went 0 -> 100, same signature as both
   // naive opponentAdjustWeight attempts before it.
   //
-  // Checked rigorously, not just eyeballed, after a real challenge to the
-  // noise-floor/monotonicity claim: (1) the weight=0 vs weight=100 CLV
-  // difference is a PAIRED comparison (same 2268 games, same market lines
-  // under both conditions), and the paired test is decisive -- mean diff
-  // -0.128, sd of the paired diff 1.597, n=2051, t=-0.128/(1.597/sqrt(2051))
-  // ~= -3.64, p<0.001. Not noise. (2) A wiring bug (sign flip, scale
-  // mismatch) was ruled out separately: off_adj/def_adj's raw differential
-  // correlates POSITIVELY with actual margin on its own, r=0.46 (n=2016) --
-  // a strong standalone predictor. Positive standalone correlation +
-  // reliable harm when added to the blend is the textbook signature of
-  // REDUNDANCY (this incremental Elo update already implicitly captures
-  // opponent quality via its own per-game error term), not a broken input.
+  // Checked rigorously, not just eyeballed, after two rounds of real
+  // methodological challenge:
   //
-  // What this rigor does NOT establish: whether ANY of this -- the
-  // weight-0 baseline included -- generalizes out of sample, since every
-  // number above (like every other Phase 1-4 calibration) comes from the
-  // same 2023-2025 pool it's evaluated against. Provisionally screened
-  // out at 0 pending cfb-walkforward-allcomponents' real train(2023-24)/
-  // test(2025) holdout, not closed -- reopening is cheap if that holdout
-  // tells a different story.
+  // Noise floor: the weight=0 vs weight=100 CLV difference is a PAIRED
+  // comparison (same 2268 games, same market lines under both
+  // conditions -- confirmed the missingness is identical between the two
+  // runs, same 217 games null in both, no asymmetric dropout biasing the
+  // pair). Paired test: mean diff -0.128, sd of the paired diff 1.597,
+  // n=2051, t=-0.128/(1.597/sqrt(2051)) ~= -3.64, p<0.001. Not noise.
+  //
+  // Wiring/sign bug, ruled out at both layers: (1) the raw stored data --
+  // off_adj/def_adj's differential correlates +0.46 with actual margin on
+  // its own (n=2016), the right sign, so the values themselves aren't
+  // corrupted. (2) the actual additive-term handoff in THIS file's code
+  // path -- covered by elo.test.ts's hand-computed pointsPerOpponentAdj
+  // test, which exercises the exact GameForRating.homeOffAdj/etc. ->
+  // actualMargin wiring, not just the DB round-trip. (3) confirmed
+  // model_spread_home genuinely shifts with the weight (2024/2268 games
+  // differ, mean |shift| 3.9pts, max 24.3pts) -- the term is NOT
+  // disconnected; picks/covered rarely flip only because the model's
+  // typical deviation from market is usually larger than that shift.
+  // (4) the differential correlates -0.71 with the model's OWN existing
+  // prediction (model_spread_home) -- negative because
+  // eloSpreadHome/modelSpreadHome = -predictedMargin (spread convention,
+  // favorite negative) while actual margin uses the opposite convention
+  // (positive = home's real scoring margin), so -0.71 here and +0.46
+  // against actual margin are the SAME relationship through that sign
+  // flip, not a contradiction. |r|=0.71 means the raw differential alone
+  // already explains roughly half the variance in what the model already
+  // predicts -- strong, direct evidence of redundancy.
+  //
+  // Important limit on that redundancy conclusion: the sweep held every
+  // OTHER weight fixed at values calibrated in this term's absence, so it
+  // can only show redundancy UNDER THE CURRENT BLEND -- it cannot rule out
+  // that a joint refit of all weights together (with vs. without this
+  // term) would let the model reallocate and extract real incremental
+  // value. That joint refit hasn't been done; the correlation-vs-own-
+  // prediction check above is the cheap partial substitute, not a
+  // replacement for it.
+  //
+  // What none of this establishes: whether ANY of it -- the weight-0
+  // baseline included -- generalizes out of sample, since every number
+  // above (like every other Phase 1-4 calibration) comes from the same
+  // 2023-2025 pool it's evaluated against, and the baseline's own +0.61
+  // mean CLV (sd 2.76, n=2268, t~=10.5) is far larger than a real
+  // sustained CLV edge typically runs -- the expected signature of
+  // tuning and evaluating on the same sample, not a discovered edge.
+  // Provisionally screened out at 0 pending
+  // cfb-walkforward-allcomponents' real train(2023-24)/test(2025)
+  // holdout, not closed -- reopening is cheap if that holdout tells a
+  // different story.
   pointsPerOpponentAdj: 0,
 };
 
