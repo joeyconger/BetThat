@@ -1266,12 +1266,25 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     log(job, `${gamePlays.length} total plays found for this game`);
 
     let wpByPlayNumber = new Map<number, CfbdPlayWinProbability>();
+    let wpRows: CfbdPlayWinProbability[] = [];
     try {
-      const wp = await getWinProbabilityData(target.id);
-      wpByPlayNumber = new Map(wp.map((row) => [row.playNumber, row]));
-      log(job, `${wp.length} win-probability rows found`);
+      wpRows = await getWinProbabilityData(target.id);
+      wpByPlayNumber = new Map(wpRows.map((row) => [row.playNumber, row]));
+      log(job, `${wpRows.length} win-probability rows found`);
     } catch (err) {
       log(job, `could not fetch win probability data: ${(err as Error).message} -- continuing without it`);
+    }
+
+    // Diagnosing the join: dump the raw id fields from both endpoints
+    // side by side so the actual correspondence (if any) is visible,
+    // rather than assuming playNumber is the right key.
+    log(job, "\nraw join-key diagnostic -- first 10 /plays id/playNumber:");
+    for (const p of gamePlays.slice(0, 10)) {
+      log(job, `  play.id=${p.id} play.playNumber=${p.playNumber} down=${p.down} distance=${p.distance} clock=${p.clock?.minutes}:${p.clock?.seconds}`);
+    }
+    log(job, "raw join-key diagnostic -- first 10 /metrics/wp playId/playNumber:");
+    for (const w of wpRows.slice(0, 10)) {
+      log(job, `  wp.playId=${w.playId} wp.playNumber=${w.playNumber} down=${w.down} distance=${w.distance} homeScore=${w.homeScore} awayScore=${w.awayScore} timeRemaining=${w.timeRemaining}`);
     }
 
     const maxPlays = 20;
