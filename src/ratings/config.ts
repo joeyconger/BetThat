@@ -469,12 +469,24 @@ const CFB_PARAMS: RatingParams = {
   // (0.60); both metrics declined steadily past weight=5.
   pointsPerFieldPosition: 0.2,
   pointsPerFgMakeRate: 5,
-  // Untested — the real iterative-solve opponent-adjustment
-  // (ratings/opponentAdjust.ts) is built and real-data-sanity-checked
-  // (cfb-opponent-adjust-snapshot: converges cleanly, 2024 rankings match
-  // reality), but off_adj/def_adj haven't been computed/ingested per-week
-  // yet (needs ingest/cfbd/syncOpponentAdjustedStats.ts, not yet built) —
-  // 0 until that exists and a real sweep has run.
+  // Swept 0-100 (cfb-component-sweep-opponentadj, run 347-352) after the
+  // REAL iterative-solve build (real play data, garbage-time weighting,
+  // exact success-rate defs, verified against a live box score, sanity-
+  // checked ratings) -- and it shows the exact same signature as both
+  // naive opponentAdjustWeight attempts before it: cover vs open declines
+  // monotonically (52.4% -> 52.1% -> 51.9% -> 51.6% -> 51.6% -> 51.1%) AND
+  // avgClv declines monotonically (0.61 -> 0.57 -> 0.55 -> 0.55 -> 0.51 ->
+  // 0.48) as weight increases from 0. Best point is 0 (no-op) on both
+  // metrics. Third independent confirmation of the same finding: this
+  // incremental Elo-style rating update already implicitly captures
+  // opponent quality via its own error term each game, so an explicit
+  // opponent-adjusted input is redundant at best, actively diluting/
+  // double-counting at worst -- not a naive-implementation artifact,
+  // since this is the properly-built version. Unlike Phase 1-3's "keep
+  // it in regardless of sweep result" instruction, this mechanism was
+  // never given that mandate -- screened OUT the same way
+  // successRateWeight/turnoverLuckWeight/opponentAdjustWeight were,
+  // based on a real negative result, not a neutral pick.
   pointsPerOpponentAdj: 0,
 };
 
