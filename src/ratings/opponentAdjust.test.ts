@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeOpponentAdjustedRatings, type TeamPerformance } from "./opponentAdjust.js";
+import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams, type TeamPerformance } from "./opponentAdjust.js";
 
 const A = 1;
 const B = 2;
@@ -120,4 +120,73 @@ test("computeOpponentAdjustedRatings: hitting maxIterations without convergence 
   const result = computeOpponentAdjustedRatings(performances, { maxIterations: 1, tolerance: 1e-12 });
   assert.equal(result.converged, false);
   assert.equal(result.iterations, 1);
+});
+
+test("computeOpponentAdjustedRatings: teamDiagnostics.gamesPlayed counts offense + defense appearances", () => {
+  // A plays 1 game (vs B): 1 offense appearance + 1 defense appearance (B's row against A) = 2.
+  const performances: TeamPerformance[] = [
+    { teamId: A, opponentId: B, rawOffenseValue: 0.6 },
+    { teamId: B, opponentId: A, rawOffenseValue: 0.4 },
+  ];
+  const result = computeOpponentAdjustedRatings(performances);
+  assert.equal(result.teamDiagnostics.get(A)!.gamesPlayed, 2);
+  assert.equal(result.teamDiagnostics.get(B)!.gamesPlayed, 2);
+});
+
+test("computeOpponentAdjustedRatings: teamDiagnostics.lastDelta is near-zero for a converged solve", () => {
+  const performances: TeamPerformance[] = [
+    { teamId: A, opponentId: B, rawOffenseValue: 0.6 },
+    { teamId: B, opponentId: A, rawOffenseValue: 0.4 },
+  ];
+  const result = computeOpponentAdjustedRatings(performances);
+  assert.equal(result.converged, true);
+  assert.ok(result.teamDiagnostics.get(A)!.lastDelta < 1e-6);
+  assert.ok(result.teamDiagnostics.get(B)!.lastDelta < 1e-6);
+});
+
+test("computeOpponentAdjustedRatings: a low-connectivity pendant team still gets a stable teamDiagnostics entry", () => {
+  // A well-connected core (X, Y, Z round robin) plus a pendant team P that
+  // only ever played X once -- the degenerate identifiability case the
+  // 2-team test already covers, but now embedded in a larger graph where
+  // the global solve still reports converged overall.
+  const X = 10, Y = 11, Z = 12, P = 13;
+  const performances: TeamPerformance[] = [
+    { teamId: X, opponentId: Y, rawOffenseValue: 0.5 },
+    { teamId: Y, opponentId: X, rawOffenseValue: 0.5 },
+    { teamId: Y, opponentId: Z, rawOffenseValue: 0.5 },
+    { teamId: Z, opponentId: Y, rawOffenseValue: 0.5 },
+    { teamId: X, opponentId: Z, rawOffenseValue: 0.5 },
+    { teamId: Z, opponentId: X, rawOffenseValue: 0.5 },
+    { teamId: X, opponentId: P, rawOffenseValue: 0.6 },
+    { teamId: P, opponentId: X, rawOffenseValue: 0.4 },
+  ];
+  const result = computeOpponentAdjustedRatings(performances);
+  assert.equal(result.converged, true);
+  assert.equal(result.teamDiagnostics.get(P)!.gamesPlayed, 2);
+  assert.ok(result.teamDiagnostics.has(P));
+});
+
+test("identifyLowConnectivityTeams: flags teams below the games threshold, not well-connected ones", () => {
+  const performances: TeamPerformance[] = [
+    { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 4, rawOffenseValue: 0.5 },
+    { teamId: 4, opponentId: 2, rawOffenseValue: 0.5 },
+  ];
+  const result = computeOpponentAdjustedRatings(performances);
+  // Team 2 played 3 games (gamesPlayed=6); teams 1, 3, 4 each played 1 (gamesPlayed=2).
+  const flagged = identifyLowConnectivityTeams(result.teamDiagnostics, 3);
+  assert.deepEqual(new Set(flagged), new Set([1, 3, 4]));
+});
+
+test("identifyLowConnectivityTeams: raising minGames flags more teams, lowering it flags fewer", () => {
+  const performances: TeamPerformance[] = [
+    { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+  ];
+  const result = computeOpponentAdjustedRatings(performances);
+  assert.deepEqual(identifyLowConnectivityTeams(result.teamDiagnostics, 1), []);
+  assert.deepEqual(new Set(identifyLowConnectivityTeams(result.teamDiagnostics, 10)), new Set([1, 2]));
 });

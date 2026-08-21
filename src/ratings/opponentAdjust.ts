@@ -33,6 +33,21 @@
  * this project's rating pipeline), and must re-run the whole solve fresh
  * per week rather than reusing a single full-season convergence, or
  * later-season results will leak into early-week ratings.
+ *
+ * Low-connectivity identifiability caveat: a team with very few games
+ * relative to the rest of the graph (an FCS opponent playing one FBS
+ * team, an early-season snapshot before most teams have played) doesn't
+ * have enough independent equations pinning down its OFF/DEF split from
+ * its opponents' -- the 2-team/1-game case in the tests is the extreme
+ * version of this (offense and defense are literally indistinguishable
+ * with only one matchup to go on). Global maxDelta convergence can still
+ * report "converged" while a handful of poorly-connected teams are still
+ * moving more than everyone else, just below the global tolerance --
+ * teamDiagnostics.lastDelta and .gamesPlayed exist specifically so
+ * callers can check convergence quality per-team, not just globally, and
+ * identifyLowConnectivityTeams() flags likely-unstable teams by games
+ * count. When running this on a real season, check these for the teams
+ * it flags rather than trusting the global converged flag alone.
  */
 
 export interface TeamPerformance {
@@ -42,11 +57,19 @@ export interface TeamPerformance {
   rawOffenseValue: number;
 }
 
+export interface TeamDiagnostic {
+  /** Total games this team appears in (as offense + as defense). */
+  gamesPlayed: number;
+  /** How much this team's off+def ratings moved on the FINAL iteration -- near-0 means genuinely settled, not just under the global max. */
+  lastDelta: number;
+}
+
 export interface OpponentAdjustedRatings {
   off: Map<number, number>;
   def: Map<number, number>;
   iterations: number;
   converged: boolean;
+  teamDiagnostics: Map<number, TeamDiagnostic>;
 }
 
 export interface OpponentAdjustmentOptions {
@@ -74,7 +97,7 @@ export function computeOpponentAdjustedRatings(
   }
 
   if (teamIds.size === 0) {
-    return { off: new Map(), def: new Map(), iterations: 0, converged: true };
+    return { off: new Map(), def: new Map(), iterations: 0, converged: true, teamDiagnostics: new Map() };
   }
 
   const leagueAvg = performances.reduce((sum, p) => sum + p.rawOffenseValue, 0) / performances.length;
@@ -102,10 +125,12 @@ export function computeOpponentAdjustedRatings(
 
   let iterations = 0;
   let converged = false;
+  let lastTeamDelta = new Map<number, number>();
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const nextOff = new Map<number, number>();
     const nextDef = new Map<number, number>();
+    const teamDelta = new Map<number, number>();
     let maxDelta = 0;
 
     for (const teamId of teamIds) {
@@ -117,7 +142,8 @@ export function computeOpponentAdjustedRatings(
           : off.get(teamId)!;
       const newOff = off.get(teamId)! + dampingFactor * (targetOff - off.get(teamId)!);
       nextOff.set(teamId, newOff);
-      maxDelta = Math.max(maxDelta, Math.abs(newOff - off.get(teamId)!));
+      const offDelta = Math.abs(newOff - off.get(teamId)!);
+      maxDelta = Math.max(maxDelta, offDelta);
 
       const defGames = defPerformances.get(teamId)!;
       const targetDef =
@@ -127,11 +153,15 @@ export function computeOpponentAdjustedRatings(
           : def.get(teamId)!;
       const newDef = def.get(teamId)! + dampingFactor * (targetDef - def.get(teamId)!);
       nextDef.set(teamId, newDef);
-      maxDelta = Math.max(maxDelta, Math.abs(newDef - def.get(teamId)!));
+      const defDelta = Math.abs(newDef - def.get(teamId)!);
+      maxDelta = Math.max(maxDelta, defDelta);
+
+      teamDelta.set(teamId, Math.max(offDelta, defDelta));
     }
 
     off = nextOff;
     def = nextDef;
+    lastTeamDelta = teamDelta;
     iterations = iter + 1;
 
     if (maxDelta < tolerance) {
@@ -140,5 +170,33 @@ export function computeOpponentAdjustedRatings(
     }
   }
 
-  return { off, def, iterations, converged };
+  const teamDiagnostics = new Map<number, TeamDiagnostic>();
+  for (const teamId of teamIds) {
+    teamDiagnostics.set(teamId, {
+      gamesPlayed: offPerformances.get(teamId)!.length + defPerformances.get(teamId)!.length,
+      lastDelta: lastTeamDelta.get(teamId) ?? 0,
+    });
+  }
+
+  return { off, def, iterations, converged, teamDiagnostics };
+}
+
+/**
+ * Flags teams likely to have an unstable/underdetermined solve: those
+ * with fewer than minGames total appearances (offense + defense). A team
+ * can pass this check and still be genuinely unstable (a small,
+ * disconnected pocket of well-connected-to-each-other-but-not-the-rest
+ * teams isn't caught by a raw games count), so treat this as a first
+ * pass, not a guarantee -- pair it with checking .lastDelta directly for
+ * teams near the threshold.
+ */
+export function identifyLowConnectivityTeams(
+  teamDiagnostics: Map<number, TeamDiagnostic>,
+  minGames = 3,
+): number[] {
+  const flagged: number[] = [];
+  for (const [teamId, diag] of teamDiagnostics) {
+    if (diag.gamesPlayed < minGames) flagged.push(teamId);
+  }
+  return flagged;
 }
