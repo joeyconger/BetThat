@@ -32,6 +32,7 @@ import {
   runTurnoverLuckSweep,
   runWeeklySpSignalSweep,
   runComponentSweep,
+  runComponentSweepWalkforward,
 } from "./backtest/sweep.js";
 import type { ComponentParamKey } from "./backtest/sweep.js";
 import {
@@ -888,6 +889,68 @@ function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamK
 }
 
 /**
+ * The real answer to "was any of tonight's Phase 1-4 calibration actually
+ * validated, or just fit to the sample it was evaluated on": every one of
+ * COMPONENT_SWEEP_JOBS' 8 params (the 7 already-adopted Phase 1-3 weights
+ * PLUS pointsPerOpponentAdj, still 0) was originally calibrated against
+ * the FULL 2023-2025 sample -- this runs a genuine train(2023-2024)/
+ * test(2025) split for each, via runComponentSweepWalkforward, and for
+ * comparison also runs a weight=0 baseline on the SAME 2025 holdout, so
+ * "did the training-selected weight actually beat doing nothing, out of
+ * sample" is a direct, visible comparison rather than an inference.
+ *
+ * This is a lot of backtest runs (8 params x (6ish training values + 2
+ * holdout runs) = ~60+ full season replays) -- expect this to take
+ * several minutes.
+ */
+export function startCfbWalkforwardAllComponentsJob(): Promise<JobStatus> {
+  return runJob("cfb-walkforward-allcomponents", async (job) => {
+    log(job, "Real train(2023-2024)/test(2025) holdout for every Phase 1-4 component weight.");
+    for (const spec of COMPONENT_SWEEP_JOBS) {
+      log(job, `\n=== ${spec.label} ===`);
+      const result = await runComponentSweepWalkforward("cfb", spec.paramKey, spec.grid, 2023, 2024, 2025);
+      for (const r of result.trainResults) {
+        log(
+          job,
+          `  train (2023-2024): ${spec.label}=${r.value}: cover vs open=${fmtPct(r.coverRateVsOpening)} ` +
+            `(${r.openingGames} games), avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(2)} (run ${r.runId})`,
+        );
+      }
+      log(job, `  BEST TRAINING VALUE (by cover vs open): ${spec.label}=${result.bestTrainValue}`);
+
+      const base = getRatingParams("cfb");
+      const zeroed = { ...base, [spec.paramKey]: 0 };
+      const zeroHoldout = await runBacktest({
+        name: `walkforward-${spec.paramKey}-cfb-v0-test2025-baseline`,
+        sport: "cfb",
+        seasonStart: 2025,
+        seasonEnd: 2025,
+        paramsOverride: zeroed,
+      });
+      const zeroOverall = await getOverallReport(zeroHoldout.backtestRunId);
+      const zeroOpening = await getOpeningCoverRate(zeroHoldout.backtestRunId);
+
+      log(
+        job,
+        `  HOLDOUT 2025, ${spec.label}=0 (baseline): ${zeroHoldout.scored} games, cover vs open=${fmtPct(zeroOpening.coverRateVsOpening)} ` +
+          `(${zeroOpening.games} games), avgClv=${zeroOverall.avgClv === null ? "n/a" : zeroOverall.avgClv.toFixed(2)} (run ${zeroHoldout.backtestRunId})`,
+      );
+      log(
+        job,
+        `  HOLDOUT 2025, ${spec.label}=${result.bestTrainValue} (training-selected): ${result.holdoutGames} games, ` +
+          `cover vs open=${fmtPct(result.holdoutCoverRateVsOpening)} (${result.holdoutOpeningGames} games), ` +
+          `avgClv=${result.holdoutAvgClv === null ? "n/a" : result.holdoutAvgClv.toFixed(2)} (run ${result.holdoutRunId})`,
+      );
+    }
+    log(
+      job,
+      "\nFor each component: did the training-selected weight's 2025 holdout numbers actually beat the weight=0 baseline's 2025 holdout numbers? " +
+        "If not, that component's Phase 1-3/4 calibration didn't generalize out of sample, regardless of how it looked on the full 2023-2025 sample.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1190,6 +1253,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
+  "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,

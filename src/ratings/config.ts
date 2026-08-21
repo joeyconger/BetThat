@@ -472,21 +472,30 @@ const CFB_PARAMS: RatingParams = {
   // Swept 0-100 (cfb-component-sweep-opponentadj, run 347-352) after the
   // REAL iterative-solve build (real play data, garbage-time weighting,
   // exact success-rate defs, verified against a live box score, sanity-
-  // checked ratings) -- and it shows the exact same signature as both
-  // naive opponentAdjustWeight attempts before it: cover vs open declines
-  // monotonically (52.4% -> 52.1% -> 51.9% -> 51.6% -> 51.6% -> 51.1%) AND
-  // avgClv declines monotonically (0.61 -> 0.57 -> 0.55 -> 0.55 -> 0.51 ->
-  // 0.48) as weight increases from 0. Best point is 0 (no-op) on both
-  // metrics. Third independent confirmation of the same finding: this
-  // incremental Elo-style rating update already implicitly captures
-  // opponent quality via its own error term each game, so an explicit
-  // opponent-adjusted input is redundant at best, actively diluting/
-  // double-counting at worst -- not a naive-implementation artifact,
-  // since this is the properly-built version. Unlike Phase 1-3's "keep
-  // it in regardless of sweep result" instruction, this mechanism was
-  // never given that mandate -- screened OUT the same way
-  // successRateWeight/turnoverLuckWeight/opponentAdjustWeight were,
-  // based on a real negative result, not a neutral pick.
+  // checked ratings): cover vs open declined 52.4% -> 51.1% and avgClv
+  // declined 0.61 -> 0.48 as weight went 0 -> 100, same signature as both
+  // naive opponentAdjustWeight attempts before it.
+  //
+  // Checked rigorously, not just eyeballed, after a real challenge to the
+  // noise-floor/monotonicity claim: (1) the weight=0 vs weight=100 CLV
+  // difference is a PAIRED comparison (same 2268 games, same market lines
+  // under both conditions), and the paired test is decisive -- mean diff
+  // -0.128, sd of the paired diff 1.597, n=2051, t=-0.128/(1.597/sqrt(2051))
+  // ~= -3.64, p<0.001. Not noise. (2) A wiring bug (sign flip, scale
+  // mismatch) was ruled out separately: off_adj/def_adj's raw differential
+  // correlates POSITIVELY with actual margin on its own, r=0.46 (n=2016) --
+  // a strong standalone predictor. Positive standalone correlation +
+  // reliable harm when added to the blend is the textbook signature of
+  // REDUNDANCY (this incremental Elo update already implicitly captures
+  // opponent quality via its own per-game error term), not a broken input.
+  //
+  // What this rigor does NOT establish: whether ANY of this -- the
+  // weight-0 baseline included -- generalizes out of sample, since every
+  // number above (like every other Phase 1-4 calibration) comes from the
+  // same 2023-2025 pool it's evaluated against. Provisionally screened
+  // out at 0 pending cfb-walkforward-allcomponents' real train(2023-24)/
+  // test(2025) holdout, not closed -- reopening is cheap if that holdout
+  // tells a different story.
   pointsPerOpponentAdj: 0,
 };
 

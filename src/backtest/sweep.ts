@@ -697,3 +697,74 @@ export async function runComponentSweep(
   results.sort((a, b) => (b.coverRateVsOpening ?? -1) - (a.coverRateVsOpening ?? -1));
   return results;
 }
+
+export interface ComponentWalkforwardResult {
+  paramKey: ComponentParamKey;
+  trainResults: ComponentSweepResult[];
+  bestTrainValue: number;
+  holdoutRunId: number;
+  holdoutGames: number;
+  holdoutCoverRate: number | null;
+  holdoutAvgClv: number | null;
+  holdoutOpeningGames: number;
+  holdoutCoverRateVsOpening: number | null;
+}
+
+/**
+ * Real train/test split for any component param: calibrates paramKey
+ * using ONLY trainSeasonStart..trainSeasonEnd (via runComponentSweep),
+ * picks the best weight from that training-only sweep (by
+ * coverRateVsOpening -- runComponentSweep already sorts its results desc
+ * by this), then runs exactly ONE backtest on testSeason with that single
+ * chosen weight -- data the calibration never saw. Generalizes the
+ * bespoke startCfbWalkforwardJob/startCfbSuccessRateWalkforwardJob
+ * pattern to any of the 8 component params, so it can retroactively
+ * re-validate Phase 1-3's already-adopted weights too, not just future
+ * ones -- every one of those was originally calibrated against the FULL
+ * 2023-2025 sample (the same sample it was evaluated against), so this is
+ * the first genuine out-of-sample check any of them get, the weight-0
+ * baseline included.
+ *
+ * Critical discipline this function exists to enforce: testSeason must
+ * never be touched by the training sweep, and the chosen weight must
+ * never be adjusted after looking at the holdout result. Peeking at the
+ * holdout and retuning burns it -- it stops being a genuine test and
+ * becomes exactly the in-sample-fit-masquerading-as-validation problem
+ * this exists to catch.
+ */
+export async function runComponentSweepWalkforward(
+  sport: Sport,
+  paramKey: ComponentParamKey,
+  weightGrid: number[],
+  trainSeasonStart: number,
+  trainSeasonEnd: number,
+  testSeason: number,
+): Promise<ComponentWalkforwardResult> {
+  const trainResults = await runComponentSweep(sport, trainSeasonStart, trainSeasonEnd, paramKey, weightGrid);
+  const best = trainResults[0]!; // already sorted desc by coverRateVsOpening
+
+  const base = getRatingParams(sport);
+  const paramsOverride: RatingParams = { ...base, [paramKey]: best.value };
+  const name = `walkforward-${paramKey}-${sport}-v${best.value}-test${testSeason}`;
+  const { backtestRunId, scored } = await runBacktest({
+    name,
+    sport,
+    seasonStart: testSeason,
+    seasonEnd: testSeason,
+    paramsOverride,
+  });
+  const overall = await getOverallReport(backtestRunId);
+  const opening = await getOpeningCoverRate(backtestRunId);
+
+  return {
+    paramKey,
+    trainResults,
+    bestTrainValue: best.value,
+    holdoutRunId: backtestRunId,
+    holdoutGames: scored,
+    holdoutCoverRate: overall.coverRate,
+    holdoutAvgClv: overall.avgClv,
+    holdoutOpeningGames: opening.games,
+    holdoutCoverRateVsOpening: opening.coverRateVsOpening,
+  };
+}
