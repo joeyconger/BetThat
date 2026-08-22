@@ -1490,6 +1490,32 @@ export function startCfbClvFrozenRatingsJob(): Promise<JobStatus> {
 }
 
 /**
+ * Honest re-baseline after Part 1's market-anchor removal (see
+ * ratings/elo.ts's predictSpread doc -- it no longer takes a market line
+ * as an input at all). Every prior number in this file's history
+ * (including this session's own cfb-jointrefit and cfb-clv prefixed
+ * runs) was produced by the OLD market-anchored model and is not
+ * comparable to this. No tuning pass before this run -- report cover
+ * rate/avgClv exactly as they come out, worse numbers included.
+ */
+export function startCfbUnanchoredRebaselineJob(): Promise<JobStatus> {
+  return runJob("cfb-unanchored-rebaseline", async (job) => {
+    log(job, "Running the full 2023-2025 CFB backtest with the market anchor removed -- current RatingParams, no override, no tuning.");
+    const result = await runBacktest({ name: "cfb-unanchored-rebaseline-2023-2025", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
+    const overall = await getOverallReport(result.backtestRunId);
+    const opening = await getOpeningCoverRate(result.backtestRunId);
+    log(
+      job,
+      `unanchored rebaseline (run ${result.backtestRunId}): ${result.scored} games, cover vs open=${fmtPct(opening.coverRateVsOpening)} (${opening.games} games with an opening line), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}, overall cover=${fmtPct(overall.coverRate)}`,
+    );
+    log(
+      job,
+      `Every earlier number in this project (this session's cfb-jointrefit-*/cfb-clv-* included) was produced by the market-anchored model and is not comparable to this. This is the new honest baseline.`,
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1779,6 +1805,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-jointrefit-conditional-epa": startCfbJointRefitConditionalEpaJob,
   "cfb-clv-naive-baseline": startCfbClvNaiveBaselineJob,
   "cfb-clv-frozen-ratings": startCfbClvFrozenRatingsJob,
+  "cfb-unanchored-rebaseline": startCfbUnanchoredRebaselineJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
