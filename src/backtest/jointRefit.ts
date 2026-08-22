@@ -55,6 +55,8 @@ export interface JointRefitResult {
   /** Of gamesUsed, how many had a real (non-imputed) pointsPerFinishingDrives feature -- see the zero-imputation doc below. */
   finishingDrivesReal: number;
   finishingDrivesImputed: number;
+  /** Per-component two-sided (both home and away) non-null count across ALL candidate games, counted BEFORE any gating or imputation -- see fitJointComponentWeights' inline doc. */
+  componentCoverage: { key: ComponentParamKey; label: string; nonNullCount: number }[];
 }
 
 /**
@@ -86,6 +88,16 @@ export async function fitJointComponentWeights(
   let finishingDrivesReal = 0;
   const finishingDrivesIdx = JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === "pointsPerFinishingDrives");
 
+  // Per-component two-sided coverage, counted BEFORE any gating or
+  // imputation -- printed so the effective complete-case n (and which
+  // component is actually the binding constraint) is visible up front,
+  // not discovered after the fact from a crashed or empty-looking fit.
+  const componentCoverage: { key: ComponentParamKey; label: string; nonNullCount: number }[] = JOINT_REFIT_COMPONENTS.map((c) => ({
+    key: c.key,
+    label: c.label,
+    nonNullCount: 0,
+  }));
+
   for (const game of allGames) {
     // opponentAdj uses the SHRUNK feature (games-played shrinkage applied),
     // matching exactly what elo.ts will consume once the fitted weight is
@@ -106,6 +118,9 @@ export async function fitJointComponentWeights(
     const features = JOINT_REFIT_COMPONENTS.map((c) =>
       c.key === "pointsPerOpponentAdj" ? computeShrunkOpponentAdjFeature(game, base.opponentAdjShrinkageK) : computeComponentFeature(game, c.key, c.invert),
     );
+    features.forEach((f, i) => {
+      if (f !== null) componentCoverage[i]!.nonNullCount += 1;
+    });
     if (features[finishingDrivesIdx] === null) {
       features[finishingDrivesIdx] = 0;
       finishingDrivesImputed += 1;
@@ -118,6 +133,14 @@ export async function fitJointComponentWeights(
     const actualMarginHome = game.homeScore - game.awayScore;
     X.push(features as number[]);
     y.push(actualMarginHome - baseMargin);
+  }
+
+  if (X.length === 0) {
+    throw new Error(
+      `fitJointComponentWeights: 0 of ${allGames.length} games survived the complete-case gate. Per-component two-sided coverage: ${componentCoverage
+        .map((c) => `${c.label}=${c.nonNullCount}`)
+        .join(", ")}. Whichever count is near 0 is the binding constraint -- check that component's ingest/coverage before re-running.`,
+    );
   }
 
   const cvResults = selectLambda(X, y, lambdaGrid, 5);
@@ -136,6 +159,7 @@ export async function fitJointComponentWeights(
     weights,
     finishingDrivesReal,
     finishingDrivesImputed,
+    componentCoverage,
     intercept: fit.intercept,
     cvResults,
   };
