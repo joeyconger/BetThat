@@ -1442,6 +1442,8 @@ export interface BacktestRunSummary {
   seasonStart: number;
   seasonEnd: number;
   createdAt: Date;
+  /** True if this run was called with a paramsOverride (a sweep/calibration variant) rather than plain current RatingParams -- see backtest/run.ts's runBacktest, which stores params.ratingParams as whatever paramsOverride was (undefined for a true baseline run). Needed to pick a genuine unmodified-baseline comparison run instead of accidentally grabbing a sweep variant that merely happens to share the same season range. */
+  hasParamsOverride: boolean;
 }
 
 export interface BacktestClvRow {
@@ -1526,7 +1528,7 @@ export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
     id: number;
     name: string;
     method: string;
-    params: { sport?: string } | null;
+    params: { sport?: string; ratingParams?: unknown } | null;
     season_start: number;
     season_end: number;
     created_at: Date;
@@ -1539,6 +1541,7 @@ export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
     seasonStart: r.season_start,
     seasonEnd: r.season_end,
     createdAt: r.created_at,
+    hasParamsOverride: r.params?.ratingParams != null,
   }));
 }
 

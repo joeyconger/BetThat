@@ -1542,9 +1542,11 @@ export function startCfbAnchorRemovalBreakdownJob(): Promise<JobStatus> {
       log(job, "No cfb-unanchored-rebaseline-* run found -- run cfb-unanchored-rebaseline first.");
       return;
     }
-    const anchored = runs.find((r) => r.sport === "cfb" && r.seasonStart === 2023 && r.seasonEnd === 2025 && r.id !== unanchored.id && r.id < unanchored.id);
+    const anchored = runs.find(
+      (r) => r.sport === "cfb" && r.seasonStart === 2023 && r.seasonEnd === 2025 && r.id !== unanchored.id && r.id < unanchored.id && !r.hasParamsOverride,
+    );
     if (!anchored) {
-      log(job, "No pre-existing full 2023-2025 CFB run found to compare against -- can't do an apples-to-apples check.");
+      log(job, "No pre-existing UNMODIFIED-baseline (no paramsOverride) full 2023-2025 CFB run found to compare against -- can't do an apples-to-apples check. A sweep-variant run doesn't count -- it confounds the anchor-removal comparison with an unrelated parameter change.");
       return;
     }
     log(job, `Comparing unanchored run ${unanchored.id} (${unanchored.name}) against anchored run ${anchored.id} (${anchored.name}, created ${anchored.createdAt.toISOString()}).`);
