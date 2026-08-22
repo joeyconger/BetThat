@@ -52,16 +52,21 @@ export interface JointRefitResult {
   weights: Record<ComponentParamKey, number>;
   intercept: number;
   cvResults: { lambda: number; mse: number }[];
+  /** Of gamesUsed, how many had a real (non-imputed) pointsPerFinishingDrives feature -- see the zero-imputation doc below. */
+  finishingDrivesReal: number;
+  finishingDrivesImputed: number;
 }
 
 /**
  * Fits all 8 component weights jointly via ridge regression on
- * trainSeasonStart..trainSeasonEnd. Only games with ALL 8 components
- * present are used (complete-case regression) -- opponentAdj is the
- * limiting factor (off_adj/def_adj require prior-week data, so week-1
- * games and a team's first game are always excluded), same population
+ * trainSeasonStart..trainSeasonEnd. Complete-case on 7 of the 8
+ * components -- opponentAdj is the main remaining limiting factor
+ * (off_adj/def_adj require prior-week data, so week-1 games and a team's
+ * first game are always excluded), same population
  * cfb-opponentadjusted-ingest already reported (~693-705 of ~753 games
- * per season).
+ * per season). pointsPerFinishingDrives is zero-imputed rather than
+ * gating rows (see the inline doc where features are built) since its
+ * own two-sided coverage is a structurally non-random ~26%.
  */
 export async function fitJointComponentWeights(
   sport: Sport,
@@ -77,14 +82,36 @@ export async function fitJointComponentWeights(
 
   const X: number[][] = [];
   const y: number[] = [];
+  let finishingDrivesImputed = 0;
+  let finishingDrivesReal = 0;
+  const finishingDrivesIdx = JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === "pointsPerFinishingDrives");
 
   for (const game of allGames) {
     // opponentAdj uses the SHRUNK feature (games-played shrinkage applied),
     // matching exactly what elo.ts will consume once the fitted weight is
     // plugged in -- every other component uses the raw differential.
+    //
+    // pointsPerFinishingDrives is zero-imputed rather than gating the row:
+    // Task 38 found its TWO-SIDED coverage is only ~26% of games (vs ~92%+
+    // for every other component), and -- critically -- this isn't a random
+    // subsample. It's structurally the COMPETITIVE games: a scoring
+    // opportunity requires a drive starting inside the opponent's 40, so a
+    // blowout's losing side frequently has zero, which is exactly the kind
+    // of large-margin game CLV work most needs the OTHER 7 components
+    // calibrated on. Requiring finishingDrives complete would silently
+    // train the whole joint fit on a non-representative, close-games-only
+    // population. Zero (== "no information from this component this game")
+    // is finishingDrives' own neutral value, so this only costs some
+    // attenuation on ITS coefficient -- the other 7 keep the full sample.
     const features = JOINT_REFIT_COMPONENTS.map((c) =>
       c.key === "pointsPerOpponentAdj" ? computeShrunkOpponentAdjFeature(game, base.opponentAdjShrinkageK) : computeComponentFeature(game, c.key, c.invert),
     );
+    if (features[finishingDrivesIdx] === null) {
+      features[finishingDrivesIdx] = 0;
+      finishingDrivesImputed += 1;
+    } else {
+      finishingDrivesReal += 1;
+    }
     if (features.some((f) => f === null)) continue;
 
     const baseMargin = computeBaseMargin(game, base);
@@ -107,6 +134,8 @@ export async function fitJointComponentWeights(
     gamesTotal: allGames.length,
     selectedLambda: bestLambda,
     weights,
+    finishingDrivesReal,
+    finishingDrivesImputed,
     intercept: fit.intercept,
     cvResults,
   };

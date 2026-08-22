@@ -1181,7 +1181,11 @@ export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
     log(job, "Fitting all 8 component weights jointly (ridge, CV-selected lambda) on 2023-2024, holding out 2025 entirely.");
     const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025);
 
-    log(job, `\ntraining games used (complete-case, all 8 components present): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`);
+    log(job, `\ntraining games used (complete-case on 7 components, finishingDrives zero-imputed when missing): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`);
+    log(
+      job,
+      `finishingDrives feature: real (non-imputed) for ${result.refit.finishingDrivesReal} games, zero-imputed for ${result.refit.finishingDrivesImputed} games (Task 38: two-sided coverage is structurally ~26%, so its own coefficient below is attenuated -- the other 7 weights are not)`,
+    );
     log(job, `selected lambda (5-fold CV): ${result.refit.selectedLambda}`);
     log(job, "CV grid (lambda: mse):");
     for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
