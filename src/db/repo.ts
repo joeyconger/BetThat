@@ -522,11 +522,15 @@ export async function getGameSourceIdToIdMap(sport: Sport, season: number): Prom
  * zero-opportunity teams" (expected, no bug) or something else still
  * unaccounted for.
  */
-export async function getFinishingDrivesGameCoverage(sport: Sport, season: number): Promise<{ gamesTotal: number; gamesWithBoth: number }> {
-  const result = await pool.query<{ games_total: string; games_with_both: string }>(
+export async function getFinishingDrivesGameCoverage(
+  sport: Sport,
+  season: number,
+): Promise<{ gamesTotal: number; gamesWithBoth: number; gamesWithBothStatsRows: number }> {
+  const result = await pool.query<{ games_total: string; games_with_both: string; games_with_both_stats_rows: string }>(
     `SELECT
        count(*) AS games_total,
-       count(*) FILTER (WHERE home_stats.off_finishing_drives_ppo IS NOT NULL AND away_stats.off_finishing_drives_ppo IS NOT NULL) AS games_with_both
+       count(*) FILTER (WHERE home_stats.off_finishing_drives_ppo IS NOT NULL AND away_stats.off_finishing_drives_ppo IS NOT NULL) AS games_with_both,
+       count(*) FILTER (WHERE home_stats.game_id IS NOT NULL AND away_stats.game_id IS NOT NULL) AS games_with_both_stats_rows
      FROM games g
      LEFT JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
      LEFT JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
@@ -534,7 +538,11 @@ export async function getFinishingDrivesGameCoverage(sport: Sport, season: numbe
     [sport, season],
   );
   const row = result.rows[0]!;
-  return { gamesTotal: Number(row.games_total), gamesWithBoth: Number(row.games_with_both) };
+  return {
+    gamesTotal: Number(row.games_total),
+    gamesWithBoth: Number(row.games_with_both),
+    gamesWithBothStatsRows: Number(row.games_with_both_stats_rows),
+  };
 }
 
 export interface InsertPlayInput {

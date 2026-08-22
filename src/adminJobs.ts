@@ -821,6 +821,7 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
 
     const actual = await getFinishingDrivesGameCoverage("cfb", year);
     const actualRate = actual.gamesTotal > 0 ? actual.gamesWithBoth / actual.gamesTotal : 0;
+    const statsRowRate = actual.gamesTotal > 0 ? actual.gamesWithBothStatsRows / actual.gamesTotal : 0;
     log(
       job,
       `${year}: ACTUAL database coverage = ${actual.gamesWithBoth}/${actual.gamesTotal} games (${(actualRate * 100).toFixed(1)}%) -- ${
@@ -828,6 +829,10 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
           ? "matches the independence prediction within ~10pts: fully explained by non-FBS games + zero-opportunity teams, not a lookup bug."
           : "DIFFERS meaningfully from the independence prediction -- something beyond non-FBS filtering + zero-opportunity teams is still suppressing coverage."
       }`,
+    );
+    log(
+      job,
+      `${year}: team_game_stats has BOTH sides' rows present (regardless of finishing-drives fields) for ${actual.gamesWithBothStatsRows}/${actual.gamesTotal} games (${(statsRowRate * 100).toFixed(1)}%) -- upsertFinishingDrivesStats is UPDATE-only (see repo.ts doc: "a game with no prior team_game_stats row is a no-op"), so if this rate is also well below the independence prediction, the missing team_game_stats base row -- not the game/team name lookup -- is the real bottleneck.`,
     );
   });
 }
