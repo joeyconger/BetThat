@@ -437,6 +437,15 @@ export async function upsertFinishingDrivesStats(input: UpsertFinishingDrivesSta
   );
 }
 
+/** Same as upsertFinishingDrivesStats but returns the UPDATE's rowCount -- Task 38 diagnostic instrumentation to see whether the WHERE clause is actually matching a row. */
+export async function upsertFinishingDrivesStatsDebug(input: UpsertFinishingDrivesStatsInput): Promise<number> {
+  const result = await pool.query(
+    `UPDATE team_game_stats SET off_finishing_drives_ppo = $3, def_finishing_drives_ppo = $4 WHERE game_id = $1 AND team_id = $2`,
+    [input.gameId, input.teamId, input.offFinishingDrivesPpo, input.defFinishingDrivesPpo],
+  );
+  return result.rowCount ?? -1;
+}
+
 export interface UpsertSpecialTeamsStatsInput {
   gameId: number;
   teamId: number;

@@ -16,6 +16,7 @@ import {
   getGameSourceIdToIdMap,
   getFinishingDrivesGameCoverage,
   getGameParticipantsBySourceId,
+  upsertFinishingDrivesStatsDebug,
 } from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
@@ -868,6 +869,72 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
       job,
       `${year}: team_game_stats has BOTH sides' rows present (regardless of finishing-drives fields) for ${actual.gamesWithBothStatsRows}/${actual.gamesTotal} games (${(statsRowRate * 100).toFixed(1)}%) -- upsertFinishingDrivesStats is UPDATE-only (see repo.ts doc: "a game with no prior team_game_stats row is a no-op"), so if this rate is also well below the independence prediction, the missing team_game_stats base row -- not the game/team name lookup -- is the real bottleneck.`,
     );
+
+    // Live write instrumentation: game/team/participant all check out on
+    // paper, and a fresh production ingest run (immediately before this
+    // job) still left DB coverage unchanged -- so actually perform the
+    // UPDATE for every correct-participant opportunity entry and record
+    // its real rowCount, to see directly whether the WHERE clause matches
+    // at write time.
+    interface TeamGameAgg {
+      offPoints: number;
+      offOpportunities: number;
+      defPoints: number;
+      defOpportunities: number;
+    }
+    const agg = new Map<string, TeamGameAgg>();
+    function get(gameId: number, team: string): TeamGameAgg {
+      const key = `${gameId}:${team}`;
+      let entry = agg.get(key);
+      if (!entry) {
+        entry = { offPoints: 0, offOpportunities: 0, defPoints: 0, defOpportunities: 0 };
+        agg.set(key, entry);
+      }
+      return entry;
+    }
+    for (const drive of drives) {
+      if (drive.startYardsToGoal > FINISHING_DRIVES_DIAGNOSE_YARDS_TO_GOAL) continue;
+      const points = drive.endOffenseScore - drive.startOffenseScore;
+      const offEntry = get(drive.gameId, drive.offense);
+      offEntry.offPoints += points;
+      offEntry.offOpportunities += 1;
+      const defEntry = get(drive.gameId, drive.defense);
+      defEntry.defPoints += points;
+      defEntry.defOpportunities += 1;
+    }
+
+    let attempted = 0;
+    let rowCountOne = 0;
+    let rowCountZero = 0;
+    let rowCountOther = 0;
+    const zeroRowSamples: string[] = [];
+    for (const [key, entry] of agg) {
+      const sep = key.indexOf(":");
+      const gameIdStr = key.slice(0, sep);
+      const team = key.slice(sep + 1);
+      const gameInfo = participants.get(gameIdStr);
+      const teamId = teamMap.get(team);
+      if (!gameInfo || teamId == null) continue;
+      if (teamId !== gameInfo.homeTeamId && teamId !== gameInfo.awayTeamId) continue;
+      attempted += 1;
+      const rowCount = await upsertFinishingDrivesStatsDebug({
+        gameId: gameInfo.gameId,
+        teamId,
+        offFinishingDrivesPpo: entry.offOpportunities === 0 ? null : entry.offPoints / entry.offOpportunities,
+        defFinishingDrivesPpo: entry.defOpportunities === 0 ? null : entry.defPoints / entry.defOpportunities,
+      });
+      if (rowCount === 1) rowCountOne += 1;
+      else if (rowCount === 0) {
+        rowCountZero += 1;
+        if (zeroRowSamples.length < 15) zeroRowSamples.push(`game source_id=${gameIdStr} (resolved gameId=${gameInfo.gameId}), team="${team}" (resolved teamId=${teamId})`);
+      } else rowCountOther += 1;
+    }
+    log(job, `${year}: LIVE write test -- attempted ${attempted} real UPDATEs, rowCount=1 (success) for ${rowCountOne}, rowCount=0 (silently matched nothing) for ${rowCountZero}, other rowCount for ${rowCountOther}`);
+    if (zeroRowSamples.length > 0) {
+      log(job, `${year}: sample rowCount=0 entries: ${zeroRowSamples.join(" | ")}`);
+    }
+    const reCheck = await getFinishingDrivesGameCoverage("cfb", year);
+    log(job, `${year}: post-write-test database coverage = ${reCheck.gamesWithBoth}/${reCheck.gamesTotal} games (was ${actual.gamesWithBoth}/${actual.gamesTotal} before this job's own writes)`);
   });
 }
 
