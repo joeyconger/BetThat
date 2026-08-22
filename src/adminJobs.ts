@@ -1686,6 +1686,100 @@ export function startCfbAnchorRemovalBreakdownJob(): Promise<JobStatus> {
 }
 
 /**
+ * Cheap test of whether a same-data preseason prior fills the early-season
+ * gap the anchor-removal breakdown found was NOT actually there in a clean
+ * form (mixed, non-monotonic bucket differences, no statistically
+ * significant paired-test result) -- per review, the real signal in that
+ * breakdown was that the model itself (both anchored and unanchored) sits
+ * BELOW its own later-season cover rate in the first four weeks, which is
+ * consistent with thin in-season data, just not with the market anchor
+ * having been the fix for it. Rather than building Part 2's full ingestion
+ * (returning production/talent/portal/polls -- several days of work plus a
+ * mandatory hand-verification pass) on spec, this sweeps priorShrinkK
+ * (shrink the in-season rating toward the prior season's own RAW final
+ * rating, re-injected every week, fading by combined games played -- see
+ * RatingParams.priorShrinkK's doc) using data already in hand, and reports
+ * the same games-played-bucketed breakdown for each k. If early-bucket
+ * cover moves meaningfully off the k=0 baseline, a prior helps and Part 2's
+ * fuller version is worth building on top of it. If it stays flat across
+ * the whole grid, early-season CFB is hard to predict from any prior and
+ * Part 2 should be dropped.
+ */
+export function startCfbPriorShrinkSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-prior-shrink-sweep", async (job) => {
+    log(
+      job,
+      "Sweeping priorShrinkK (shrink toward prior season's own final rating, re-injected every week by combined games played) on full 2023-2025 CFB, bucketed by combined games played -- testing whether a same-data prior helps before committing to Part 2's full ingestion.",
+    );
+    const base = getRatingParams("cfb");
+    const kGrid = [0, 2, 4, 8, 12, 16, 24, 32];
+
+    const gamesPlayedBySeason = new Map<number, Map<number, number>>();
+    for (const season of [2023, 2024, 2025]) {
+      gamesPlayedBySeason.set(season, await getCombinedGamesPlayedByGame("cfb", season));
+    }
+    function combinedGamesPlayed(gameId: number): number | null {
+      for (const map of gamesPlayedBySeason.values()) {
+        const v = map.get(gameId);
+        if (v !== undefined) return v;
+      }
+      return null;
+    }
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: "0-8 (roughly weeks 1-4)", min: 0, max: 8 },
+      { label: "9-16 (roughly weeks 5-8)", min: 9, max: 16 },
+      { label: "17-24 (roughly weeks 9-12)", min: 17, max: 24 },
+      { label: "25+ (late season)", min: 25, max: Infinity },
+    ];
+
+    for (const k of kGrid) {
+      const result = await runBacktest({
+        name: `cfb-prior-shrink-sweep-k${k}`,
+        sport: "cfb",
+        seasonStart: 2023,
+        seasonEnd: 2025,
+        paramsOverride: { ...base, priorShrinkK: k },
+      });
+      const overall = await getOverallReport(result.backtestRunId);
+      const opening = await getOpeningCoverRate(result.backtestRunId);
+      const details = await getBacktestGameDetails(result.backtestRunId);
+      log(
+        job,
+        `k=${k}: ${result.scored} games, overall cover=${fmtPct(overall.coverRate)} avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}, cover vs open=${fmtPct(opening.coverRateVsOpening)} (run ${result.backtestRunId})`,
+      );
+      for (const bucket of buckets) {
+        let n = 0;
+        let coveredCount = 0;
+        let coveredN = 0;
+        let clvSum = 0;
+        let clvN = 0;
+        for (const [id, d] of details) {
+          const cgp = combinedGamesPlayed(id);
+          if (cgp === null || cgp < bucket.min || cgp > bucket.max) continue;
+          n += 1;
+          if (d.covered !== null) {
+            coveredN += 1;
+            coveredCount += d.covered ? 1 : 0;
+          }
+          if (d.clv !== null) {
+            clvN += 1;
+            clvSum += d.clv;
+          }
+        }
+        log(
+          job,
+          `  ${bucket.label}: ${n} games -- cover=${coveredN > 0 ? ((coveredCount / coveredN) * 100).toFixed(1) + "%" : "n/a"} avgClv=${clvN > 0 ? (clvSum / clvN).toFixed(3) : "n/a"}`,
+        );
+      }
+    }
+    log(
+      job,
+      "\nIf the 0-8 bucket's cover rate moves meaningfully off the k=0 row as k increases, a same-data prior is real and Part 2's fuller ingestion (returning production/talent/portal/polls) is worth building on top of it as a better starting point than last year's rating alone. If it stays flat across the whole grid, early-season CFB is hard to predict from any prior and Part 2 should be dropped rather than expanded.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1977,6 +2071,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-clv-frozen-ratings": startCfbClvFrozenRatingsJob,
   "cfb-unanchored-rebaseline": startCfbUnanchoredRebaselineJob,
   "cfb-anchor-removal-breakdown": startCfbAnchorRemovalBreakdownJob,
+  "cfb-prior-shrink-sweep": startCfbPriorShrinkSweepJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,

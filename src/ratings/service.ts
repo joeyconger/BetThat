@@ -13,7 +13,14 @@ import {
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
 import { getRatingParams, type RatingParams } from "./config.js";
-import { computeSeasonRatings, computeInitialRating, predictSpread, zScore, type TeamRatingState } from "./elo.js";
+import {
+  computeSeasonRatings,
+  computeInitialRating,
+  predictSpread,
+  zScore,
+  shrinkTowardPrior,
+  type TeamRatingState,
+} from "./elo.js";
 
 const METHOD = "elo" as const;
 
@@ -82,6 +89,23 @@ async function predictAndStoreWeek(
   const ratingState = await computeAndStoreRatings(sport, season, week - 1, paramsOverride);
   const games = await getGamesForWeek(sport, season, week);
 
+  // Only fetched/used when priorShrinkK > 0 -- see shrinkTowardPrior's doc.
+  // Raw prior-season final rating, NOT computeInitialRating's carryover/
+  // SP+-blended seed -- this is a separate, every-week re-injection, not a
+  // one-time starting point.
+  const priorFinalRatings = new Map<number, number>();
+  if (params.priorShrinkK > 0) {
+    const teamIds = new Set<number>();
+    for (const game of games) {
+      teamIds.add(game.homeTeamId);
+      teamIds.add(game.awayTeamId);
+    }
+    for (const teamId of teamIds) {
+      const priorRating = await getPriorSeasonFinalRating(teamId, sport, season - 1, METHOD);
+      if (priorRating !== undefined) priorFinalRatings.set(teamId, priorRating);
+    }
+  }
+
   // As-of-end-of-prior-week, same invariant as the ratings themselves — never
   // this week's own CFBD Elo update. CFB only; NFL's map is always empty
   // since CFBD doesn't cover it, so homeEloZ/awayEloZ stay undefined there.
@@ -128,6 +152,16 @@ async function predictAndStoreWeek(
     const homeWeeklySpZ = hasWeeklySpSample && homeWeeklySp !== undefined ? zScore(homeWeeklySp, weeklySpValues) : undefined;
     const awayWeeklySpZ = hasWeeklySpSample && awayWeeklySp !== undefined ? zScore(awayWeeklySp, weeklySpValues) : undefined;
 
+    const combinedGamesPlayed = home.gamesPlayed + away.gamesPlayed;
+    const homeRatingForPrediction =
+      params.priorShrinkK > 0
+        ? shrinkTowardPrior(home.rating, priorFinalRatings.get(game.homeTeamId), combinedGamesPlayed, params.priorShrinkK)
+        : home.rating;
+    const awayRatingForPrediction =
+      params.priorShrinkK > 0
+        ? shrinkTowardPrior(away.rating, priorFinalRatings.get(game.awayTeamId), combinedGamesPlayed, params.priorShrinkK)
+        : away.rating;
+
     // marketSpreadHome is fetched above and stored below (for display and
     // for CLV scoring, per the anchor-removal decision -- see
     // ratings/elo.ts's predictSpread doc) but deliberately NOT passed into
@@ -135,8 +169,8 @@ async function predictAndStoreWeek(
     // line as an input at all.
     const prediction = predictSpread(
       {
-        homeRating: home.rating,
-        awayRating: away.rating,
+        homeRating: homeRatingForPrediction,
+        awayRating: awayRatingForPrediction,
         homeGamesPlayed: home.gamesPlayed,
         awayGamesPlayed: away.gamesPlayed,
         homeEloZ,

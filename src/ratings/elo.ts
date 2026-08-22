@@ -538,6 +538,28 @@ export function computeInitialRating(
   return (1 - params.spPriorWeight) * carryover + params.spPriorWeight * priorSpRating;
 }
 
+/**
+ * Blends the in-season accumulated rating with the prior season's RAW
+ * final rating (getPriorSeasonFinalRating -- not the carryover/SP+-blended
+ * computeInitialRating seed), weight fading from the prior toward pure
+ * in-season as combinedGamesPlayed grows -- the standard n/(n+k)
+ * empirical-Bayes shape used elsewhere in this codebase (opponentAdjShrinkageK,
+ * the old market shrinkage). Applied every week at prediction time (see
+ * RatingParams.priorShrinkK's doc), not just as a one-time season seed.
+ * k<=0 or no prior rating available both fall back to pure in-season
+ * rating unshrunk.
+ */
+export function shrinkTowardPrior(
+  inSeasonRating: number,
+  priorFinalRating: number | undefined,
+  combinedGamesPlayed: number,
+  k: number,
+): number {
+  if (priorFinalRating === undefined || k <= 0) return inSeasonRating;
+  const weight = combinedGamesPlayed / (combinedGamesPlayed + k);
+  return weight * inSeasonRating + (1 - weight) * priorFinalRating;
+}
+
 /** Standard z-score: how many standard deviations `value` is from the mean of `population`. 0 if the population has no spread. */
 export function zScore(value: number, population: number[]): number {
   const n = population.length;
