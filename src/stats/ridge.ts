@@ -157,6 +157,57 @@ export function predict(X: Matrix, fit: RidgeFitResult): number[] {
 }
 
 /**
+ * Variance inflation factor per column: VIF_j = 1/(1 - R^2_j), where R^2_j
+ * comes from an UNPENALIZED (lambda=0) OLS fit of column j on every OTHER
+ * column. High VIF means column j is well-predicted by some combination
+ * of the rest -- i.e. it (and whichever columns predict it) are
+ * collinear, so ridge will split credit between them in a way that isn't
+ * individually interpretable no matter how much data you have. Pairwise
+ * correlation misses this: a set of 3+ columns can be collectively
+ * near-degenerate (each one predictable from a COMBINATION of the others)
+ * with no single pair correlated enough to look alarming -- VIF (unlike
+ * pairwise correlation) catches that because it regresses each column on
+ * ALL the others at once, not one at a time.
+ *
+ * Conventional rule of thumb: VIF > 5 worth a look, VIF > 10 means that
+ * column's own coefficient is close to uninterpretable in isolation.
+ * Uses lambda=0 deliberately (not the caller's regularization strength)
+ * because VIF is a property of the DESIGN MATRIX itself, independent of
+ * whatever penalty will later be applied to the actual fit.
+ */
+export function computeVif(X: Matrix): number[] {
+  const n = X.length;
+  const p = X[0]?.length ?? 0;
+  if (n === 0 || p === 0) return [];
+
+  return Array.from({ length: p }, (_, j) => {
+    const target = X.map((row) => row[j]!);
+    const others = X.map((row) => row.filter((_, k) => k !== j));
+    if (others[0]?.length === 0) return 1; // only one column total -- nothing to be collinear with
+
+    let fit: RidgeFitResult;
+    try {
+      fit = ridgeFit(others, target, 0);
+    } catch {
+      // The OTHER columns are themselves singular/near-perfectly collinear
+      // -- an even more extreme case than a high-but-finite VIF. Infinity
+      // is the semantically correct answer here, not a fallback: it means
+      // this column's own coefficient genuinely cannot be identified from
+      // this design matrix.
+      return Infinity;
+    }
+    const preds = predict(others, fit);
+    const targetMean = target.reduce((s, v) => s + v, 0) / n;
+    const ssRes = preds.reduce((s, p, i) => s + (p - target[i]!) ** 2, 0);
+    const ssTot = target.reduce((s, v) => s + (v - targetMean) ** 2, 0);
+    if (ssTot < 1e-12) return 1; // column j is constant -- R^2 undefined, not collinear with anything
+    const rSquared = 1 - ssRes / ssTot;
+    const clampedRSquared = Math.min(rSquared, 1 - 1e-9); // guard against R^2 -> 1 (perfect collinearity) blowing up to Infinity from float noise
+    return 1 / (1 - clampedRSquared);
+  });
+}
+
+/**
  * Assigns each row to a fold index. Without `groups`, folds are contiguous
  * slices of input order (the original behavior -- fine for row-independent
  * data). With `groups`, whole groups are assigned to folds round-robin (by

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { transpose, multiply, multiplyVector, solveLinearSystem, ridgeFit, predict, crossValidatedMse, selectLambda, assignFolds } from "./ridge.js";
+import { transpose, multiply, multiplyVector, solveLinearSystem, ridgeFit, predict, crossValidatedMse, selectLambda, assignFolds, computeVif } from "./ridge.js";
 
 test("transpose flips rows and columns", () => {
   assert.deepEqual(transpose([[1, 2, 3], [4, 5, 6]]), [[1, 4], [2, 5], [3, 6]]);
@@ -148,4 +148,34 @@ test("crossValidatedMse with groups keeps every row of a group on the same side 
   const y = groups.map((g, i) => (g === "w1" ? 10 : g === "w2" ? -10 : 0) + i * 0.01);
   const mse = crossValidatedMse(X, y, 1, 3, groups);
   assert.ok(Number.isFinite(mse) && mse >= 0, `mse should be finite and non-negative (got ${mse})`);
+});
+
+test("computeVif returns near-1 for genuinely independent columns", () => {
+  // Deterministic pseudo-random-looking but independent columns -- no
+  // linear relationship between them, so each should be poorly predicted
+  // by the others (VIF close to 1, the floor).
+  const n = 60;
+  const X = Array.from({ length: n }, (_, i) => [Math.sin(i), Math.cos(i * 2.7), (i % 5) - 2]);
+  const vifs = computeVif(X);
+  assert.equal(vifs.length, 3);
+  for (const v of vifs) {
+    assert.ok(v < 3, `expected a low VIF for an independent column (got ${v})`);
+  }
+});
+
+test("computeVif flags a column that is a near-exact linear combination of two others", () => {
+  const n = 40;
+  const X = Array.from({ length: n }, (_, i) => {
+    const a = Math.sin(i);
+    const b = i % 7;
+    return [a, b, a + b + 0.001 * ((i % 3) - 1)]; // third column ~= a+b, tiny noise to avoid exact singularity
+  });
+  const vifs = computeVif(X);
+  assert.ok(vifs[2]! > 50, `the near-linear-combination column should have a very high VIF (got ${vifs[2]})`);
+});
+
+test("computeVif returns 1 for a constant column (no variance to explain)", () => {
+  const X = Array.from({ length: 10 }, (_, i) => [i, 5]); // second column is constant
+  const vifs = computeVif(X);
+  assert.equal(vifs[1], 1);
 });

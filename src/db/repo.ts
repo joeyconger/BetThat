@@ -1465,6 +1465,15 @@ export async function getBacktestClvRows(backtestRunId: number): Promise<Backtes
   }));
 }
 
+/** Per-game CLV for one backtest run, keyed by game_id -- lets a caller align two runs' CLV on the SAME games for a paired significance test (see stats/significance.ts's pairedTTest). */
+export async function getBacktestClvByGame(backtestRunId: number): Promise<Map<number, number>> {
+  const result = await pool.query<{ game_id: number; clv: number }>(
+    `SELECT game_id, clv FROM backtest_results WHERE backtest_run_id = $1 AND clv IS NOT NULL`,
+    [backtestRunId],
+  );
+  return new Map(result.rows.map((r) => [r.game_id, r.clv]));
+}
+
 export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
   const result = await pool.query<{
     id: number;

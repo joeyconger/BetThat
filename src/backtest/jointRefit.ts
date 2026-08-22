@@ -2,7 +2,7 @@ import { getSeasonGamesForRating } from "../db/repo.js";
 import type { GameForRating, Sport } from "../db/repo.js";
 import { getRatingParams } from "../ratings/config.js";
 import type { RatingParams } from "../ratings/config.js";
-import { ridgeFit, selectLambda } from "../stats/ridge.js";
+import { ridgeFit, selectLambda, computeVif } from "../stats/ridge.js";
 import type { ComponentParamKey } from "./sweep.js";
 import { runBacktest } from "./run.js";
 import { getOverallReport, getOpeningCoverRate } from "./report.js";
@@ -88,6 +88,8 @@ export interface JointRefitResult {
   imputedComponents: { key: ComponentParamKey; real: number; imputed: number; missingIndicatorCoefficient: number }[];
   /** Per-component two-sided (both home and away) non-null count across ALL candidate games, counted BEFORE any gating or imputation -- see fitJointComponentWeights' inline doc. */
   componentCoverage: { key: ComponentParamKey; label: string; nonNullCount: number }[];
+  /** Variance inflation factor per design-matrix column (8 components + one per IMPUTED_COMPONENTS indicator) -- see stats/ridge.ts's computeVif doc. VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone. */
+  vif: { label: string; vif: number }[];
 }
 
 /**
@@ -173,6 +175,16 @@ export async function fitJointComponentWeights(
     );
   }
 
+  // VIF on the raw (pre-standardization -- VIF is scale-invariant) design
+  // matrix, computed on the SAME X the fit uses: pairwise correlation can
+  // miss a 3+-way collinear cluster (each column predictable from a
+  // COMBINATION of the others with no single alarming pair), which VIF
+  // catches by regressing each column on ALL the others at once. See
+  // stats/ridge.ts's computeVif doc for how to read the numbers.
+  const vifValues = computeVif(X);
+  const vifLabels = [...JOINT_REFIT_COMPONENTS.map((c) => c.label), ...IMPUTED_COMPONENTS.map((key) => `${key}_missing_indicator`)];
+  const vif = vifLabels.map((label, i) => ({ label, vif: vifValues[i]! }));
+
   const cvResults = selectLambda(X, y, lambdaGrid, 5, groups);
   const bestLambda = cvResults[0]!.lambda;
   const fit = ridgeFit(X, y, bestLambda);
@@ -195,6 +207,7 @@ export async function fitJointComponentWeights(
     weights,
     imputedComponents,
     componentCoverage,
+    vif,
     intercept: fit.intercept,
     cvResults,
   };

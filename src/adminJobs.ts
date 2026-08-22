@@ -19,9 +19,11 @@ import {
   upsertFinishingDrivesStatsDebug,
   debugReadFinishingDrivesRow,
   getBacktestClvRows,
+  getBacktestClvByGame,
   listBacktestRuns,
 } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
+import { pairedTTest } from "./stats/significance.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
@@ -1199,6 +1201,10 @@ export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
         `  ${c.key}: real=${c.real}, imputed=${c.imputed}, missingness-indicator coefficient=${c.missingIndicatorCoefficient.toFixed(4)} (large magnitude here means missingness itself, not the raw value, is carrying the signal -- treat the raw-value weight below with that in mind)`,
       );
     }
+    log(job, "\nvariance inflation factors (VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone):");
+    for (const v of result.refit.vif) {
+      log(job, `  ${v.label}: ${Number.isFinite(v.vif) ? v.vif.toFixed(2) : "Infinity (perfectly/near-perfectly collinear with the rest)"}`);
+    }
     log(job, `selected lambda (5-fold CV, grouped by season-week): ${result.refit.selectedLambda}`);
     log(job, "CV grid (lambda: mse):");
     for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
@@ -1269,6 +1275,27 @@ export function startCfbClvPlaceboJob(): Promise<JobStatus> {
               : "placebo mean is near 0, as a sound CLV metric should be -- the real result isn't explained by a bias in the metric itself."
           }`,
       );
+    }
+
+    if (handTuned && joint) {
+      const handTunedClv = await getBacktestClvByGame(handTuned.id);
+      const jointClv = await getBacktestClvByGame(joint.id);
+      const commonGameIds = [...handTunedClv.keys()].filter((id) => jointClv.has(id));
+      if (commonGameIds.length >= 2) {
+        const a = commonGameIds.map((id) => handTunedClv.get(id)!);
+        const b = commonGameIds.map((id) => jointClv.get(id)!);
+        const paired = pairedTTest(a, b);
+        log(
+          job,
+          `\npaired test, jointly-fit CLV vs hand-tuned CLV on the SAME ${paired.n} holdout games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p(two-sided)=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05
+              ? "statistically significant at p<0.05."
+              : "NOT statistically significant -- consistent with 'no evidence the joint refit beats hand-tuning,' not 'the joint refit is better.'"
+          }`,
+        );
+      } else {
+        log(job, `\ncould not run the paired CLV test -- only ${commonGameIds.length} games in common between the two runs (need matching game_ids on both sides).`);
+      }
     }
   });
 }
