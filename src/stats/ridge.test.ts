@@ -179,3 +179,19 @@ test("computeVif returns 1 for a constant column (no variance to explain)", () =
   const vifs = computeVif(X);
   assert.equal(vifs[1], 1);
 });
+
+test("computeVif: a constant column among the OTHERS doesn't poison every other column's VIF", () => {
+  // Regression test: a constant column (e.g. a missingness indicator that
+  // never fires in this sample), after standardization, becomes all
+  // zeros -- if left in the "others" predictor set, that makes the
+  // unpenalized OLS matrix singular for every column that includes it,
+  // silently forcing VIF=Infinity across the WHOLE output. Two genuinely
+  // independent columns plus one constant column should NOT all come
+  // back Infinity.
+  const n = 50;
+  const X = Array.from({ length: n }, (_, i) => [Math.sin(i), Math.cos(i * 2.3), 0]); // third column always 0
+  const vifs = computeVif(X);
+  assert.equal(vifs[2], 1, "the constant column itself should report VIF=1");
+  assert.ok(vifs[0]! < 5, `the constant column must not make an independent column's VIF blow up (got ${vifs[0]})`);
+  assert.ok(vifs[1]! < 5, `the constant column must not make an independent column's VIF blow up (got ${vifs[1]})`);
+});

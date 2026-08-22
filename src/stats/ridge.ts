@@ -180,10 +180,27 @@ export function computeVif(X: Matrix): number[] {
   const p = X[0]?.length ?? 0;
   if (n === 0 || p === 0) return [];
 
+  // A constant (zero-variance) column -- e.g. a missingness indicator
+  // that never fires in this sample -- can't meaningfully be "collinear"
+  // with anything (VIF=1, matches the target-is-constant case below), but
+  // more importantly it must be EXCLUDED from every OTHER column's
+  // predictor set: after standardization a constant column becomes all
+  // zeros, which makes the unpenalized OLS matrix singular for every
+  // column that includes it as a predictor -- silently forcing VIF=Infinity
+  // across the WHOLE output, an artifact of this function, not a finding
+  // about the real data's collinearity.
+  const hasVariance = Array.from({ length: p }, (_, j) => {
+    const mean = X.reduce((s, row) => s + row[j]!, 0) / n;
+    const variance = X.reduce((s, row) => s + (row[j]! - mean) ** 2, 0) / n;
+    return variance > 1e-12;
+  });
+
   return Array.from({ length: p }, (_, j) => {
+    if (!hasVariance[j]) return 1; // constant column -- nothing to explain, VIF undefined -> floor
     const target = X.map((row) => row[j]!);
-    const others = X.map((row) => row.filter((_, k) => k !== j));
-    if (others[0]?.length === 0) return 1; // only one column total -- nothing to be collinear with
+    const otherIdx = Array.from({ length: p }, (_, k) => k).filter((k) => k !== j && hasVariance[k]);
+    if (otherIdx.length === 0) return 1; // no other informative column to be collinear with
+    const others = X.map((row) => otherIdx.map((k) => row[k]!));
 
     let fit: RidgeFitResult;
     try {
