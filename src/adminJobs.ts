@@ -1383,6 +1383,12 @@ export function startCfbClvPlaceboJob(): Promise<JobStatus> {
       log(job, "\n[naive-baseline] does the hand-tuned model's CLV actually differ from a model with all 8 components zeroed out (same market-anchoring)?");
       await logPairedClvTest(job, "naive-baseline", "hand-tuned", "naive-baseline (0 components)", contemporaneousHandTuned, naiveBaseline);
     }
+
+    const frozenRatings = runs.find((r) => r.name.startsWith("jointrefit-frozenratings-cfb-test"));
+    if (frozenRatings && contemporaneousHandTuned) {
+      log(job, "\n[frozen-ratings] does the hand-tuned model's CLV actually differ from ratings frozen at prior-season-final (no in-season learning, same market-shrinkage)?");
+      await logPairedClvTest(job, "frozen-ratings", "hand-tuned", "frozen-ratings (baseK=0)", contemporaneousHandTuned, frozenRatings);
+    }
   });
 }
 
@@ -1433,6 +1439,50 @@ export function startCfbClvNaiveBaselineJob(): Promise<JobStatus> {
       `Compare this to the ~0.78-0.91 avgClv the hand-tuned and jointly-fit runs (with all 8 components active) have shown. ` +
         `If this naive number lands in the same range, the CLV is coming from market-anchoring/EPA alone, not from the 8 components' contribution -- ` +
         `run cfb-clv-placebo to see the hand-tuned/jointly-fit numbers again for direct comparison.`,
+    );
+  });
+}
+
+/**
+ * Third placebo, per review: the naive baseline above still lets ratings
+ * ADAPT in-season (EPA/success-rate updates every week) -- it establishes
+ * "components add nothing," not "where does +0.8 CLV come from." This
+ * freezes each team's rating at its prior-season-final carryover value
+ * for the ENTIRE 2025 season (baseK=0 means `rating += baseK*error`
+ * never moves the rating, while gamesPlayed still increments normally --
+ * see ratings/elo.ts's computeSeasonRatings tail), so market-shrinkage
+ * behaves EXACTLY as it always does (same modelWeight/combinedGames
+ * formula), but in-season learning is switched off entirely. If avgClv
+ * still lands near 0.78-0.91 with stale ratings, the number is coming
+ * from market-anchoring mechanics (or from the prior-season carryover
+ * itself), not from any in-season adaptation -- which would mean +0.8
+ * is an artifact of how picks are selected relative to the opening line
+ * rather than genuine forecast skill, and shouldn't be treated as a
+ * baseline worth building on.
+ */
+export function startCfbClvFrozenRatingsJob(): Promise<JobStatus> {
+  return runJob("cfb-clv-frozen-ratings", async (job) => {
+    const base = getRatingParams("cfb");
+    const frozenParams: RatingParams = { ...base, baseK: 0 };
+    log(job, "Running with baseK=0 -- ratings frozen at their prior-season-final carryover value all season, same market-shrinkage mechanics -- on the 2025 holdout.");
+    const frozen = await runBacktest({
+      name: "jointrefit-frozenratings-cfb-test2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride: frozenParams,
+    });
+    const overall = await getOverallReport(frozen.backtestRunId);
+    const opening = await getOpeningCoverRate(frozen.backtestRunId);
+    log(
+      job,
+      `frozen-ratings baseline (run ${frozen.backtestRunId}): ${frozen.scored} games, cover vs open=${fmtPct(opening.coverRateVsOpening)}, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}`,
+    );
+    log(
+      job,
+      `Compare this to the ~0.78-0.91 avgClv every OTHER configuration (hand-tuned, jointly-fit, naive baseline) has shown. ` +
+        `If this ALSO lands in the same range despite ratings never updating in-season, the CLV is coming from market-anchoring mechanics/prior-season carryover, not from in-season learning -- ` +
+        `run the paired CLV test (see cfb-clv-placebo's pattern) against the hand-tuned run to confirm statistically rather than eyeballing it.`,
     );
   });
 }
@@ -1746,6 +1796,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-jointrefit-predictive-holdout": startCfbJointRefitPredictiveHoldoutJob,
   "cfb-jointrefit-conditional-epa": startCfbJointRefitConditionalEpaJob,
   "cfb-clv-naive-baseline": startCfbClvNaiveBaselineJob,
+  "cfb-clv-frozen-ratings": startCfbClvFrozenRatingsJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
