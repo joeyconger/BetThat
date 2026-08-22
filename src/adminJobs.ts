@@ -48,7 +48,8 @@ import {
   runComponentSweep,
   runComponentSweepWalkforward,
 } from "./backtest/sweep.js";
-import { runJointRefitHoldout } from "./backtest/jointRefit.js";
+import { runJointRefitHoldout, fitJointComponentWeights } from "./backtest/jointRefit.js";
+import type { JointRefitResult } from "./backtest/jointRefit.js";
 import type { ComponentParamKey } from "./backtest/sweep.js";
 import {
   getOverallReport,
@@ -1183,31 +1184,38 @@ export function startCfbWalkforwardAllComponentsJob(): Promise<JobStatus> {
  * weights against the newly jointly-fit weights on the SAME untouched
  * 2025 holdout.
  */
-function logJointRefitResult(job: JobStatus, result: Awaited<ReturnType<typeof runJointRefitHoldout>>): void {
+function logJointRefitFit(job: JobStatus, refit: JointRefitResult): void {
   log(job, "\nper-component two-sided coverage (non-null count, before any gating/imputation):");
-  for (const c of result.refit.componentCoverage) {
-    log(job, `  ${c.label}: ${c.nonNullCount} of ${result.refit.gamesTotal}`);
+  for (const c of refit.componentCoverage) {
+    log(job, `  ${c.label}: ${c.nonNullCount} of ${refit.gamesTotal}`);
   }
-  log(job, `\ntraining games used (complete-case on the non-imputed components, value+indicator on the rest): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`);
+  log(job, `\ntraining games used (complete-case on the non-imputed components, value+indicator on the rest): ${refit.gamesUsed} of ${refit.gamesTotal}`);
   log(job, "imputed components (value+indicator instead of a hard gate):");
-  for (const c of result.refit.imputedComponents) {
+  for (const c of refit.imputedComponents) {
     log(
       job,
       `  ${c.key}: real=${c.real}, imputed=${c.imputed}, missingness-indicator coefficient=${c.missingIndicatorCoefficient.toFixed(4)} (large magnitude here means missingness itself, not the raw value, is carrying the signal -- treat the raw-value weight below with that in mind)`,
     );
   }
   log(job, "\nvariance inflation factors (VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone):");
-  for (const v of result.refit.vif) {
+  for (const v of refit.vif) {
     log(job, `  ${v.label}: ${Number.isFinite(v.vif) ? v.vif.toFixed(2) : "Infinity (perfectly/near-perfectly collinear with the rest)"}`);
   }
-  log(job, `selected lambda (5-fold CV, grouped by season-week): ${result.refit.selectedLambda}`);
+  log(job, `selected lambda (5-fold CV, grouped by season-week): ${refit.selectedLambda}`);
   log(job, "CV grid (lambda: mse):");
-  for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
+  for (const r of refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
 
-  log(job, `\njointly-fit weights (intercept ${result.refit.intercept.toFixed(3)}):`);
-  for (const [key, value] of Object.entries(result.refit.weights)) {
+  if (refit.baseMarginCoefficient !== null) {
+    log(job, `\nbaseMargin coefficient (the 9th feature -- EPA/success-rate core): ${refit.baseMarginCoefficient.toFixed(4)}`);
+  }
+  log(job, `\njointly-fit weights (intercept ${refit.intercept.toFixed(3)}):`);
+  for (const [key, value] of Object.entries(refit.weights)) {
     log(job, `  ${key} = ${(value as number).toFixed(4)}`);
   }
+}
+
+function logJointRefitResult(job: JobStatus, result: Awaited<ReturnType<typeof runJointRefitHoldout>>): void {
+  logJointRefitFit(job, result.refit);
 
   log(
     job,
@@ -1253,6 +1261,37 @@ export function startCfbJointRefitPredictiveHoldoutJob(): Promise<JobStatus> {
     );
     const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025, undefined, "predictive");
     logJointRefitResult(job, result);
+  });
+}
+
+/**
+ * Direct test of the redundancy hypothesis this whole thread has been
+ * circling (per review): every one of the 8 components is a reweighting
+ * of the SAME play-by-play EPA already summarizes (success rate is EPA
+ * thresholded, explosiveness is EPA conditioned on success, down-splits
+ * are EPA partitioned by situation, opponentAdj is EPA opponent-adjusted).
+ * If EPA is close to a sufficient statistic for play-level performance,
+ * the 8 components have little left to contribute ONCE EPA's own
+ * predictive content is actually in the design matrix, rather than
+ * pre-subtracted out of the target (where their coefficients silently
+ * absorb whatever EPA would have explained). This is a fit-only
+ * diagnostic (no holdout backtest -- baseMargin's coefficient isn't a
+ * RatingParams field, so there's nothing to deploy here, only something
+ * to read): if the 8 collapse toward 0 with baseMargin included as a 9th
+ * feature, redundancy is confirmed and the architecture decision follows.
+ */
+export function startCfbJointRefitConditionalEpaJob(): Promise<JobStatus> {
+  return runJob("cfb-jointrefit-conditional-epa", async (job) => {
+    log(
+      job,
+      "PREDICTIVE mode + baseMargin as a 9th feature: does the 8 components' coefficients collapse toward 0 once conditioned on the EPA/success-rate core? Fitting on 2023-2024 (no holdout backtest -- this is a fit-only diagnostic).",
+    );
+    const refit = await fitJointComponentWeights("cfb", 2023, 2024, undefined, "predictive", true);
+    logJointRefitFit(job, refit);
+    log(
+      job,
+      "\nIf the 8 components above are small relative to their contemporaneous/predictive-without-EPA values (compare against cfb-jointrefit-predictive-holdout's weights), that confirms they're mostly redundant with EPA rather than carrying independent signal.",
+    );
   });
 }
 
@@ -1705,6 +1744,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
   "cfb-jointrefit-predictive-holdout": startCfbJointRefitPredictiveHoldoutJob,
+  "cfb-jointrefit-conditional-epa": startCfbJointRefitConditionalEpaJob,
   "cfb-clv-naive-baseline": startCfbClvNaiveBaselineJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,

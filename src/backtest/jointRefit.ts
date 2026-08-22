@@ -119,6 +119,8 @@ export interface JointRefitResult {
   componentCoverage: { key: ComponentParamKey; label: string; nonNullCount: number }[];
   /** Variance inflation factor per design-matrix column (8 components + one per IMPUTED_COMPONENTS indicator) -- see stats/ridge.ts's computeVif doc. VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone. */
   vif: { label: string; vif: number }[];
+  /** Only set when fitJointComponentWeights was called with includeBaseMarginFeature=true: the fitted coefficient on baseMargin itself, included as a 9th feature so the 8 components' weights become CONDITIONAL on the existing EPA/success-rate core rather than absorbing whatever it would have explained. */
+  baseMarginCoefficient: number | null;
 }
 
 /**
@@ -142,6 +144,23 @@ export async function fitJointComponentWeights(
   trainSeasonEnd: number,
   lambdaGrid: number[] = [0.1, 0.3, 1, 3, 10, 30, 100],
   mode: JointRefitMode = "contemporaneous",
+  /**
+   * When true, baseMargin (the EPA/success-rate core, computed exactly as
+   * computeBaseMargin always has) is added as a 9th design-matrix feature
+   * and the target becomes the raw actualMarginHome, instead of
+   * residualizing baseMargin out of the target beforehand. Per review:
+   * every one of the 8 components is a reweighting of the SAME
+   * play-by-play EPA already summarizes (success rate is EPA thresholded,
+   * explosiveness is EPA conditioned on success, down-splits are EPA
+   * partitioned by situation, opponentAdj is EPA opponent-adjusted) -- if
+   * EPA is close to a sufficient statistic for play-level performance,
+   * the 8 components have little left to contribute ONCE EPA's own
+   * predictive content is in the design matrix rather than pre-subtracted
+   * out (where their coefficients would otherwise silently absorb
+   * whatever EPA would have explained). This is the direct test: if the
+   * 8 collapse toward 0 with baseMargin included, redundancy is confirmed.
+   */
+  includeBaseMarginFeature: boolean = false,
 ): Promise<JointRefitResult> {
   const base = getRatingParams(sport);
   let gamesBySeason: { season: number; game: GameForRating }[] = [];
@@ -196,8 +215,13 @@ export async function fitJointComponentWeights(
 
     const baseMargin = computeBaseMargin(game, base);
     const actualMarginHome = game.homeScore - game.awayScore;
-    X.push([...(features as number[]), ...indicators]);
-    y.push(actualMarginHome - baseMargin);
+    if (includeBaseMarginFeature) {
+      X.push([baseMargin, ...(features as number[]), ...indicators]);
+      y.push(actualMarginHome);
+    } else {
+      X.push([...(features as number[]), ...indicators]);
+      y.push(actualMarginHome - baseMargin);
+    }
     groups.push(`${season}-${game.week}`);
   }
 
@@ -215,8 +239,13 @@ export async function fitJointComponentWeights(
   // COMBINATION of the others with no single alarming pair), which VIF
   // catches by regressing each column on ALL the others at once. See
   // stats/ridge.ts's computeVif doc for how to read the numbers.
+  const baseMarginOffset = includeBaseMarginFeature ? 1 : 0;
   const vifValues = computeVif(X);
-  const vifLabels = [...JOINT_REFIT_COMPONENTS.map((c) => c.label), ...imputedComponentKeys.map((key) => `${key}_missing_indicator`)];
+  const vifLabels = [
+    ...(includeBaseMarginFeature ? ["baseMargin"] : []),
+    ...JOINT_REFIT_COMPONENTS.map((c) => c.label),
+    ...imputedComponentKeys.map((key) => `${key}_missing_indicator`),
+  ];
   const vif = vifLabels.map((label, i) => ({ label, vif: vifValues[i]! }));
 
   const cvResults = selectLambda(X, y, lambdaGrid, 5, groups);
@@ -225,14 +254,15 @@ export async function fitJointComponentWeights(
 
   const weights = {} as Record<ComponentParamKey, number>;
   JOINT_REFIT_COMPONENTS.forEach((c, i) => {
-    weights[c.key] = fit.coefficients[i]!;
+    weights[c.key] = fit.coefficients[baseMarginOffset + i]!;
   });
   const imputedComponents = imputedComponentKeys.map((key, k) => ({
     key,
     real: imputedCounts[k]!.real,
     imputed: imputedCounts[k]!.imputed,
-    missingIndicatorCoefficient: fit.coefficients[JOINT_REFIT_COMPONENTS.length + k]!,
+    missingIndicatorCoefficient: fit.coefficients[baseMarginOffset + JOINT_REFIT_COMPONENTS.length + k]!,
   }));
+  const baseMarginCoefficient = includeBaseMarginFeature ? fit.coefficients[0]! : null;
 
   return {
     gamesUsed: X.length,
@@ -242,6 +272,7 @@ export async function fitJointComponentWeights(
     imputedComponents,
     componentCoverage,
     vif,
+    baseMarginCoefficient,
     intercept: fit.intercept,
     cvResults,
   };
