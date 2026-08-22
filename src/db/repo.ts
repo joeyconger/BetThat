@@ -1444,6 +1444,27 @@ export interface BacktestRunSummary {
   createdAt: Date;
 }
 
+export interface BacktestClvRow {
+  modelSpreadHome: number;
+  openingSpreadHome: number;
+  closingSpreadHome: number;
+}
+
+/** Per-game (modelSpreadHome, openingSpreadHome, closingSpreadHome) for one backtest run, restricted to games with a real opening line -- the same population avgClv is computed over. Used by backtest/placebo.ts's shuffle test. */
+export async function getBacktestClvRows(backtestRunId: number): Promise<BacktestClvRow[]> {
+  const result = await pool.query<{ model_spread_home: number; opening_spread_home: number; closing_spread_home: number }>(
+    `SELECT model_spread_home, opening_spread_home, closing_spread_home
+     FROM backtest_results
+     WHERE backtest_run_id = $1 AND opening_spread_home IS NOT NULL`,
+    [backtestRunId],
+  );
+  return result.rows.map((r) => ({
+    modelSpreadHome: r.model_spread_home,
+    openingSpreadHome: r.opening_spread_home,
+    closingSpreadHome: r.closing_spread_home,
+  }));
+}
+
 export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
   const result = await pool.query<{
     id: number;

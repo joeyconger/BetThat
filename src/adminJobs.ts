@@ -18,7 +18,10 @@ import {
   getGameParticipantsBySourceId,
   upsertFinishingDrivesStatsDebug,
   debugReadFinishingDrivesRow,
+  getBacktestClvRows,
+  listBacktestRuns,
 } from "./db/repo.js";
+import { runPlaceboTest } from "./backtest/placebo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
@@ -1224,6 +1227,53 @@ export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
 }
 
 /**
+ * Placebo/shuffle check for the CLV metric itself: takes the two most
+ * recent cfb-jointrefit-holdout runs (hand-tuned and jointly-fit, both on
+ * the 2025 holdout), and for each, randomly reassigns modelSpreadHome
+ * across games many times, recomputing CLV each time against the game's
+ * REAL opening/closing lines. If CLV is a sound metric, this shuffle-null
+ * distribution should center near 0 regardless of which run it's applied
+ * to -- both hand-tuned and jointly-fit real avgClv have landed in the
+ * +0.78 to +0.91 range, which is large enough (and stable enough across
+ * models that should differ) to be worth checking isn't actually a
+ * property of the bet-selection/line-timestamp logic rather than either
+ * model. See backtest/placebo.ts for the full reasoning.
+ */
+export function startCfbClvPlaceboJob(): Promise<JobStatus> {
+  return runJob("cfb-clv-placebo", async (job) => {
+    const runs = await listBacktestRuns();
+    const handTuned = runs.find((r) => r.name.startsWith("jointrefit-handtuned-cfb-test"));
+    const joint = runs.find((r) => r.name.startsWith("jointrefit-joint-cfb-test"));
+    const targets = [handTuned, joint].filter((r): r is NonNullable<typeof r> => r != null);
+
+    if (targets.length === 0) {
+      log(job, "No jointrefit-handtuned-cfb-test* or jointrefit-joint-cfb-test* runs found -- run cfb-jointrefit-holdout first.");
+      return;
+    }
+
+    for (const run of targets) {
+      const rows = await getBacktestClvRows(run.id);
+      const overall = await getOverallReport(run.id);
+      const result = runPlaceboTest(rows, overall.avgClv, 2000, 42);
+      log(job, `\nrun ${run.id} (${run.name}): real avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)} over ${rows.length} games with a real opening line`);
+      log(
+        job,
+        `  placebo null (${result.trials} random reassignments of modelSpreadHome across games): mean=${result.placeboMean.toFixed(4)}, sd=${result.placeboSd.toFixed(4)}`,
+      );
+      log(
+        job,
+        `  real avgClv is ${result.realClvZScore === null ? "n/a" : result.realClvZScore.toFixed(2)} placebo-SDs from the placebo mean -- ` +
+          `${
+            Math.abs(result.placeboMean) > 0.1
+              ? "placebo mean is NOT near 0: CLV itself likely carries a structural bias independent of model quality -- treat every avgClv number in this project as suspect until this is root-caused."
+              : "placebo mean is near 0, as a sound CLV metric should be -- the real result isn't explained by a bias in the metric itself."
+          }`,
+      );
+    }
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1529,6 +1579,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
+  "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
   "cfb-confidence-walkforward": startCfbConfidenceWalkforwardJob,
