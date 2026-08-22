@@ -513,6 +513,18 @@ export async function getGameSourceIdToIdMap(sport: Sport, season: number): Prom
   return new Map(result.rows.map((r) => [r.source_id, r.id]));
 }
 
+/** Same bulk-lookup reasoning as getGameSourceIdToIdMap, but keyed by source_id and carrying each game's actual home/away team ids -- lets a caller check not just "does this team name resolve to SOME team" but "does it resolve to the CORRECT participant for this specific game." */
+export async function getGameParticipantsBySourceId(
+  sport: Sport,
+  season: number,
+): Promise<Map<string, { gameId: number; homeTeamId: number; awayTeamId: number }>> {
+  const result = await pool.query<{ id: number; source_id: string; home_team_id: number; away_team_id: number }>(
+    `SELECT id, source_id, home_team_id, away_team_id FROM games WHERE sport = $1 AND season = $2`,
+    [sport, season],
+  );
+  return new Map(result.rows.map((r) => [r.source_id, { gameId: r.id, homeTeamId: r.home_team_id, awayTeamId: r.away_team_id }]));
+}
+
 /**
  * How many of this season's games have off_finishing_drives_ppo populated
  * for BOTH the home and away team_game_stats row -- Task 38's reconciliation

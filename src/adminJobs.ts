@@ -10,7 +10,13 @@ import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesS
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
 import { syncOpponentAdjustedStats } from "./ingest/cfbd/syncOpponentAdjustedStats.js";
-import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap, getGameSourceIdToIdMap, getFinishingDrivesGameCoverage } from "./db/repo.js";
+import {
+  getPlaysForSeasonThroughWeek,
+  getTeamNameToIdMap,
+  getGameSourceIdToIdMap,
+  getFinishingDrivesGameCoverage,
+  getGameParticipantsBySourceId,
+} from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
@@ -804,6 +810,34 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
       opportunityPairs.add(`${drive.gameId}:${drive.defense}`);
     }
     const oppResult = bucketize(opportunityPairs, "scoring-opportunity-filtered, matches production sync's population");
+
+    // Participant-correctness check: teamMap.has(team) only proves the name
+    // matches SOME row in teams -- not that it's the CORRECT participant
+    // for THIS game. upsertFinishingDrivesStats's UPDATE is keyed on
+    // (game_id, team_id), so a name that resolves to the wrong team's id
+    // silently updates zero rows despite "both resolve" being true above.
+    const participants = await getGameParticipantsBySourceId("cfb", year);
+    let correctParticipant = 0;
+    let wrongParticipant = 0;
+    const wrongParticipantSamples: string[] = [];
+    for (const pair of opportunityPairs) {
+      const sep = pair.indexOf(":");
+      const gameIdStr = pair.slice(0, sep);
+      const team = pair.slice(sep + 1);
+      const gameInfo = participants.get(gameIdStr);
+      const teamId = teamMap.get(team);
+      if (!gameInfo || teamId == null) continue; // already counted as a resolve failure above
+      if (teamId === gameInfo.homeTeamId || teamId === gameInfo.awayTeamId) {
+        correctParticipant += 1;
+      } else {
+        wrongParticipant += 1;
+        if (wrongParticipantSamples.length < 15) wrongParticipantSamples.push(`game ${gameIdStr}: drive team "${team}" -> teamId ${teamId}, but game's participants are ${gameInfo.homeTeamId}/${gameInfo.awayTeamId}`);
+      }
+    }
+    log(job, `${year}: of the ${correctParticipant + wrongParticipant} pairs where both game and team "resolve", ${correctParticipant} resolve to the CORRECT participant and ${wrongParticipant} resolve to a team that isn't actually in that game`);
+    if (wrongParticipantSamples.length > 0) {
+      log(job, `${year}: sample wrong-participant mismatches: ${wrongParticipantSamples.join(" | ")}`);
+    }
 
     const sampleNames = [...allResult.failingNames.entries(), ...oppResult.failingNames.entries()]
       .sort((a, b) => b[1] - a[1])
