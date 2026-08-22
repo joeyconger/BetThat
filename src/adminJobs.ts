@@ -22,6 +22,7 @@ import {
   getBacktestClvByGame,
   listBacktestRuns,
 } from "./db/repo.js";
+import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
 import { pairedTTest } from "./stats/significance.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
@@ -64,6 +65,7 @@ import {
   getConfidenceReportVsOpening,
 } from "./backtest/report.js";
 import { getRatingParams } from "./ratings/config.js";
+import type { RatingParams } from "./ratings/config.js";
 import type { Sport } from "./db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -1181,54 +1183,76 @@ export function startCfbWalkforwardAllComponentsJob(): Promise<JobStatus> {
  * weights against the newly jointly-fit weights on the SAME untouched
  * 2025 holdout.
  */
+function logJointRefitResult(job: JobStatus, result: Awaited<ReturnType<typeof runJointRefitHoldout>>): void {
+  log(job, "\nper-component two-sided coverage (non-null count, before any gating/imputation):");
+  for (const c of result.refit.componentCoverage) {
+    log(job, `  ${c.label}: ${c.nonNullCount} of ${result.refit.gamesTotal}`);
+  }
+  log(job, `\ntraining games used (complete-case on the non-imputed components, value+indicator on the rest): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`);
+  log(job, "imputed components (value+indicator instead of a hard gate):");
+  for (const c of result.refit.imputedComponents) {
+    log(
+      job,
+      `  ${c.key}: real=${c.real}, imputed=${c.imputed}, missingness-indicator coefficient=${c.missingIndicatorCoefficient.toFixed(4)} (large magnitude here means missingness itself, not the raw value, is carrying the signal -- treat the raw-value weight below with that in mind)`,
+    );
+  }
+  log(job, "\nvariance inflation factors (VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone):");
+  for (const v of result.refit.vif) {
+    log(job, `  ${v.label}: ${Number.isFinite(v.vif) ? v.vif.toFixed(2) : "Infinity (perfectly/near-perfectly collinear with the rest)"}`);
+  }
+  log(job, `selected lambda (5-fold CV, grouped by season-week): ${result.refit.selectedLambda}`);
+  log(job, "CV grid (lambda: mse):");
+  for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
+
+  log(job, `\njointly-fit weights (intercept ${result.refit.intercept.toFixed(3)}):`);
+  for (const [key, value] of Object.entries(result.refit.weights)) {
+    log(job, `  ${key} = ${(value as number).toFixed(4)}`);
+  }
+
+  log(
+    job,
+    `\nHOLDOUT 2025, current hand-tuned weights: ${result.handTunedGames} games, ` +
+      `cover vs open=${fmtPct(result.handTunedCoverRateVsOpening)}, avgClv=${result.handTunedAvgClv === null ? "n/a" : result.handTunedAvgClv.toFixed(2)} (run ${result.handTunedHoldoutRunId})`,
+  );
+  log(
+    job,
+    `HOLDOUT 2025, jointly-fit weights: ${result.jointGames} games, ` +
+      `cover vs open=${fmtPct(result.jointCoverRateVsOpening)}, avgClv=${result.jointAvgClv === null ? "n/a" : result.jointAvgClv.toFixed(2)} (run ${result.jointHoldoutRunId})`,
+  );
+  log(
+    job,
+    "\nDid the joint refit's 2025 holdout numbers actually beat the hand-tuned weights' 2025 holdout numbers? " +
+      "This is the real test of whether joint (vs. one-at-a-time) calibration recovers value the sweep-based approach left on the table.",
+  );
+}
+
 export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
   return runJob("cfb-jointrefit-holdout", async (job) => {
-    log(job, "Fitting all 8 component weights jointly (ridge, CV-selected lambda) on 2023-2024, holding out 2025 entirely.");
-    const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025);
+    log(job, "CONTEMPORANEOUS mode: fitting all 8 component weights against the SAME game's own margin (ridge, CV-selected lambda) on 2023-2024, holding out 2025 entirely.");
+    const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025, undefined, "contemporaneous");
+    logJointRefitResult(job, result);
+  });
+}
 
-    log(job, "\nper-component two-sided coverage (non-null count, before any gating/imputation):");
-    for (const c of result.refit.componentCoverage) {
-      log(job, `  ${c.label}: ${c.nonNullCount} of ${result.refit.gamesTotal}`);
-    }
+/**
+ * PREDICTIVE reframing (see jointRefit.ts's JointRefitMode doc): features
+ * are each team's own rolling average through PRIOR games this season
+ * only (buildAsOfWeekGames), target is still the real outcome of the game
+ * being predicted -- a genuine forecasting regression instead of a
+ * same-game accounting decomposition. Expect RMSE far closer to
+ * market/forecast quality (~13-14) than the contemporaneous mode's ~8-9,
+ * and expect some coefficients (especially finishingDrives, which the
+ * contemporaneous run's missingness-indicator already suggested was
+ * mostly a blowout proxy) to move substantially or go near-zero.
+ */
+export function startCfbJointRefitPredictiveHoldoutJob(): Promise<JobStatus> {
+  return runJob("cfb-jointrefit-predictive-holdout", async (job) => {
     log(
       job,
-      `\ntraining games used (complete-case on the non-imputed components, value+indicator for finishingDrives/fgMakeRate/opponentAdj): ${result.refit.gamesUsed} of ${result.refit.gamesTotal}`,
+      "PREDICTIVE mode: fitting all 8 component weights against the FOLLOWING game's real margin, using each team's own as-of-week rolling averages through prior games (ridge, CV-selected lambda) on 2023-2024, holding out 2025 entirely.",
     );
-    log(job, "imputed components (value+indicator instead of a hard gate -- see IMPUTED_COMPONENTS' doc):");
-    for (const c of result.refit.imputedComponents) {
-      log(
-        job,
-        `  ${c.key}: real=${c.real}, imputed=${c.imputed}, missingness-indicator coefficient=${c.missingIndicatorCoefficient.toFixed(4)} (large magnitude here means missingness itself, not the raw value, is carrying the signal -- treat the raw-value weight below with that in mind)`,
-      );
-    }
-    log(job, "\nvariance inflation factors (VIF > 5 worth a look, VIF > 10 means that column's coefficient is close to uninterpretable alone):");
-    for (const v of result.refit.vif) {
-      log(job, `  ${v.label}: ${Number.isFinite(v.vif) ? v.vif.toFixed(2) : "Infinity (perfectly/near-perfectly collinear with the rest)"}`);
-    }
-    log(job, `selected lambda (5-fold CV, grouped by season-week): ${result.refit.selectedLambda}`);
-    log(job, "CV grid (lambda: mse):");
-    for (const r of result.refit.cvResults) log(job, `  ${r.lambda}: ${r.mse.toFixed(3)}`);
-
-    log(job, `\njointly-fit weights (intercept ${result.refit.intercept.toFixed(3)}):`);
-    for (const [key, value] of Object.entries(result.refit.weights)) {
-      log(job, `  ${key} = ${(value as number).toFixed(4)}`);
-    }
-
-    log(
-      job,
-      `\nHOLDOUT 2025, current hand-tuned weights: ${result.handTunedGames} games, ` +
-        `cover vs open=${fmtPct(result.handTunedCoverRateVsOpening)}, avgClv=${result.handTunedAvgClv === null ? "n/a" : result.handTunedAvgClv.toFixed(2)} (run ${result.handTunedHoldoutRunId})`,
-    );
-    log(
-      job,
-      `HOLDOUT 2025, jointly-fit weights: ${result.jointGames} games, ` +
-        `cover vs open=${fmtPct(result.jointCoverRateVsOpening)}, avgClv=${result.jointAvgClv === null ? "n/a" : result.jointAvgClv.toFixed(2)} (run ${result.jointHoldoutRunId})`,
-    );
-    log(
-      job,
-      "\nDid the joint refit's 2025 holdout numbers actually beat the hand-tuned weights' 2025 holdout numbers? " +
-        "This is the real test of whether joint (vs. one-at-a-time) calibration recovers value the sweep-based approach left on the table.",
-    );
+    const result = await runJointRefitHoldout("cfb", 2023, 2024, 2025, undefined, "predictive");
+    logJointRefitResult(job, result);
   });
 }
 
@@ -1245,58 +1269,117 @@ export function startCfbJointRefitHoldoutJob(): Promise<JobStatus> {
  * property of the bet-selection/line-timestamp logic rather than either
  * model. See backtest/placebo.ts for the full reasoning.
  */
+async function logClvPlaceboAndPairedTest(job: JobStatus, label: string, handTuned: BacktestRunSummary | undefined, joint: BacktestRunSummary | undefined): Promise<void> {
+  const targets = [handTuned, joint].filter((r): r is BacktestRunSummary => r != null);
+  if (targets.length === 0) {
+    log(job, `\n[${label}] no matching runs found -- skipping.`);
+    return;
+  }
+
+  for (const run of targets) {
+    const rows = await getBacktestClvRows(run.id);
+    const overall = await getOverallReport(run.id);
+    const result = runPlaceboTest(rows, overall.avgClv, 2000, 42);
+    log(job, `\n[${label}] run ${run.id} (${run.name}): real avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)} over ${rows.length} games with a real opening line`);
+    log(job, `  placebo null (${result.trials} random reassignments of modelSpreadHome across games): mean=${result.placeboMean.toFixed(4)}, sd=${result.placeboSd.toFixed(4)}`);
+    log(
+      job,
+      `  real avgClv is ${result.realClvZScore === null ? "n/a" : result.realClvZScore.toFixed(2)} placebo-SDs from the placebo mean -- ` +
+        `${
+          Math.abs(result.placeboMean) > 0.1
+            ? "placebo mean is NOT near 0: CLV itself likely carries a structural bias independent of model quality -- treat every avgClv number in this project as suspect until this is root-caused."
+            : "placebo mean is near 0, as a sound CLV metric should be -- the real result isn't explained by a bias in the metric itself."
+        }`,
+    );
+  }
+
+  if (handTuned && joint) {
+    const handTunedClv = await getBacktestClvByGame(handTuned.id);
+    const jointClv = await getBacktestClvByGame(joint.id);
+    const commonGameIds = [...handTunedClv.keys()].filter((id) => jointClv.has(id));
+    if (commonGameIds.length >= 2) {
+      const a = commonGameIds.map((id) => handTunedClv.get(id)!);
+      const b = commonGameIds.map((id) => jointClv.get(id)!);
+      const paired = pairedTTest(a, b);
+      log(
+        job,
+        `[${label}] paired test, jointly-fit CLV vs hand-tuned CLV on the SAME ${paired.n} holdout games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p(two-sided)=${paired.pValueTwoSided.toFixed(4)} -- ${
+          paired.pValueTwoSided < 0.05
+            ? "statistically significant at p<0.05."
+            : "NOT statistically significant -- consistent with 'no evidence the joint refit beats hand-tuning,' not 'the joint refit is better.'"
+        }`,
+      );
+    } else {
+      log(job, `[${label}] could not run the paired CLV test -- only ${commonGameIds.length} games in common between the two runs.`);
+    }
+  }
+}
+
 export function startCfbClvPlaceboJob(): Promise<JobStatus> {
   return runJob("cfb-clv-placebo", async (job) => {
     const runs = await listBacktestRuns();
-    const handTuned = runs.find((r) => r.name.startsWith("jointrefit-handtuned-cfb-test"));
-    const joint = runs.find((r) => r.name.startsWith("jointrefit-joint-cfb-test"));
-    const targets = [handTuned, joint].filter((r): r is NonNullable<typeof r> => r != null);
+    const contemporaneousHandTuned = runs.find((r) => r.name.startsWith("jointrefit-handtuned-cfb-test"));
+    const contemporaneousJoint = runs.find((r) => r.name.startsWith("jointrefit-joint-cfb-test"));
+    await logClvPlaceboAndPairedTest(job, "contemporaneous", contemporaneousHandTuned, contemporaneousJoint);
 
-    if (targets.length === 0) {
-      log(job, "No jointrefit-handtuned-cfb-test* or jointrefit-joint-cfb-test* runs found -- run cfb-jointrefit-holdout first.");
-      return;
-    }
+    const predictiveHandTuned = runs.find((r) => r.name.startsWith("jointrefit-predictive-handtuned-cfb-test"));
+    const predictiveJoint = runs.find((r) => r.name.startsWith("jointrefit-predictive-joint-cfb-test"));
+    await logClvPlaceboAndPairedTest(job, "predictive", predictiveHandTuned, predictiveJoint);
 
-    for (const run of targets) {
-      const rows = await getBacktestClvRows(run.id);
-      const overall = await getOverallReport(run.id);
-      const result = runPlaceboTest(rows, overall.avgClv, 2000, 42);
-      log(job, `\nrun ${run.id} (${run.name}): real avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)} over ${rows.length} games with a real opening line`);
-      log(
-        job,
-        `  placebo null (${result.trials} random reassignments of modelSpreadHome across games): mean=${result.placeboMean.toFixed(4)}, sd=${result.placeboSd.toFixed(4)}`,
-      );
-      log(
-        job,
-        `  real avgClv is ${result.realClvZScore === null ? "n/a" : result.realClvZScore.toFixed(2)} placebo-SDs from the placebo mean -- ` +
-          `${
-            Math.abs(result.placeboMean) > 0.1
-              ? "placebo mean is NOT near 0: CLV itself likely carries a structural bias independent of model quality -- treat every avgClv number in this project as suspect until this is root-caused."
-              : "placebo mean is near 0, as a sound CLV metric should be -- the real result isn't explained by a bias in the metric itself."
-          }`,
-      );
+    if (!contemporaneousHandTuned && !contemporaneousJoint && !predictiveHandTuned && !predictiveJoint) {
+      log(job, "\nNo jointrefit* holdout runs found at all -- run cfb-jointrefit-holdout and/or cfb-jointrefit-predictive-holdout first.");
     }
+  });
+}
 
-    if (handTuned && joint) {
-      const handTunedClv = await getBacktestClvByGame(handTuned.id);
-      const jointClv = await getBacktestClvByGame(joint.id);
-      const commonGameIds = [...handTunedClv.keys()].filter((id) => jointClv.has(id));
-      if (commonGameIds.length >= 2) {
-        const a = commonGameIds.map((id) => handTunedClv.get(id)!);
-        const b = commonGameIds.map((id) => jointClv.get(id)!);
-        const paired = pairedTTest(a, b);
-        log(
-          job,
-          `\npaired test, jointly-fit CLV vs hand-tuned CLV on the SAME ${paired.n} holdout games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p(two-sided)=${paired.pValueTwoSided.toFixed(4)} -- ${
-            paired.pValueTwoSided < 0.05
-              ? "statistically significant at p<0.05."
-              : "NOT statistically significant -- consistent with 'no evidence the joint refit beats hand-tuning,' not 'the joint refit is better.'"
-          }`,
-        );
-      } else {
-        log(job, `\ncould not run the paired CLV test -- only ${commonGameIds.length} games in common between the two runs (need matching game_ids on both sides).`);
-      }
-    }
+/**
+ * Second placebo, per review: shuffling modelSpreadHome across games (the
+ * job above) only tests whether the CLV FORMULA is biased, since it
+ * destroys any relationship between the model's number and the specific
+ * game -- it says nothing about whether the model's SKILL (vs. the
+ * market-anchoring blend it sits inside) is what's producing the real
+ * ~0.8-0.9 avgClv. This runs a deliberately naive model -- current
+ * hand-tuned params with all 8 component weights forced to 0, so
+ * predictions are pure EPA/success-rate-blend anchored to market the
+ * SAME way the real model is -- on the identical 2025 holdout. If this
+ * naive baseline ALSO lands near 0.8-0.9 avgClv, the number is coming
+ * from the market-anchoring mechanics themselves (or from EPA/success
+ * alone), not from anything the 8 components contribute.
+ */
+export function startCfbClvNaiveBaselineJob(): Promise<JobStatus> {
+  return runJob("cfb-clv-naive-baseline", async (job) => {
+    const base = getRatingParams("cfb");
+    const naiveParams: RatingParams = {
+      ...base,
+      pointsPerExplosiveness: 0,
+      pointsPerStandardDownsSplit: 0,
+      pointsPerPassingDownsSplit: 0,
+      pointsPerSackRate: 0,
+      pointsPerFinishingDrives: 0,
+      pointsPerFieldPosition: 0,
+      pointsPerFgMakeRate: 0,
+      pointsPerOpponentAdj: 0,
+    };
+    log(job, "Running a deliberately naive model (all 8 component weights = 0, pure EPA/success-rate blend, same market-anchoring as always) on the 2025 holdout.");
+    const naive = await runBacktest({
+      name: "jointrefit-naivebaseline-cfb-test2025",
+      sport: "cfb",
+      seasonStart: 2025,
+      seasonEnd: 2025,
+      paramsOverride: naiveParams,
+    });
+    const overall = await getOverallReport(naive.backtestRunId);
+    const opening = await getOpeningCoverRate(naive.backtestRunId);
+    log(
+      job,
+      `naive baseline (run ${naive.backtestRunId}): ${naive.scored} games, cover vs open=${fmtPct(opening.coverRateVsOpening)}, avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}`,
+    );
+    log(
+      job,
+      `Compare this to the ~0.78-0.91 avgClv the hand-tuned and jointly-fit runs (with all 8 components active) have shown. ` +
+        `If this naive number lands in the same range, the CLV is coming from market-anchoring/EPA alone, not from the 8 components' contribution -- ` +
+        `run cfb-clv-placebo to see the hand-tuned/jointly-fit numbers again for direct comparison.`,
+    );
   });
 }
 
@@ -1606,6 +1689,8 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
+  "cfb-jointrefit-predictive-holdout": startCfbJointRefitPredictiveHoldoutJob,
+  "cfb-clv-naive-baseline": startCfbClvNaiveBaselineJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,

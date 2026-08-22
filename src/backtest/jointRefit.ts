@@ -6,9 +6,27 @@ import { ridgeFit, selectLambda, computeVif } from "../stats/ridge.js";
 import type { ComponentParamKey } from "./sweep.js";
 import { runBacktest } from "./run.js";
 import { getOverallReport, getOpeningCoverRate } from "./report.js";
-import { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin } from "./jointRefitMath.js";
+import { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin, buildAsOfWeekGames } from "./jointRefitMath.js";
 
-export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin } from "./jointRefitMath.js";
+export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentAdjFeature, computeBaseMargin, buildAsOfWeekGames } from "./jointRefitMath.js";
+
+/**
+ * "contemporaneous" (the original design, see this file's header doc):
+ * each component's raw per-game differential explains that SAME game's
+ * margin -- a same-game accounting decomposition, not a forecast.
+ *
+ * "predictive": features come from buildAsOfWeekGames (each team's OWN
+ * rolling average through PRIOR games this season only), and the target
+ * is still the REAL outcome of the game being predicted -- i.e. "does
+ * this team's accumulated explosiveness through last week forecast next
+ * week's margin," the actual question the deployed Elo update needs
+ * answered. Expect RMSE to land far closer to market/forecast quality
+ * (~13-14 points) than the contemporaneous mode's ~8-9, since this is
+ * now a genuine out-of-sample-style forecasting problem instead of an
+ * explanatory one -- and expect some coefficients to move substantially
+ * or go near-zero, which is the informative part.
+ */
+export type JointRefitMode = "contemporaneous" | "predictive";
 
 /**
  * Joint refit of the 8 component pointsPerX weights, replacing the
@@ -70,12 +88,23 @@ export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentA
  *   is a proxy for "early season, ratings not yet stabilized."
  *
  * Every other component (explosiveness, down/distance splits, sack rate,
- * field position) still hard-gates the row: their missingness in this
- * dataset is negligible (Task 38's coverage printout showed ~100%), so a
- * gate costs almost nothing and avoids adding indicator columns with no
- * diagnostic value.
+ * field position) still hard-gates the row in CONTEMPORANEOUS mode: their
+ * missingness in this dataset is negligible (Task 38's coverage printout
+ * showed ~100%), so a gate costs almost nothing and avoids adding
+ * indicator columns with no diagnostic value.
+ *
+ * In PREDICTIVE mode, ALL 8 components get value+indicator treatment
+ * instead: buildAsOfWeekGames' as-of-week rolling averages can be null
+ * for any component (not just these 3), not only on a team's literal
+ * first game of the season (which is hard-gated separately via the
+ * mandatory EPA requirement) but whenever a team hasn't yet accumulated
+ * THAT specific stat (e.g. zero field goal attempts across several early
+ * games) -- gating on all 8 would compound losses across components
+ * instead of handling each one's own missingness independently.
  */
-const IMPUTED_COMPONENTS: ComponentParamKey[] = ["pointsPerFinishingDrives", "pointsPerFgMakeRate", "pointsPerOpponentAdj"];
+function getImputedComponentKeys(mode: JointRefitMode): ComponentParamKey[] {
+  return mode === "predictive" ? JOINT_REFIT_COMPONENTS.map((c) => c.key) : ["pointsPerFinishingDrives", "pointsPerFgMakeRate", "pointsPerOpponentAdj"];
+}
 
 export interface JointRefitResult {
   gamesUsed: number;
@@ -112,20 +141,25 @@ export async function fitJointComponentWeights(
   trainSeasonStart: number,
   trainSeasonEnd: number,
   lambdaGrid: number[] = [0.1, 0.3, 1, 3, 10, 30, 100],
+  mode: JointRefitMode = "contemporaneous",
 ): Promise<JointRefitResult> {
   const base = getRatingParams(sport);
-  const gamesBySeason: { season: number; game: GameForRating }[] = [];
+  let gamesBySeason: { season: number; game: GameForRating }[] = [];
   for (let season = trainSeasonStart; season <= trainSeasonEnd; season++) {
     for (const game of await getSeasonGamesForRating(sport, season, 999)) {
       gamesBySeason.push({ season, game });
     }
   }
+  if (mode === "predictive") {
+    gamesBySeason = buildAsOfWeekGames(gamesBySeason, base);
+  }
 
+  const imputedComponentKeys = getImputedComponentKeys(mode);
   const X: number[][] = [];
   const y: number[] = [];
   const groups: string[] = [];
-  const imputedIdx = IMPUTED_COMPONENTS.map((key) => JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === key));
-  const imputedCounts = IMPUTED_COMPONENTS.map(() => ({ real: 0, imputed: 0 }));
+  const imputedIdx = imputedComponentKeys.map((key) => JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === key));
+  const imputedCounts = imputedComponentKeys.map(() => ({ real: 0, imputed: 0 }));
 
   // Per-component two-sided coverage, counted BEFORE any gating or
   // imputation -- printed so the effective complete-case n (and which
@@ -148,7 +182,7 @@ export async function fitJointComponentWeights(
       if (f !== null) componentCoverage[i]!.nonNullCount += 1;
     });
 
-    const indicators: number[] = new Array(IMPUTED_COMPONENTS.length).fill(0);
+    const indicators: number[] = new Array(imputedComponentKeys.length).fill(0);
     imputedIdx.forEach((idx, k) => {
       if (features[idx] === null) {
         features[idx] = 0;
@@ -171,7 +205,7 @@ export async function fitJointComponentWeights(
     throw new Error(
       `fitJointComponentWeights: 0 of ${gamesBySeason.length} games survived the complete-case gate. Per-component two-sided coverage: ${componentCoverage
         .map((c) => `${c.label}=${c.nonNullCount}`)
-        .join(", ")}. Whichever count is near 0 (and isn't in IMPUTED_COMPONENTS) is the binding constraint -- check that component's ingest/coverage before re-running.`,
+        .join(", ")}. Whichever count is near 0 (and isn't imputed under this mode) is the binding constraint -- check that component's ingest/coverage before re-running.`,
     );
   }
 
@@ -182,7 +216,7 @@ export async function fitJointComponentWeights(
   // catches by regressing each column on ALL the others at once. See
   // stats/ridge.ts's computeVif doc for how to read the numbers.
   const vifValues = computeVif(X);
-  const vifLabels = [...JOINT_REFIT_COMPONENTS.map((c) => c.label), ...IMPUTED_COMPONENTS.map((key) => `${key}_missing_indicator`)];
+  const vifLabels = [...JOINT_REFIT_COMPONENTS.map((c) => c.label), ...imputedComponentKeys.map((key) => `${key}_missing_indicator`)];
   const vif = vifLabels.map((label, i) => ({ label, vif: vifValues[i]! }));
 
   const cvResults = selectLambda(X, y, lambdaGrid, 5, groups);
@@ -193,7 +227,7 @@ export async function fitJointComponentWeights(
   JOINT_REFIT_COMPONENTS.forEach((c, i) => {
     weights[c.key] = fit.coefficients[i]!;
   });
-  const imputedComponents = IMPUTED_COMPONENTS.map((key, k) => ({
+  const imputedComponents = imputedComponentKeys.map((key, k) => ({
     key,
     real: imputedCounts[k]!.real,
     imputed: imputedCounts[k]!.imputed,
@@ -237,12 +271,14 @@ export async function runJointRefitHoldout(
   trainSeasonEnd: number,
   testSeason: number,
   lambdaGrid?: number[],
+  mode: JointRefitMode = "contemporaneous",
 ): Promise<JointRefitHoldoutComparison> {
-  const refit = await fitJointComponentWeights(sport, trainSeasonStart, trainSeasonEnd, lambdaGrid);
+  const refit = await fitJointComponentWeights(sport, trainSeasonStart, trainSeasonEnd, lambdaGrid, mode);
   const base = getRatingParams(sport);
+  const namePrefix = mode === "predictive" ? "jointrefit-predictive" : "jointrefit";
 
   const handTuned = await runBacktest({
-    name: `jointrefit-handtuned-${sport}-test${testSeason}`,
+    name: `${namePrefix}-handtuned-${sport}-test${testSeason}`,
     sport,
     seasonStart: testSeason,
     seasonEnd: testSeason,
@@ -253,7 +289,7 @@ export async function runJointRefitHoldout(
 
   const jointParams: RatingParams = { ...base, ...refit.weights };
   const joint = await runBacktest({
-    name: `jointrefit-joint-${sport}-test${testSeason}`,
+    name: `${namePrefix}-joint-${sport}-test${testSeason}`,
     sport,
     seasonStart: testSeason,
     seasonEnd: testSeason,
