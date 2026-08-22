@@ -37,7 +37,6 @@ import {
   runSweep,
   runExternalRatingsSweep,
   runSosSweep,
-  runBigSpreadShrinkSweep,
   runSpSignalSweep,
   runSuccessRateSweep,
   runGarbageTimeSweep,
@@ -1444,21 +1443,24 @@ export function startCfbClvNaiveBaselineJob(): Promise<JobStatus> {
 }
 
 /**
- * Third placebo, per review: the naive baseline above still lets ratings
- * ADAPT in-season (EPA/success-rate updates every week) -- it establishes
+ * SUPERSEDED by the market-anchor removal (predictSpread no longer takes
+ * marketSpreadHome as an input at all -- see its doc). This job's own
+ * result was exactly what motivated that removal: it was built to test
+ * whether market-anchoring mechanics (as opposed to in-season learning)
+ * explained the model's CLV, and pointed straight at the anchor as the
+ * remaining live suspect. Kept for history; a fresh run today no longer
+ * has any "market-shrinkage" to hold constant, so its result would no
+ * longer test what this doc originally describes.
+ *
+ * Original doc: the naive baseline above still lets ratings ADAPT
+ * in-season (EPA/success-rate updates every week) -- it establishes
  * "components add nothing," not "where does +0.8 CLV come from." This
  * freezes each team's rating at its prior-season-final carryover value
  * for the ENTIRE 2025 season (baseK=0 means `rating += baseK*error`
  * never moves the rating, while gamesPlayed still increments normally --
  * see ratings/elo.ts's computeSeasonRatings tail), so market-shrinkage
  * behaves EXACTLY as it always does (same modelWeight/combinedGames
- * formula), but in-season learning is switched off entirely. If avgClv
- * still lands near 0.78-0.91 with stale ratings, the number is coming
- * from market-anchoring mechanics (or from the prior-season carryover
- * itself), not from any in-season adaptation -- which would mean +0.8
- * is an artifact of how picks are selected relative to the opening line
- * rather than genuine forecast skill, and shouldn't be treated as a
- * baseline worth building on.
+ * formula), but in-season learning is switched off entirely.
  */
 export function startCfbClvFrozenRatingsJob(): Promise<JobStatus> {
   return runJob("cfb-clv-frozen-ratings", async (job) => {
@@ -1647,25 +1649,6 @@ export function startCfbConfidenceWalkforwardJob(): Promise<JobStatus> {
   });
 }
 
-/**
- * Sweeps bigSpreadShrinkRef (see backtest/sweep.ts's runBigSpreadShrinkSweep
- * and ratings/elo.ts's predictSpread doc) — the "defer to market more on
- * extreme spreads" fix added after backtest data showed the model
- * systematically under-predicting real blowouts. ref=1000 in the grid is
- * effectively the pre-fix, no-damping baseline for direct comparison.
- */
-export function startCfbBigSpreadShrinkSweepJob(): Promise<JobStatus> {
-  return runJob("cfb-bigspread-sweep", async (job) => {
-    log(job, "sweeping cfb bigSpreadShrinkRef, 2023-2025 (reports cover rate BY CONFIDENCE CEILING, not overall — see runBigSpreadShrinkSweep's doc for why)");
-    const results = await runBigSpreadShrinkSweep("cfb", 2023, 2025);
-    for (const r of results) {
-      const parts = r.coverRateByConfidenceCeiling
-        .map((c) => `conf<=${c.maxConfidence}: ${c.games}g ${fmtPct(c.coverRate)}`)
-        .join(", ");
-      log(job, `bigSpreadShrinkRef=${r.bigSpreadShrinkRef} (run ${r.runId}): ${parts}`);
-    }
-  });
-}
 
 /**
  * Re-runs the CFB baseline excluding week 14+ (rivalry week / conference
@@ -1761,7 +1744,6 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-walkforward-no-rivalry": startCfbWalkforwardNoRivalryJob,
   "cfb-segments": startCfbSegmentsJob,
   "cfb-sos-sweep": startCfbSosSweepJob,
-  "cfb-bigspread-sweep": startCfbBigSpreadShrinkSweepJob,
   "cfb-spsignal-sweep": startCfbSpSignalSweepJob,
   "cfb-successrate-sweep": startCfbSuccessRateSweepJob,
   "cfb-successrate-walkforward": startCfbSuccessRateWalkforwardJob,

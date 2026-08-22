@@ -128,13 +128,17 @@ async function predictAndStoreWeek(
     const homeWeeklySpZ = hasWeeklySpSample && homeWeeklySp !== undefined ? zScore(homeWeeklySp, weeklySpValues) : undefined;
     const awayWeeklySpZ = hasWeeklySpSample && awayWeeklySp !== undefined ? zScore(awayWeeklySp, weeklySpValues) : undefined;
 
+    // marketSpreadHome is fetched above and stored below (for display and
+    // for CLV scoring, per the anchor-removal decision -- see
+    // ratings/elo.ts's predictSpread doc) but deliberately NOT passed into
+    // predictSpread: the model's prediction no longer takes the market
+    // line as an input at all.
     const prediction = predictSpread(
       {
         homeRating: home.rating,
         awayRating: away.rating,
         homeGamesPlayed: home.gamesPlayed,
         awayGamesPlayed: away.gamesPlayed,
-        marketSpreadHome,
         homeEloZ,
         awayEloZ,
         homeSpZ,

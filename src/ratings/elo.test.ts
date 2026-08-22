@@ -42,31 +42,21 @@ test("computeInitialRating blends against league-average (0), not raw SP+, when 
   assert.ok(Math.abs(computeInitialRating(undefined, 20, params) - 0.4 * 20) < 1e-9);
 });
 
-test("predictSpread falls back to pure Elo with no market line", () => {
-  const result = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
-    NFL,
-  );
+test("predictSpread always returns the pure rating-differential number (no market input at all)", () => {
+  const result = predictSpread({ homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 }, NFL);
   assert.equal(result.eloSpreadHome, -3.5);
   assert.equal(result.modelSpreadHome, -3.5);
-  assert.equal(result.modelWeight, 1);
 });
 
-test("predictSpread blends toward the market by shrinkage and widens confidence with spread size", () => {
-  // combinedGames=8, modelWeight = 8/(8+8) = 0.5 -> 0.5*(-3.5) + 0.5*(-2) = -2.75
-  // baseConfidence = 8/sqrt(9) = 8/3; spreadUncertainty = 2/40 = 0.05 -> confidence = 8/3 * 1.05 = 2.8
-  const result = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: -2 },
-    NFL,
-  );
-  assert.equal(result.modelWeight, 0.5);
-  assert.equal(result.modelSpreadHome, -2.75);
-  assert.ok(Math.abs(result.confidence - 2.8) < 1e-9);
+test("predictSpread's confidence depends only on combinedGames, not on any market line", () => {
+  // baseErrorPoints=8, combinedGames=8 -> confidence = 8/sqrt(9) = 8/3
+  const result = predictSpread({ homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 }, NFL);
+  assert.ok(Math.abs(result.confidence - 8 / 3) < 1e-9);
 });
 
 test("predictSpread's eloSignal term actually moves the prediction (CFB only -- NFL's eloSignalPoints is 0)", () => {
   const result = predictSpread(
-    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, homeEloZ: 1, awayEloZ: -1 },
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, homeEloZ: 1, awayEloZ: -1 },
     CFB,
   );
   // eloSignal = eloSignalPoints * (1 - (-1)); predictedMargin = 0 - 0 + homeFieldAdvantage + eloSignal
@@ -80,7 +70,7 @@ test("predictSpread's spSignal term actually moves the prediction when spSignalP
   // that default ever changes, and so it actually proves the wiring works.
   const params = { ...CFB, spSignalPoints: 2 };
   const result = predictSpread(
-    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, homeSpZ: 1, awaySpZ: -1 },
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, homeSpZ: 1, awaySpZ: -1 },
     params,
   );
   const expectedMargin = CFB.homeFieldAdvantage + 2 * 2;
@@ -89,11 +79,11 @@ test("predictSpread's spSignal term actually moves the prediction when spSignalP
 
 test("predictSpread ignores spZ inputs entirely when spSignalPoints is 0 (today's default)", () => {
   const withSpZ = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, homeSpZ: 5, awaySpZ: -5 },
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, homeSpZ: 5, awaySpZ: -5 },
     CFB,
   );
   const withoutSpZ = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 },
     CFB,
   );
   assert.equal(withSpZ.eloSpreadHome, withoutSpZ.eloSpreadHome);
@@ -369,7 +359,7 @@ test("computeSeasonRatings does not opponent-adjust when the opponent has fewer 
 test("predictSpread's restSignal moves the prediction when pointsPerRestDay > 0", () => {
   const params = { ...CFB, pointsPerRestDay: 0.3 };
   const result = predictSpread(
-    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, restDaysDiff: 7 },
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, restDaysDiff: 7 },
     params,
   );
   // restSignal = 0.3 * 7 = 2.1; predictedMargin = 0 - 0 + homeFieldAdvantage + 2.1
@@ -380,15 +370,15 @@ test("predictSpread's restSignal moves the prediction when pointsPerRestDay > 0"
 test("predictSpread treats a missing restDaysDiff as zero differential, not zero rest for either side", () => {
   const params = { ...CFB, pointsPerRestDay: 0.3 };
   const withUndefined = predictSpread(
-    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 },
     params,
   );
   const withNull = predictSpread(
-    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: null },
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, restDaysDiff: null },
     params,
   );
   const withZero = predictSpread(
-    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: 0 },
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, restDaysDiff: 0 },
     params,
   );
   assert.equal(withUndefined.eloSpreadHome, withNull.eloSpreadHome);
@@ -397,11 +387,11 @@ test("predictSpread treats a missing restDaysDiff as zero differential, not zero
 
 test("pointsPerRestDay=0 (today's default) makes restDaysDiff a complete no-op, even with a large differential", () => {
   const withRest = predictSpread(
-    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, restDaysDiff: 14 },
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, restDaysDiff: 14 },
     CFB,
   );
   const withoutRest = predictSpread(
-    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    { homeRating: 2, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 },
     CFB,
   );
   assert.equal(withRest.eloSpreadHome, withoutRest.eloSpreadHome);
@@ -463,7 +453,7 @@ test("predictSpread's weeklySpSignal term actually moves the prediction when wee
   // -- explicit override so this doesn't silently pass as a no-op.
   const params = { ...CFB, weeklySpSignalPoints: 2 };
   const result = predictSpread(
-    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null, homeWeeklySpZ: 1, awayWeeklySpZ: -1 },
+    { homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, homeWeeklySpZ: 1, awayWeeklySpZ: -1 },
     params,
   );
   const expectedMargin = CFB.homeFieldAdvantage + 2 * 2;
@@ -472,11 +462,11 @@ test("predictSpread's weeklySpSignal term actually moves the prediction when wee
 
 test("predictSpread ignores weeklySpZ inputs entirely when weeklySpSignalPoints is 0 (today's default)", () => {
   const withZ = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null, homeWeeklySpZ: 5, awayWeeklySpZ: -5 },
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, homeWeeklySpZ: 5, awayWeeklySpZ: -5 },
     CFB,
   );
   const withoutZ = predictSpread(
-    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4, marketSpreadHome: null },
+    { homeRating: 3, awayRating: 1, homeGamesPlayed: 4, awayGamesPlayed: 4 },
     CFB,
   );
   assert.equal(withZ.eloSpreadHome, withoutZ.eloSpreadHome);
@@ -486,7 +476,7 @@ test("predictSpread's spSignal and weeklySpSignal are independent, additive term
   const params = { ...CFB, spSignalPoints: 2, weeklySpSignalPoints: 3 };
   const result = predictSpread(
     {
-      homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0, marketSpreadHome: null,
+      homeRating: 0, awayRating: 0, homeGamesPlayed: 0, awayGamesPlayed: 0,
       homeSpZ: 1, awaySpZ: -1, homeWeeklySpZ: 1, awayWeeklySpZ: -1,
     },
     params,

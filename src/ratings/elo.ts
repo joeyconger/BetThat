@@ -552,7 +552,6 @@ export interface PredictionInput {
   awayRating: number;
   homeGamesPlayed: number;
   awayGamesPlayed: number;
-  marketSpreadHome: number | null;
   /**
    * z-scores of each team's CFBD Elo rating against that week's full FBS
    * distribution (see ratings/service.ts) — scale-invariant on purpose,
@@ -599,24 +598,26 @@ export interface PredictionInput {
 }
 
 export interface Prediction {
-  /** This model's own line, before any market blend — negative = home favored. */
+  /** The model's own line -- negative = home favored. Identical to modelSpreadHome; kept as a separate field for API/call-site stability (many call sites and reports already read eloSpreadHome specifically) now that there is no blend for the two to differ by. */
   eloSpreadHome: number;
-  /** The reported line: a confidence-weighted blend of the model's own line and the current market line. */
+  /** The reported line. As of the market-anchor removal, this is always exactly eloSpreadHome -- see this function's doc. */
   modelSpreadHome: number;
   /** Points of estimated uncertainty in modelSpreadHome. */
   confidence: number;
-  /** How much weight modelSpreadHome put on the model's own number vs. the market (0 = pure market, 1 = pure model). */
-  modelWeight: number;
 }
 
 /**
- * Converts ratings into a market-anchored spread. This is the mechanism
- * behind "anchor to market rather than build an independent power
- * ranking": early in a season (few games played), modelWeight is small and
- * the output stays close to the market line; as more games accumulate,
- * the model's own signal gets more say. With no market line available at
- * all, the model falls back to its own number outright (and the caller
- * should treat that prediction as lower-confidence / unanchored).
+ * Converts ratings into a spread -- ratings differential + home field +
+ * the eloSignal/spSignal/weeklySpSignal/restSignal secondary terms, full
+ * stop. No market line enters this function or any other model-number
+ * path (removed -- see the git history for the prior market-anchored
+ * version, which blended toward marketSpreadHome by games-played
+ * shrinkage and widened confidence with market spread size). The market
+ * line is still fetched and stored by ratings/service.ts for DISPLAY and
+ * for CLV scoring, just never as a term here. Works identically whether
+ * a market line exists for this matchup or not -- an arbitrary
+ * hypothetical matchup (no scheduled game, no market) is not a
+ * degraded/edge case, it's the normal path.
  */
 export function predictSpread(input: PredictionInput, params: RatingParams): Prediction {
   const eloSignal = params.eloSignalPoints * ((input.homeEloZ ?? 0) - (input.awayEloZ ?? 0));
@@ -633,41 +634,7 @@ export function predictSpread(input: PredictionInput, params: RatingParams): Pre
   const eloSpreadHome = -predictedMargin;
 
   const combinedGames = input.homeGamesPlayed + input.awayGamesPlayed;
-  const baseConfidence = params.baseErrorPoints / Math.sqrt(combinedGames + 1);
+  const confidence = params.baseErrorPoints / Math.sqrt(combinedGames + 1);
 
-  if (input.marketSpreadHome === null) {
-    return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence: baseConfidence, modelWeight: 1 };
-  }
-
-  // First attempt at fixing this (shrinking modelWeight toward market as
-  // |marketSpreadHome| grows) was a no-op that never should have shipped
-  // without checking it against how covered/clv actually get computed:
-  // both (clv.ts) depend ONLY on pickSide, a binary home/away choice from
-  // the SIGN of (market - modelSpreadHome) — never its magnitude.
-  // modelSpreadHome is a weighted average of eloSpreadHome and market, and
-  // a weighted average can never cross past either endpoint — so shrinking
-  // modelWeight can only ever move modelSpreadHome closer to market, never
-  // to the other side of it, meaning pickSide (and therefore cover rate
-  // and CLV) is PROVABLY unaffected by any modelWeight-only fix, no matter
-  // how strong the damping. Confirmed empirically: a real sweep of
-  // bigSpreadShrinkRef from 5 to 1000 produced bit-for-bit identical cover
-  // rate and avgClv every time.
-  //
-  // Real fix: since the model's rating scale is demonstrably compressed
-  // relative to true blowout magnitudes (real CFB mismatches routinely hit
-  // 30-50+ points; this incremental, regression-heavy rating system can't
-  // accumulate that much separation within a season), a big disagreement
-  // with an already-extreme market spread is a signal the prediction is
-  // LESS trustworthy, not a reason to change which side gets picked.
-  // bigSpreadShrinkRef widens `confidence` (not modelWeight) as
-  // |marketSpreadHome| grows, so a confidence-based filter (getConfidenceReport,
-  // or a future live threshold) naturally screens these out — same
-  // "recognize and exclude the untrustworthy segment" pattern that
-  // excluding rivalry week already validated, rather than trying to
-  // out-guess the market's own number.
-  const modelWeight = combinedGames / (combinedGames + params.marketShrinkageK);
-  const modelSpreadHome = modelWeight * eloSpreadHome + (1 - modelWeight) * input.marketSpreadHome;
-  const spreadUncertainty = Math.abs(input.marketSpreadHome) / params.bigSpreadShrinkRef;
-  const confidence = baseConfidence * (1 + spreadUncertainty);
-  return { eloSpreadHome, modelSpreadHome, confidence, modelWeight };
+  return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence };
 }

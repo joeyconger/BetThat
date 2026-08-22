@@ -35,8 +35,6 @@ export interface RatingParams {
   seasonCarryover: number;
   /** Points of predicted-margin uncertainty at zero games played; shrinks as sqrt(games played) grows. */
   baseErrorPoints: number;
-  /** "Games worth of trust" the market line gets before the model's own signal outweighs it (see predict.ts). */
-  marketShrinkageK: number;
   /** Weight (0-1) given to the prior season's CFBD SP+ rating vs. this model's own carryover, when seeding a new season's initial rating. CFB-only — SP+ doesn't exist for NFL. */
   spPriorWeight: number;
   /** Points of predicted-margin adjustment per unit z-score gap in CFBD's weekly Elo (see ratings/elo.ts's predictSpread). CFB-only — 0 for NFL, which CFBD doesn't cover. */
@@ -97,8 +95,6 @@ export interface RatingParams {
    * has not itself been swept. Only takes effect when successRateWeight > 0.
    */
   pointsPerSuccessRate: number;
-  /** Widens `confidence` as |marketSpreadHome| grows — a big market spread is a signal the prediction is less trustworthy (see ratings/elo.ts's predictSpread), for a confidence-based filter to screen out, NOT a lever on modelWeight (a modelWeight-only version was tried and proven to be a no-op, see predictSpread's doc). Smaller = widens confidence faster at a given spread size. */
-  bigSpreadShrinkRef: number;
   /**
    * When true, computeSeasonRatings prefers each game's garbage-time-
    * excluded EPA/success rate (a second CFBD ingestion pass with
@@ -281,11 +277,12 @@ export interface RatingParams {
    * Games-played shrinkage for off_adj/def_adj, per a direct
    * architectural critique: a team's off_adj computed from just 1 prior
    * game (week 2) was getting the exact same weight in the additive term
-   * as one computed from 11 prior games (week 12) -- the existing
-   * modelWeight/marketShrinkageK mechanism in predictSpread shrinks the
-   * FINAL prediction toward market based on total games played, but
-   * that's a separate thing from shrinking an individual COMPONENT's
-   * value toward its own prior (0 = league average) based on how much
+   * as one computed from 11 prior games (week 12) -- this is a distinct
+   * concern from shrinking a whole FINAL prediction toward some external
+   * reference (predictSpread no longer does that at all -- see its doc
+   * -- but the reasoning still applies): shrinking an individual
+   * COMPONENT's value toward its own prior (0 = league average) based on
+   * how much
    * data went into computing IT specifically. Applied as
    * gamesPlayed/(gamesPlayed+k) -- the standard empirical-Bayes shrinkage
    * shape -- to each side's off_adj/def_adj independently, using that
@@ -310,14 +307,12 @@ const NFL_PARAMS: RatingParams = {
   maxSosMultiplier: 1.8,
   seasonCarryover: 0.6,
   baseErrorPoints: 8,
-  marketShrinkageK: 8,
   spPriorWeight: 0, // no SP+ for NFL
   eloSignalPoints: 0, // no CFBD Elo for NFL
   spSignalPoints: 0, // no CFBD SP+ for NFL
   pointsPerRestDay: 0, // untested — needs a real sweep. Applies to both sports (game_date is universal), unlike the CFBD-only signals above.
   successRateWeight: 0, // untested — see RatingParams doc; 0 = today's pure-EPA behavior
   pointsPerSuccessRate: 90, // untested placeholder — see RatingParams doc
-  bigSpreadShrinkRef: 40, // widens confidence at NFL's typical spread range (rarely exceeds ~20) — untested for NFL, conservative default until swept
   excludeGarbageTime: false, // untested — no-garbage columns not ingested for NFL yet (nflverse-based, not CFBD)
   opponentAdjustWeight: 0, // untested — no-op until swept
   turnoverLuckWeight: 0, // untested — turnover stats not ingested for NFL yet (would need an nflverse play-by-play source, not CFBD)
@@ -351,7 +346,6 @@ const CFB_PARAMS: RatingParams = {
   // top of this one rather than replacing it was judged too likely to
   // repeat that mistake at a larger scale.
   sosWeight: 0,
-  marketShrinkageK: 6, // shallower CFB schedules (12 games) mean less time to prove the model out
   // pointsPerEpa/spPriorWeight/eloSignalPoints below: calibrated from the
   // cfb-external-sweep run (see README "External ratings" / backtest run
   // 101-125) — spPriorWeight and eloSignalPoints were NOT independent
@@ -389,16 +383,6 @@ const CFB_PARAMS: RatingParams = {
   // direction held across both the full sweep and an independent holdout.
   successRateWeight: 0.75,
   pointsPerSuccessRate: 120,
-  // Uncalibrated starting point — widens confidence for predictions
-  // fighting an extreme market spread, since backtest data showed those
-  // losing more often than not (real CFB mismatches routinely hit 30-50+
-  // points, more extreme than this rating system's compressed scale can
-  // match — see README "Big-spread deviation"). A modelWeight-based
-  // version of this same idea was tried first and proven mathematically
-  // incapable of changing cover rate/CLV (see predictSpread's doc) — this
-  // confidence-based version needs its own real sweep against
-  // getConfidenceReport before trusting this specific value.
-  bigSpreadShrinkRef: 25,
   // Inherited false from NFL_PARAMS — deliberately not flipped on yet.
   // CFBD's excludeGarbageTime param is confirmed to exist on the exact
   // endpoint already in use (/stats/game/advanced), but the no-garbage
