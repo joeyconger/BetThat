@@ -1,6 +1,6 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
-import { getPlays, getGames, getTeams, getWinProbabilityData } from "./ingest/cfbd/client.js";
+import { getPlays, getGames, getTeams, getWinProbabilityData, getDrives } from "./ingest/cfbd/client.js";
 import type { CfbdPlayWinProbability } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
@@ -10,7 +10,7 @@ import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesS
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
 import { syncOpponentAdjustedStats } from "./ingest/cfbd/syncOpponentAdjustedStats.js";
-import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap } from "./db/repo.js";
+import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap, getGameSourceIdToIdMap } from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
@@ -735,6 +735,67 @@ export function startCfbFinishingDrivesIngestJob(): Promise<JobStatus> {
 }
 
 /**
+ * Throwaway diagnostic (Task 38): syncCfbdFinishingDrivesStats.ts's
+ * per-row findGameId/findTeamIdByName lookup is silently skipping ~48-53%
+ * of aggregated (game, team) scoring-opportunity entries per season, far
+ * above what "raw /drives feed includes every division, not just FBS"
+ * alone should explain (synced counts fall BELOW the theoretical
+ * FBS-only max of ~2 * games/season). This classifies every (gameId,
+ * team) pair from one season's /drives response into 4 buckets using the
+ * bulk maps (fast, no DB round-trip per row) and samples the actual
+ * team-name strings that fail to resolve on games that DO resolve --
+ * i.e. confirmed-real (likely FBS) games where the team name itself
+ * doesn't match teams.name, the case that most directly indicates a
+ * name-formatting mismatch rather than legitimate non-FBS filtering.
+ */
+export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
+  return runJob("cfb-finishingdrives-diagnose", async (job) => {
+    const year = 2024;
+    log(job, `${year}: fetching raw drives + bulk lookup maps`);
+    const [drives, teamMap, gameMap] = await Promise.all([getDrives(year, "regular"), getTeamNameToIdMap("cfb"), getGameSourceIdToIdMap("cfb", year)]);
+    log(job, `${year}: fetched ${drives.length} raw drives, ${teamMap.size} teams known, ${gameMap.size} games known for ${year}`);
+
+    const pairs = new Set<string>();
+    for (const drive of drives) {
+      pairs.add(`${drive.gameId}:${drive.offense}`);
+      pairs.add(`${drive.gameId}:${drive.defense}`);
+    }
+    log(job, `${year}: ${pairs.size} distinct (gameId, team) pairs across all drives (before the startYardsToGoal<=40 filter finishingDrives itself applies)`);
+
+    let bothResolve = 0;
+    let gameOnlyResolves = 0;
+    let teamOnlyResolves = 0;
+    let neitherResolves = 0;
+    const failingTeamNamesOnResolvedGames = new Map<string, number>();
+
+    for (const pair of pairs) {
+      const sep = pair.indexOf(":");
+      const gameIdStr = pair.slice(0, sep);
+      const team = pair.slice(sep + 1);
+      const gameResolves = gameMap.has(gameIdStr);
+      const teamResolves = teamMap.has(team);
+      if (gameResolves && teamResolves) bothResolve += 1;
+      else if (gameResolves && !teamResolves) {
+        gameOnlyResolves += 1;
+        failingTeamNamesOnResolvedGames.set(team, (failingTeamNamesOnResolvedGames.get(team) ?? 0) + 1);
+      } else if (!gameResolves && teamResolves) teamOnlyResolves += 1;
+      else neitherResolves += 1;
+    }
+
+    log(job, `${year}: both resolve = ${bothResolve}`);
+    log(job, `${year}: game resolves, team FAILS = ${gameOnlyResolves} (this is the interesting bucket -- confirmed-real game, unmatched team name)`);
+    log(job, `${year}: game FAILS, team resolves = ${teamOnlyResolves} (expected: non-FBS games, or FBS games not yet ingested)`);
+    log(job, `${year}: neither resolves = ${neitherResolves} (expected: non-FBS games with non-FBS/unknown team names)`);
+
+    const sampleNames = [...failingTeamNamesOnResolvedGames.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 25)
+      .map(([name, count]) => `"${name}" (x${count})`);
+    log(job, `${year}: sample team-name strings that failed to resolve on a confirmed-real game (most frequent first): ${sampleNames.join(", ")}`);
+  });
+}
+
+/**
  * Phase 3 of the component-model rebuild: special teams (field position +
  * FG make rate), from a combined /drives + /plays pass -- see
  * ingest/cfbd/syncSpecialTeamsStats.ts. Run this before
@@ -1291,6 +1352,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-passingdowns": startCfbComponentSweepPassingDownsJob,
   "cfb-component-sweep-sackrate": startCfbComponentSweepSackRateJob,
   "cfb-finishingdrives-ingest": startCfbFinishingDrivesIngestJob,
+  "cfb-finishingdrives-diagnose": startCfbFinishingDrivesDiagnoseJob,
   "cfb-component-sweep-finishingdrives": startCfbComponentSweepFinishingDrivesJob,
   "cfb-specialteams-ingest": startCfbSpecialTeamsIngestJob,
   "cfb-opponentadjusted-ingest": startCfbOpponentAdjustedIngestJob,
