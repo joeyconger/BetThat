@@ -446,6 +446,19 @@ export async function upsertFinishingDrivesStatsDebug(input: UpsertFinishingDriv
   return result.rowCount ?? -1;
 }
 
+/** Direct read-back of one team_game_stats row's finishing-drives fields -- Task 38 diagnostic, to bypass getFinishingDrivesGameCoverage's aggregate JOIN entirely and check a single row's persisted value. */
+export async function debugReadFinishingDrivesRow(
+  gameId: number,
+  teamId: number,
+): Promise<{ found: boolean; offFinishingDrivesPpo: number | null; defFinishingDrivesPpo: number | null } | null> {
+  const result = await pool.query<{ off_finishing_drives_ppo: number | null; def_finishing_drives_ppo: number | null }>(
+    `SELECT off_finishing_drives_ppo, def_finishing_drives_ppo FROM team_game_stats WHERE game_id = $1 AND team_id = $2`,
+    [gameId, teamId],
+  );
+  if (result.rows.length === 0) return null;
+  return { found: true, offFinishingDrivesPpo: result.rows[0]!.off_finishing_drives_ppo, defFinishingDrivesPpo: result.rows[0]!.def_finishing_drives_ppo };
+}
+
 export interface UpsertSpecialTeamsStatsInput {
   gameId: number;
   teamId: number;

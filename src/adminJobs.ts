@@ -17,6 +17,7 @@ import {
   getFinishingDrivesGameCoverage,
   getGameParticipantsBySourceId,
   upsertFinishingDrivesStatsDebug,
+  debugReadFinishingDrivesRow,
 } from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
@@ -908,6 +909,7 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
     let rowCountZero = 0;
     let rowCountOther = 0;
     const zeroRowSamples: string[] = [];
+    let firstSuccess: { gameId: number; teamId: number; team: string; gameIdStr: string; offPpo: number | null; defPpo: number | null } | null = null;
     for (const [key, entry] of agg) {
       const sep = key.indexOf(":");
       const gameIdStr = key.slice(0, sep);
@@ -917,14 +919,13 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
       if (!gameInfo || teamId == null) continue;
       if (teamId !== gameInfo.homeTeamId && teamId !== gameInfo.awayTeamId) continue;
       attempted += 1;
-      const rowCount = await upsertFinishingDrivesStatsDebug({
-        gameId: gameInfo.gameId,
-        teamId,
-        offFinishingDrivesPpo: entry.offOpportunities === 0 ? null : entry.offPoints / entry.offOpportunities,
-        defFinishingDrivesPpo: entry.defOpportunities === 0 ? null : entry.defPoints / entry.defOpportunities,
-      });
-      if (rowCount === 1) rowCountOne += 1;
-      else if (rowCount === 0) {
+      const offPpo = entry.offOpportunities === 0 ? null : entry.offPoints / entry.offOpportunities;
+      const defPpo = entry.defOpportunities === 0 ? null : entry.defPoints / entry.defOpportunities;
+      const rowCount = await upsertFinishingDrivesStatsDebug({ gameId: gameInfo.gameId, teamId, offFinishingDrivesPpo: offPpo, defFinishingDrivesPpo: defPpo });
+      if (rowCount === 1) {
+        rowCountOne += 1;
+        if (!firstSuccess) firstSuccess = { gameId: gameInfo.gameId, teamId, team, gameIdStr, offPpo, defPpo };
+      } else if (rowCount === 0) {
         rowCountZero += 1;
         if (zeroRowSamples.length < 15) zeroRowSamples.push(`game source_id=${gameIdStr} (resolved gameId=${gameInfo.gameId}), team="${team}" (resolved teamId=${teamId})`);
       } else rowCountOther += 1;
@@ -933,6 +934,15 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
     if (zeroRowSamples.length > 0) {
       log(job, `${year}: sample rowCount=0 entries: ${zeroRowSamples.join(" | ")}`);
     }
+
+    if (firstSuccess) {
+      const readBack = await debugReadFinishingDrivesRow(firstSuccess.gameId, firstSuccess.teamId);
+      log(
+        job,
+        `${year}: direct read-back of the first rowCount=1 write (game source_id=${firstSuccess.gameIdStr}, team="${firstSuccess.team}", gameId=${firstSuccess.gameId}, teamId=${firstSuccess.teamId}) -- wrote offPpo=${firstSuccess.offPpo}, defPpo=${firstSuccess.defPpo} -- DB now has: ${readBack ? `found=true, offPpo=${readBack.offFinishingDrivesPpo}, defPpo=${readBack.defFinishingDrivesPpo}` : "found=false (no row at all!)"}`,
+      );
+    }
+
     const reCheck = await getFinishingDrivesGameCoverage("cfb", year);
     log(job, `${year}: post-write-test database coverage = ${reCheck.gamesWithBoth}/${reCheck.gamesTotal} games (was ${actual.gamesWithBoth}/${actual.gamesTotal} before this job's own writes)`);
   });
