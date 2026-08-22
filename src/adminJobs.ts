@@ -1293,26 +1293,35 @@ async function logClvPlaceboAndPairedTest(job: JobStatus, label: string, handTun
     );
   }
 
-  if (handTuned && joint) {
-    const handTunedClv = await getBacktestClvByGame(handTuned.id);
-    const jointClv = await getBacktestClvByGame(joint.id);
-    const commonGameIds = [...handTunedClv.keys()].filter((id) => jointClv.has(id));
-    if (commonGameIds.length >= 2) {
-      const a = commonGameIds.map((id) => handTunedClv.get(id)!);
-      const b = commonGameIds.map((id) => jointClv.get(id)!);
-      const paired = pairedTTest(a, b);
-      log(
-        job,
-        `[${label}] paired test, jointly-fit CLV vs hand-tuned CLV on the SAME ${paired.n} holdout games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p(two-sided)=${paired.pValueTwoSided.toFixed(4)} -- ${
-          paired.pValueTwoSided < 0.05
-            ? "statistically significant at p<0.05."
-            : "NOT statistically significant -- consistent with 'no evidence the joint refit beats hand-tuning,' not 'the joint refit is better.'"
-        }`,
-      );
-    } else {
-      log(job, `[${label}] could not run the paired CLV test -- only ${commonGameIds.length} games in common between the two runs.`);
-    }
+  await logPairedClvTest(job, label, "jointly-fit", "hand-tuned", joint, handTuned);
+}
+
+/** Paired t-test on CLV between any two backtest runs (by game_id) -- generic, used for hand-tuned-vs-joint AND for the naive-baseline comparison. */
+async function logPairedClvTest(
+  job: JobStatus,
+  label: string,
+  aName: string,
+  bName: string,
+  runA: BacktestRunSummary | undefined,
+  runB: BacktestRunSummary | undefined,
+): Promise<void> {
+  if (!runA || !runB) return;
+  const aClv = await getBacktestClvByGame(runA.id);
+  const bClv = await getBacktestClvByGame(runB.id);
+  const commonGameIds = [...aClv.keys()].filter((id) => bClv.has(id));
+  if (commonGameIds.length < 2) {
+    log(job, `[${label}] could not run the paired CLV test (${aName} vs ${bName}) -- only ${commonGameIds.length} games in common between the two runs.`);
+    return;
   }
+  const a = commonGameIds.map((id) => bClv.get(id)!);
+  const b = commonGameIds.map((id) => aClv.get(id)!);
+  const paired = pairedTTest(a, b);
+  log(
+    job,
+    `[${label}] paired test, ${aName} CLV vs ${bName} CLV on the SAME ${paired.n} holdout games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p(two-sided)=${paired.pValueTwoSided.toFixed(4)} -- ${
+      paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+    }`,
+  );
 }
 
 export function startCfbClvPlaceboJob(): Promise<JobStatus> {
@@ -1328,6 +1337,12 @@ export function startCfbClvPlaceboJob(): Promise<JobStatus> {
 
     if (!contemporaneousHandTuned && !contemporaneousJoint && !predictiveHandTuned && !predictiveJoint) {
       log(job, "\nNo jointrefit* holdout runs found at all -- run cfb-jointrefit-holdout and/or cfb-jointrefit-predictive-holdout first.");
+    }
+
+    const naiveBaseline = runs.find((r) => r.name.startsWith("jointrefit-naivebaseline-cfb-test"));
+    if (naiveBaseline && contemporaneousHandTuned) {
+      log(job, "\n[naive-baseline] does the hand-tuned model's CLV actually differ from a model with all 8 components zeroed out (same market-anchoring)?");
+      await logPairedClvTest(job, "naive-baseline", "hand-tuned", "naive-baseline (0 components)", contemporaneousHandTuned, naiveBaseline);
     }
   });
 }
