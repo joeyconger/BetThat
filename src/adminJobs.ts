@@ -20,6 +20,8 @@ import {
   debugReadFinishingDrivesRow,
   getBacktestClvRows,
   getBacktestClvByGame,
+  getBacktestGameDetails,
+  getCombinedGamesPlayedByGame,
   listBacktestRuns,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
@@ -1516,6 +1518,172 @@ export function startCfbUnanchoredRebaselineJob(): Promise<JobStatus> {
 }
 
 /**
+ * Per review: the unanchored rebaseline's two headline numbers moved in
+ * OPPOSITE directions (avgClv fell, cover-vs-open rose) -- when that
+ * happens the usual cause is a change in the DISTRIBUTION of picks, not
+ * their quality, since removing the anchor lets the model deviate from
+ * market much further on marginal games. This checks that directly:
+ * finds the most recent pre-Part-1 (anchored) full 2023-2025 CFB run,
+ * restricts to the games BOTH runs scored, and reports (a) how many
+ * picks flipped sides, (b) cover rate restricted to same-side-pick
+ * games only, (c) a proper paired significance test on CLV and on
+ * covered (not eyeballed aggregate deltas from two different
+ * populations), and (d) a breakdown bucketed by COMBINED GAMES PLAYED
+ * (not calendar week -- a team's week 4 with a bye and an FCS game is a
+ * different information state than a team's week 4 with 3 FBS games),
+ * testing the specific prediction that unanchored should be clearly
+ * worse when games-played is low and comparable-or-better once it's not.
+ */
+export function startCfbAnchorRemovalBreakdownJob(): Promise<JobStatus> {
+  return runJob("cfb-anchor-removal-breakdown", async (job) => {
+    const runs = await listBacktestRuns();
+    const unanchored = runs.find((r) => r.name.startsWith("cfb-unanchored-rebaseline-"));
+    if (!unanchored) {
+      log(job, "No cfb-unanchored-rebaseline-* run found -- run cfb-unanchored-rebaseline first.");
+      return;
+    }
+    const anchored = runs.find((r) => r.sport === "cfb" && r.seasonStart === 2023 && r.seasonEnd === 2025 && r.id !== unanchored.id && r.id < unanchored.id);
+    if (!anchored) {
+      log(job, "No pre-existing full 2023-2025 CFB run found to compare against -- can't do an apples-to-apples check.");
+      return;
+    }
+    log(job, `Comparing unanchored run ${unanchored.id} (${unanchored.name}) against anchored run ${anchored.id} (${anchored.name}, created ${anchored.createdAt.toISOString()}).`);
+
+    const [anchoredDetails, unanchoredDetails] = await Promise.all([getBacktestGameDetails(anchored.id), getBacktestGameDetails(unanchored.id)]);
+    const commonGameIds = [...anchoredDetails.keys()].filter((id) => unanchoredDetails.has(id));
+    log(job, `${commonGameIds.length} games scored by both runs.`);
+
+    function pickSide(d: { modelSpreadHome: number; openingSpreadHome: number | null }): "home" | "away" | null {
+      if (d.openingSpreadHome === null) return null;
+      return d.openingSpreadHome - d.modelSpreadHome >= 0 ? "home" : "away";
+    }
+
+    let bothHaveOpeningLine = 0;
+    let flips = 0;
+    let sameSideBothCovered = 0;
+    let sameSideAnchoredCovered = 0;
+    let sameSideUnanchoredCovered = 0;
+    let sameSideCount = 0;
+    for (const id of commonGameIds) {
+      const a = anchoredDetails.get(id)!;
+      const u = unanchoredDetails.get(id)!;
+      const aSide = pickSide(a);
+      const uSide = pickSide(u);
+      if (aSide === null || uSide === null) continue;
+      bothHaveOpeningLine += 1;
+      if (aSide !== uSide) {
+        flips += 1;
+        continue;
+      }
+      sameSideCount += 1;
+      if (a.covered !== null) sameSideAnchoredCovered += a.covered ? 1 : 0;
+      if (u.covered !== null) sameSideUnanchoredCovered += u.covered ? 1 : 0;
+      if (a.covered !== null && u.covered !== null && a.covered === u.covered) sameSideBothCovered += 1;
+    }
+    log(
+      job,
+      `of ${bothHaveOpeningLine} games with an opening line on both sides: ${flips} (${((flips / bothHaveOpeningLine) * 100).toFixed(1)}%) flipped pick side between anchored and unanchored -- this is the change-in-distribution-of-picks question.`,
+    );
+    log(
+      job,
+      `restricted to the ${sameSideCount} SAME-side-pick games: anchored cover rate=${((sameSideAnchoredCovered / sameSideCount) * 100).toFixed(1)}%, unanchored cover rate=${((sameSideUnanchoredCovered / sameSideCount) * 100).toFixed(1)}% -- if these two are close while the FULL-population cover rates differ more, the aggregate cover-rate shift is coming from WHICH side gets picked on the flipped games, not from better forecasting on the games both models agree on.`,
+    );
+
+    // Paired tests -- both models scored on the identical game_id set.
+    const clvGameIds = commonGameIds.filter((id) => anchoredDetails.get(id)!.clv !== null && unanchoredDetails.get(id)!.clv !== null);
+    if (clvGameIds.length >= 2) {
+      const aClv = clvGameIds.map((id) => anchoredDetails.get(id)!.clv!);
+      const uClv = clvGameIds.map((id) => unanchoredDetails.get(id)!.clv!);
+      const paired = pairedTTest(aClv, uClv);
+      log(
+        job,
+        `paired test, CLV (unanchored - anchored) on ${paired.n} identical games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)}`,
+      );
+    }
+    const coveredGameIds = commonGameIds.filter((id) => anchoredDetails.get(id)!.covered !== null && unanchoredDetails.get(id)!.covered !== null);
+    if (coveredGameIds.length >= 2) {
+      const aCovered = coveredGameIds.map((id) => (anchoredDetails.get(id)!.covered ? 1 : 0));
+      const uCovered = coveredGameIds.map((id) => (unanchoredDetails.get(id)!.covered ? 1 : 0));
+      const paired = pairedTTest(aCovered, uCovered);
+      log(
+        job,
+        `paired test, covered-as-0/1 (unanchored - anchored) on ${paired.n} identical games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+          paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+        }`,
+      );
+    }
+
+    // Games-played-bucketed breakdown -- the direct test of Part 2's premise.
+    const gamesPlayedBySeason = new Map<number, Map<number, number>>();
+    for (const season of [2023, 2024, 2025]) {
+      gamesPlayedBySeason.set(season, await getCombinedGamesPlayedByGame("cfb", season));
+    }
+    // We don't have season per game_id here without another lookup -- check
+    // all three seasons' maps for this gameId (game ids are globally unique,
+    // so at most one map will have it).
+    function combinedGamesPlayed(gameId: number): number | null {
+      for (const map of gamesPlayedBySeason.values()) {
+        const v = map.get(gameId);
+        if (v !== undefined) return v;
+      }
+      return null;
+    }
+
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: "0-8 (roughly weeks 1-4)", min: 0, max: 8 },
+      { label: "9-16 (roughly weeks 5-8)", min: 9, max: 16 },
+      { label: "17-24 (roughly weeks 9-12)", min: 17, max: 24 },
+      { label: "25+ (late season)", min: 25, max: Infinity },
+    ];
+    log(job, "\nbucketed by COMBINED games played (home+away) at prediction time, not calendar week:");
+    for (const bucket of buckets) {
+      let n = 0;
+      let anchoredCoveredCount = 0;
+      let unanchoredCoveredCount = 0;
+      let anchoredCoveredN = 0;
+      let unanchoredCoveredN = 0;
+      let anchoredClvSum = 0;
+      let anchoredClvN = 0;
+      let unanchoredClvSum = 0;
+      let unanchoredClvN = 0;
+      for (const id of commonGameIds) {
+        const cgp = combinedGamesPlayed(id);
+        if (cgp === null || cgp < bucket.min || cgp > bucket.max) continue;
+        n += 1;
+        const a = anchoredDetails.get(id)!;
+        const u = unanchoredDetails.get(id)!;
+        if (a.covered !== null) {
+          anchoredCoveredN += 1;
+          anchoredCoveredCount += a.covered ? 1 : 0;
+        }
+        if (u.covered !== null) {
+          unanchoredCoveredN += 1;
+          unanchoredCoveredCount += u.covered ? 1 : 0;
+        }
+        if (a.clv !== null) {
+          anchoredClvN += 1;
+          anchoredClvSum += a.clv;
+        }
+        if (u.clv !== null) {
+          unanchoredClvN += 1;
+          unanchoredClvSum += u.clv;
+        }
+      }
+      log(
+        job,
+        `  ${bucket.label}: ${n} games -- anchored cover=${anchoredCoveredN > 0 ? ((anchoredCoveredCount / anchoredCoveredN) * 100).toFixed(1) + "%" : "n/a"} avgClv=${anchoredClvN > 0 ? (anchoredClvSum / anchoredClvN).toFixed(3) : "n/a"}; ` +
+          `unanchored cover=${unanchoredCoveredN > 0 ? ((unanchoredCoveredCount / unanchoredCoveredN) * 100).toFixed(1) + "%" : "n/a"} avgClv=${unanchoredClvN > 0 ? (unanchoredClvSum / unanchoredClvN).toFixed(3) : "n/a"}`,
+      );
+    }
+    log(
+      job,
+      "\nPrediction to check: unanchored should be clearly worse in the low-games-played buckets and comparable-or-better in the high ones. " +
+        "If it's uniformly similar across all buckets instead, the anchor was never doing meaningful early-season work, and Part 2's preseason-prior justification is weaker than assumed.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -1806,6 +1974,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-clv-naive-baseline": startCfbClvNaiveBaselineJob,
   "cfb-clv-frozen-ratings": startCfbClvFrozenRatingsJob,
   "cfb-unanchored-rebaseline": startCfbUnanchoredRebaselineJob,
+  "cfb-anchor-removal-breakdown": startCfbAnchorRemovalBreakdownJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,

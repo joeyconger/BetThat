@@ -1474,6 +1474,53 @@ export async function getBacktestClvByGame(backtestRunId: number): Promise<Map<n
   return new Map(result.rows.map((r) => [r.game_id, r.clv]));
 }
 
+export interface BacktestGameDetail {
+  modelSpreadHome: number;
+  openingSpreadHome: number | null;
+  clv: number | null;
+  covered: boolean | null;
+}
+
+/** Fuller per-game backtest_results row than getBacktestClvByGame/getBacktestClvRows -- lets a caller derive pickSide (sign of openingSpreadHome - modelSpreadHome, same convention as backtest/clv.ts's computeClv) and compare it across two different runs on the identical games. */
+export async function getBacktestGameDetails(backtestRunId: number): Promise<Map<number, BacktestGameDetail>> {
+  const result = await pool.query<{ game_id: number; model_spread_home: number; opening_spread_home: number | null; clv: number | null; covered: boolean | null }>(
+    `SELECT game_id, model_spread_home, opening_spread_home, clv, covered FROM backtest_results WHERE backtest_run_id = $1`,
+    [backtestRunId],
+  );
+  return new Map(
+    result.rows.map((r) => [
+      r.game_id,
+      { modelSpreadHome: r.model_spread_home, openingSpreadHome: r.opening_spread_home, clv: r.clv, covered: r.covered },
+    ]),
+  );
+}
+
+/**
+ * Each game's COMBINED games-played (home + away, each team's own count of
+ * PRIOR final games this season, before this game's week) -- the
+ * "thinness" variable for bucketing, independent of which model version
+ * produced a prediction (it's a fact about the schedule, not the rating
+ * math). Mirrors ratings/elo.ts's computeSeasonRatings bookkeeping
+ * (chronological order, gamesPlayed += 1 per team per game) without
+ * computing any rating -- just the counts.
+ */
+export async function getCombinedGamesPlayedByGame(sport: Sport, season: number): Promise<Map<number, number>> {
+  const result = await pool.query<{ id: number; week: number; home_team_id: number; away_team_id: number }>(
+    `SELECT id, week, home_team_id, away_team_id FROM games WHERE sport = $1 AND season = $2 AND status = 'final' ORDER BY week, id`,
+    [sport, season],
+  );
+  const gamesPlayed = new Map<number, number>();
+  const combined = new Map<number, number>();
+  for (const row of result.rows) {
+    const home = gamesPlayed.get(row.home_team_id) ?? 0;
+    const away = gamesPlayed.get(row.away_team_id) ?? 0;
+    combined.set(row.id, home + away);
+    gamesPlayed.set(row.home_team_id, home + 1);
+    gamesPlayed.set(row.away_team_id, away + 1);
+  }
+  return combined;
+}
+
 export async function listBacktestRuns(): Promise<BacktestRunSummary[]> {
   const result = await pool.query<{
     id: number;
