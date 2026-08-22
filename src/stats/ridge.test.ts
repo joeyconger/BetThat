@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { transpose, multiply, multiplyVector, solveLinearSystem, ridgeFit, predict, crossValidatedMse, selectLambda } from "./ridge.js";
+import { transpose, multiply, multiplyVector, solveLinearSystem, ridgeFit, predict, crossValidatedMse, selectLambda, assignFolds } from "./ridge.js";
 
 test("transpose flips rows and columns", () => {
   assert.deepEqual(transpose([[1, 2, 3], [4, 5, 6]]), [[1, 4], [2, 5], [3, 6]]);
@@ -107,4 +107,45 @@ test("selectLambda picks a lower-MSE lambda over a clearly-too-high one for a re
   assert.equal(results.length, 3);
   // Sorted ascending by MSE -- the best should not be the absurdly-high lambda (which shrinks everything to ~the mean).
   assert.notEqual(results[0]!.lambda, 1_000_000, "an absurdly high lambda should not win over reasonable ones for a real linear relationship");
+});
+
+test("assignFolds without groups falls back to contiguous slices", () => {
+  const folds = assignFolds(10, 5);
+  assert.deepEqual(folds, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
+});
+
+test("assignFolds with groups never splits a group across two folds", () => {
+  // 3 rows share group "a" (a game's 3 rows, say), 2 share "b", 1 is alone in "c".
+  const groups = ["a", "a", "b", "a", "b", "c"];
+  const folds = assignFolds(groups.length, 3, groups);
+  const foldOfGroup = new Map<string, number>();
+  groups.forEach((g, i) => {
+    const f = folds[i]!;
+    if (foldOfGroup.has(g)) {
+      assert.equal(f, foldOfGroup.get(g), `group "${g}" must stay in one fold, but appeared in both ${foldOfGroup.get(g)} and ${f}`);
+    } else {
+      foldOfGroup.set(g, f);
+    }
+  });
+});
+
+test("assignFolds with groups distributes distinct groups round-robin across folds", () => {
+  const groups = ["a", "b", "c", "d", "e", "f"];
+  const folds = assignFolds(groups.length, 3, groups);
+  assert.deepEqual(folds, [0, 1, 2, 0, 1, 2]);
+});
+
+test("crossValidatedMse with groups keeps every row of a group on the same side of the train/test split (no leakage)", () => {
+  // Two "weeks" (groups) of games whose target has a per-week shared offset --
+  // simulates games in the same week sharing a common estimation error. If a
+  // fold split a week's rows across train and test, the fitted intercept
+  // could partly explain the test week's offset from data it should never
+  // have seen; grouped folds prevent that structurally, so this just checks
+  // the call completes and returns a finite MSE with groups spanning more
+  // rows than folds.
+  const groups = ["w1", "w1", "w1", "w2", "w2", "w2", "w3", "w3", "w3"];
+  const X = groups.map((_, i) => [i, i * 2]);
+  const y = groups.map((g, i) => (g === "w1" ? 10 : g === "w2" ? -10 : 0) + i * 0.01);
+  const mse = crossValidatedMse(X, y, 1, 3, groups);
+  assert.ok(Number.isFinite(mse) && mse >= 0, `mse should be finite and non-negative (got ${mse})`);
 });

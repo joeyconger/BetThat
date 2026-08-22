@@ -45,6 +45,38 @@ export { JOINT_REFIT_COMPONENTS, computeComponentFeature, computeShrunkOpponentA
  * here -- it's not fitting a predictive model, it's calibrating what the
  * update signal itself should weigh.
  */
+
+/**
+ * Components whose missingness is STRUCTURAL (not a random/lookup-bug
+ * subsample) get value+indicator treatment instead of a hard complete-case
+ * gate: the raw feature is zero-imputed when missing (its own neutral "no
+ * information this game" value) AND a companion binary column (1 =
+ * imputed, 0 = observed) is added. This lets ridge separate "the value was
+ * X" from "there was nothing to measure" instead of conflating them into
+ * one attenuated coefficient -- and the indicator's own fitted coefficient
+ * is diagnostic: if it's doing all the work, the underlying stat is really
+ * just a proxy for whatever situation causes the missingness (see each
+ * doc below) and its raw-value coefficient shouldn't be trusted at face
+ * value.
+ *
+ * - pointsPerFinishingDrives: a scoring opportunity requires a drive
+ *   starting inside the opponent's 40, so a blowout's losing side often
+ *   has none -- missingness is a proxy for "this side got blown out."
+ * - pointsPerFgMakeRate: a team that attempts zero field goals in a game
+ *   (scored only via TDs, or never got in range) has no make rate to
+ *   measure -- missingness is a proxy for "no field goal opportunities."
+ * - pointsPerOpponentAdj: off_adj/def_adj require prior-week data, so a
+ *   team's first game of the season structurally has none -- missingness
+ *   is a proxy for "early season, ratings not yet stabilized."
+ *
+ * Every other component (explosiveness, down/distance splits, sack rate,
+ * field position) still hard-gates the row: their missingness in this
+ * dataset is negligible (Task 38's coverage printout showed ~100%), so a
+ * gate costs almost nothing and avoids adding indicator columns with no
+ * diagnostic value.
+ */
+const IMPUTED_COMPONENTS: ComponentParamKey[] = ["pointsPerFinishingDrives", "pointsPerFgMakeRate", "pointsPerOpponentAdj"];
+
 export interface JointRefitResult {
   gamesUsed: number;
   gamesTotal: number;
@@ -52,23 +84,26 @@ export interface JointRefitResult {
   weights: Record<ComponentParamKey, number>;
   intercept: number;
   cvResults: { lambda: number; mse: number }[];
-  /** Of gamesUsed, how many had a real (non-imputed) pointsPerFinishingDrives feature -- see the zero-imputation doc below. */
-  finishingDrivesReal: number;
-  finishingDrivesImputed: number;
+  /** For each of IMPUTED_COMPONENTS: how many of gamesUsed had a real (observed) vs zero-imputed value, and the fitted coefficient on that component's missingness indicator column -- see IMPUTED_COMPONENTS' doc for how to read this. */
+  imputedComponents: { key: ComponentParamKey; real: number; imputed: number; missingIndicatorCoefficient: number }[];
   /** Per-component two-sided (both home and away) non-null count across ALL candidate games, counted BEFORE any gating or imputation -- see fitJointComponentWeights' inline doc. */
   componentCoverage: { key: ComponentParamKey; label: string; nonNullCount: number }[];
 }
 
 /**
  * Fits all 8 component weights jointly via ridge regression on
- * trainSeasonStart..trainSeasonEnd. Complete-case on 7 of the 8
- * components -- opponentAdj is the main remaining limiting factor
- * (off_adj/def_adj require prior-week data, so week-1 games and a team's
- * first game are always excluded), same population
- * cfb-opponentadjusted-ingest already reported (~693-705 of ~753 games
- * per season). pointsPerFinishingDrives is zero-imputed rather than
- * gating rows (see the inline doc where features are built) since its
- * own two-sided coverage is a structurally non-random ~26%.
+ * trainSeasonStart..trainSeasonEnd, plus one missingness-indicator column
+ * per IMPUTED_COMPONENTS entry (see its doc). Complete-case gated on
+ * every OTHER component (explosiveness, down/distance splits, sack rate,
+ * field position), whose missingness in practice is negligible.
+ *
+ * Lambda selection uses group-aware CV keyed by `${season}-${week}` (see
+ * stats/ridge.ts's assignFolds doc): off_adj/def_adj for every game in a
+ * given week come from ONE shared iterative opponent-adjustment solve, so
+ * games in the same week are not independent rows -- an ungrouped
+ * (contiguous or random) fold split would let a test-fold game's
+ * evaluation implicitly benefit from its train-fold week-mate's shared
+ * solve, understating the true out-of-sample error.
  */
 export async function fitJointComponentWeights(
   sport: Sport,
@@ -77,16 +112,18 @@ export async function fitJointComponentWeights(
   lambdaGrid: number[] = [0.1, 0.3, 1, 3, 10, 30, 100],
 ): Promise<JointRefitResult> {
   const base = getRatingParams(sport);
-  const allGames: GameForRating[] = [];
+  const gamesBySeason: { season: number; game: GameForRating }[] = [];
   for (let season = trainSeasonStart; season <= trainSeasonEnd; season++) {
-    allGames.push(...(await getSeasonGamesForRating(sport, season, 999)));
+    for (const game of await getSeasonGamesForRating(sport, season, 999)) {
+      gamesBySeason.push({ season, game });
+    }
   }
 
   const X: number[][] = [];
   const y: number[] = [];
-  let finishingDrivesImputed = 0;
-  let finishingDrivesReal = 0;
-  const finishingDrivesIdx = JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === "pointsPerFinishingDrives");
+  const groups: string[] = [];
+  const imputedIdx = IMPUTED_COMPONENTS.map((key) => JOINT_REFIT_COMPONENTS.findIndex((c) => c.key === key));
+  const imputedCounts = IMPUTED_COMPONENTS.map(() => ({ real: 0, imputed: 0 }));
 
   // Per-component two-sided coverage, counted BEFORE any gating or
   // imputation -- printed so the effective complete-case n (and which
@@ -98,52 +135,45 @@ export async function fitJointComponentWeights(
     nonNullCount: 0,
   }));
 
-  for (const game of allGames) {
+  for (const { season, game } of gamesBySeason) {
     // opponentAdj uses the SHRUNK feature (games-played shrinkage applied),
     // matching exactly what elo.ts will consume once the fitted weight is
     // plugged in -- every other component uses the raw differential.
-    //
-    // pointsPerFinishingDrives is zero-imputed rather than gating the row:
-    // Task 38 found its TWO-SIDED coverage is only ~26% of games (vs ~92%+
-    // for every other component), and -- critically -- this isn't a random
-    // subsample. It's structurally the COMPETITIVE games: a scoring
-    // opportunity requires a drive starting inside the opponent's 40, so a
-    // blowout's losing side frequently has zero, which is exactly the kind
-    // of large-margin game CLV work most needs the OTHER 7 components
-    // calibrated on. Requiring finishingDrives complete would silently
-    // train the whole joint fit on a non-representative, close-games-only
-    // population. Zero (== "no information from this component this game")
-    // is finishingDrives' own neutral value, so this only costs some
-    // attenuation on ITS coefficient -- the other 7 keep the full sample.
     const features = JOINT_REFIT_COMPONENTS.map((c) =>
       c.key === "pointsPerOpponentAdj" ? computeShrunkOpponentAdjFeature(game, base.opponentAdjShrinkageK) : computeComponentFeature(game, c.key, c.invert),
     );
     features.forEach((f, i) => {
       if (f !== null) componentCoverage[i]!.nonNullCount += 1;
     });
-    if (features[finishingDrivesIdx] === null) {
-      features[finishingDrivesIdx] = 0;
-      finishingDrivesImputed += 1;
-    } else {
-      finishingDrivesReal += 1;
-    }
-    if (features.some((f) => f === null)) continue;
+
+    const indicators: number[] = new Array(IMPUTED_COMPONENTS.length).fill(0);
+    imputedIdx.forEach((idx, k) => {
+      if (features[idx] === null) {
+        features[idx] = 0;
+        indicators[k] = 1;
+        imputedCounts[k]!.imputed += 1;
+      } else {
+        imputedCounts[k]!.real += 1;
+      }
+    });
+    if (features.some((f) => f === null)) continue; // one of the hard-gated (non-imputed) components was missing
 
     const baseMargin = computeBaseMargin(game, base);
     const actualMarginHome = game.homeScore - game.awayScore;
-    X.push(features as number[]);
+    X.push([...(features as number[]), ...indicators]);
     y.push(actualMarginHome - baseMargin);
+    groups.push(`${season}-${game.week}`);
   }
 
   if (X.length === 0) {
     throw new Error(
-      `fitJointComponentWeights: 0 of ${allGames.length} games survived the complete-case gate. Per-component two-sided coverage: ${componentCoverage
+      `fitJointComponentWeights: 0 of ${gamesBySeason.length} games survived the complete-case gate. Per-component two-sided coverage: ${componentCoverage
         .map((c) => `${c.label}=${c.nonNullCount}`)
-        .join(", ")}. Whichever count is near 0 is the binding constraint -- check that component's ingest/coverage before re-running.`,
+        .join(", ")}. Whichever count is near 0 (and isn't in IMPUTED_COMPONENTS) is the binding constraint -- check that component's ingest/coverage before re-running.`,
     );
   }
 
-  const cvResults = selectLambda(X, y, lambdaGrid, 5);
+  const cvResults = selectLambda(X, y, lambdaGrid, 5, groups);
   const bestLambda = cvResults[0]!.lambda;
   const fit = ridgeFit(X, y, bestLambda);
 
@@ -151,14 +181,19 @@ export async function fitJointComponentWeights(
   JOINT_REFIT_COMPONENTS.forEach((c, i) => {
     weights[c.key] = fit.coefficients[i]!;
   });
+  const imputedComponents = IMPUTED_COMPONENTS.map((key, k) => ({
+    key,
+    real: imputedCounts[k]!.real,
+    imputed: imputedCounts[k]!.imputed,
+    missingIndicatorCoefficient: fit.coefficients[JOINT_REFIT_COMPONENTS.length + k]!,
+  }));
 
   return {
     gamesUsed: X.length,
-    gamesTotal: allGames.length,
+    gamesTotal: gamesBySeason.length,
     selectedLambda: bestLambda,
     weights,
-    finishingDrivesReal,
-    finishingDrivesImputed,
+    imputedComponents,
     componentCoverage,
     intercept: fit.intercept,
     cvResults,

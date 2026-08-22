@@ -157,33 +157,61 @@ export function predict(X: Matrix, fit: RidgeFitResult): number[] {
 }
 
 /**
+ * Assigns each row to a fold index. Without `groups`, folds are contiguous
+ * slices of input order (the original behavior -- fine for row-independent
+ * data). With `groups`, whole groups are assigned to folds round-robin (by
+ * order of first appearance), so every row sharing a group id lands in the
+ * SAME fold -- required whenever rows within a group are not independently
+ * estimated. jointRefit.ts passes `${season}-${week}` groups because
+ * off_adj/def_adj for every game in a given week come from ONE shared
+ * iterative opponent-adjustment solve (see ratings/opponentAdjust.ts): two
+ * games from the same week are not independent draws, so a random/
+ * contiguous split that puts one in train and the other in test lets the
+ * test game's evaluation benefit from information (the shared week-level
+ * solve) the "held out" split was supposed to withhold.
+ */
+export function assignFolds(n: number, folds: number, groups?: (string | number)[]): number[] {
+  if (!groups) {
+    const foldSize = Math.ceil(n / folds);
+    return Array.from({ length: n }, (_, i) => Math.floor(i / foldSize));
+  }
+  const groupToFold = new Map<string | number, number>();
+  let nextFold = 0;
+  for (const g of groups) {
+    if (!groupToFold.has(g)) {
+      groupToFold.set(g, nextFold % folds);
+      nextFold += 1;
+    }
+  }
+  return groups.map((g) => groupToFold.get(g)!);
+}
+
+/**
  * Mean squared error of a candidate lambda via k-fold cross-validation on
  * the training data -- the standard, simple way to pick a regularization
- * strength without touching the real (season) holdout at all. Folds are
- * contiguous slices of the input order; callers should pass already-
- * shuffled or otherwise order-independent rows if fold composition
- * shouldn't correlate with row order (this project passes chronological
- * game order, which is fine for CV fold assignment -- CV here picks a
+ * strength without touching the real (season) holdout at all. See
+ * assignFolds' doc for the optional `groups` param: pass it whenever rows
+ * can be non-independent in ways that would let a fold split leak
+ * information (e.g. rows computed from a shared per-week solve). Without
+ * `groups`, folds are contiguous slices of input order (this project's
+ * caller passes chronological order by default, which is fine for CV fold
+ * assignment when rows genuinely are independent -- CV here picks a
  * regularization CONSTANT, not a time-ordered prediction, so there's no
  * lookahead concern the way there is for the season-level walk-forward).
  */
-export function crossValidatedMse(X: Matrix, y: number[], lambda: number, folds = 5): number {
+export function crossValidatedMse(X: Matrix, y: number[], lambda: number, folds = 5, groups?: (string | number)[]): number {
   const n = X.length;
-  const foldSize = Math.ceil(n / folds);
+  const foldOf = assignFolds(n, folds, groups);
   let totalSqError = 0;
   let totalCount = 0;
 
   for (let f = 0; f < folds; f++) {
-    const start = f * foldSize;
-    const end = Math.min(start + foldSize, n);
-    if (start >= end) continue;
-
     const trainX: Matrix = [];
     const trainY: number[] = [];
     const testX: Matrix = [];
     const testY: number[] = [];
     for (let i = 0; i < n; i++) {
-      if (i >= start && i < end) {
+      if (foldOf[i] === f) {
         testX.push(X[i]!);
         testY.push(y[i]!);
       } else {
@@ -205,9 +233,9 @@ export function crossValidatedMse(X: Matrix, y: number[], lambda: number, folds 
   return totalCount > 0 ? totalSqError / totalCount : Infinity;
 }
 
-/** Picks the lambda from lambdaGrid with the lowest k-fold CV MSE. */
-export function selectLambda(X: Matrix, y: number[], lambdaGrid: number[], folds = 5): { lambda: number; mse: number }[] {
+/** Picks the lambda from lambdaGrid with the lowest k-fold CV MSE. See crossValidatedMse's doc for `groups`. */
+export function selectLambda(X: Matrix, y: number[], lambdaGrid: number[], folds = 5, groups?: (string | number)[]): { lambda: number; mse: number }[] {
   return lambdaGrid
-    .map((lambda) => ({ lambda, mse: crossValidatedMse(X, y, lambda, folds) }))
+    .map((lambda) => ({ lambda, mse: crossValidatedMse(X, y, lambda, folds, groups) }))
     .sort((a, b) => a.mse - b.mse);
 }
