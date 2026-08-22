@@ -10,7 +10,7 @@ import { syncCfbdFinishingDrivesStats } from "./ingest/cfbd/syncFinishingDrivesS
 import { syncCfbdSpecialTeamsStats } from "./ingest/cfbd/syncSpecialTeamsStats.js";
 import { syncCfbdRawPlays } from "./ingest/cfbd/syncRawPlays.js";
 import { syncOpponentAdjustedStats } from "./ingest/cfbd/syncOpponentAdjustedStats.js";
-import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap, getGameSourceIdToIdMap } from "./db/repo.js";
+import { getPlaysForSeasonThroughWeek, getTeamNameToIdMap, getGameSourceIdToIdMap, getFinishingDrivesGameCoverage } from "./db/repo.js";
 import { buildTeamPerformances } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
@@ -734,6 +734,8 @@ export function startCfbFinishingDrivesIngestJob(): Promise<JobStatus> {
   });
 }
 
+const FINISHING_DRIVES_DIAGNOSE_YARDS_TO_GOAL = 40; // must match syncFinishingDrivesStats.ts's SCORING_OPPORTUNITY_YARDS_TO_GOAL
+
 /**
  * Throwaway diagnostic (Task 38): syncCfbdFinishingDrivesStats.ts's
  * per-row findGameId/findTeamIdByName lookup is silently skipping ~48-53%
@@ -747,6 +749,16 @@ export function startCfbFinishingDrivesIngestJob(): Promise<JobStatus> {
  * i.e. confirmed-real (likely FBS) games where the team name itself
  * doesn't match teams.name, the case that most directly indicates a
  * name-formatting mismatch rather than legitimate non-FBS filtering.
+ *
+ * Buckets both the UNFILTERED (gameId, team) universe (every team that
+ * appears in any drive) and the SAME startYardsToGoal<=40 "scoring
+ * opportunity" filter syncCfbdFinishingDrivesStats.ts actually applies
+ * before syncing -- the filtered bucket is what should reproduce
+ * production's synced/skipped counts, and its implied per-GAME
+ * both-sides-resolve rate (assuming independence) is compared against
+ * the database's actual current coverage to check whether the shortfall
+ * is fully explained by "non-FBS games + teams with zero scoring
+ * opportunities in a game" (no bug) or leaves a residual (still a bug).
  */
 export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
   return runJob("cfb-finishingdrives-diagnose", async (job) => {
@@ -755,43 +767,68 @@ export function startCfbFinishingDrivesDiagnoseJob(): Promise<JobStatus> {
     const [drives, teamMap, gameMap] = await Promise.all([getDrives(year, "regular"), getTeamNameToIdMap("cfb"), getGameSourceIdToIdMap("cfb", year)]);
     log(job, `${year}: fetched ${drives.length} raw drives, ${teamMap.size} teams known, ${gameMap.size} games known for ${year}`);
 
-    const pairs = new Set<string>();
+    function bucketize(pairs: Set<string>, label: string): { bothResolve: number; failingNames: Map<string, number> } {
+      let bothResolve = 0;
+      let gameOnlyResolves = 0;
+      let teamOnlyResolves = 0;
+      let neitherResolves = 0;
+      const failingNames = new Map<string, number>();
+      for (const pair of pairs) {
+        const sep = pair.indexOf(":");
+        const gameIdStr = pair.slice(0, sep);
+        const team = pair.slice(sep + 1);
+        const gameResolves = gameMap.has(gameIdStr);
+        const teamResolves = teamMap.has(team);
+        if (gameResolves && teamResolves) bothResolve += 1;
+        else if (gameResolves && !teamResolves) {
+          gameOnlyResolves += 1;
+          failingNames.set(team, (failingNames.get(team) ?? 0) + 1);
+        } else if (!gameResolves && teamResolves) teamOnlyResolves += 1;
+        else neitherResolves += 1;
+      }
+      log(job, `${year} [${label}]: ${pairs.size} pairs -- both resolve=${bothResolve}, game-only=${gameOnlyResolves}, team-only=${teamOnlyResolves}, neither=${neitherResolves}`);
+      return { bothResolve, failingNames };
+    }
+
+    const allPairs = new Set<string>();
     for (const drive of drives) {
-      pairs.add(`${drive.gameId}:${drive.offense}`);
-      pairs.add(`${drive.gameId}:${drive.defense}`);
+      allPairs.add(`${drive.gameId}:${drive.offense}`);
+      allPairs.add(`${drive.gameId}:${drive.defense}`);
     }
-    log(job, `${year}: ${pairs.size} distinct (gameId, team) pairs across all drives (before the startYardsToGoal<=40 filter finishingDrives itself applies)`);
+    const allResult = bucketize(allPairs, "unfiltered, every team in every drive");
 
-    let bothResolve = 0;
-    let gameOnlyResolves = 0;
-    let teamOnlyResolves = 0;
-    let neitherResolves = 0;
-    const failingTeamNamesOnResolvedGames = new Map<string, number>();
-
-    for (const pair of pairs) {
-      const sep = pair.indexOf(":");
-      const gameIdStr = pair.slice(0, sep);
-      const team = pair.slice(sep + 1);
-      const gameResolves = gameMap.has(gameIdStr);
-      const teamResolves = teamMap.has(team);
-      if (gameResolves && teamResolves) bothResolve += 1;
-      else if (gameResolves && !teamResolves) {
-        gameOnlyResolves += 1;
-        failingTeamNamesOnResolvedGames.set(team, (failingTeamNamesOnResolvedGames.get(team) ?? 0) + 1);
-      } else if (!gameResolves && teamResolves) teamOnlyResolves += 1;
-      else neitherResolves += 1;
+    const opportunityPairs = new Set<string>();
+    for (const drive of drives) {
+      if (drive.startYardsToGoal > FINISHING_DRIVES_DIAGNOSE_YARDS_TO_GOAL) continue;
+      opportunityPairs.add(`${drive.gameId}:${drive.offense}`);
+      opportunityPairs.add(`${drive.gameId}:${drive.defense}`);
     }
+    const oppResult = bucketize(opportunityPairs, "scoring-opportunity-filtered, matches production sync's population");
 
-    log(job, `${year}: both resolve = ${bothResolve}`);
-    log(job, `${year}: game resolves, team FAILS = ${gameOnlyResolves} (this is the interesting bucket -- confirmed-real game, unmatched team name)`);
-    log(job, `${year}: game FAILS, team resolves = ${teamOnlyResolves} (expected: non-FBS games, or FBS games not yet ingested)`);
-    log(job, `${year}: neither resolves = ${neitherResolves} (expected: non-FBS games with non-FBS/unknown team names)`);
-
-    const sampleNames = [...failingTeamNamesOnResolvedGames.entries()]
+    const sampleNames = [...allResult.failingNames.entries(), ...oppResult.failingNames.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 25)
       .map(([name, count]) => `"${name}" (x${count})`);
-    log(job, `${year}: sample team-name strings that failed to resolve on a confirmed-real game (most frequent first): ${sampleNames.join(", ")}`);
+    log(job, `${year}: sample team-name strings that failed to resolve on a confirmed-real game across both buckets (most frequent first): ${sampleNames.join(", ") || "(none -- team-name matching never fails on a resolved game)"}`);
+
+    // independence-assumption prediction: if a team's single-side resolve
+    // rate within the opportunity-filtered population is p, and the two
+    // sides of a game resolve independently, P(both sides resolve) = p^2.
+    const knownGames = gameMap.size;
+    const singleSideRate = oppResult.bothResolve / (2 * knownGames);
+    const predictedGameCoverage = singleSideRate * singleSideRate;
+    log(job, `${year}: opportunity-filtered single-side resolve rate on known games = ${(singleSideRate * 100).toFixed(1)}% -> independence-predicted per-game both-sides coverage = ${(predictedGameCoverage * 100).toFixed(1)}%`);
+
+    const actual = await getFinishingDrivesGameCoverage("cfb", year);
+    const actualRate = actual.gamesTotal > 0 ? actual.gamesWithBoth / actual.gamesTotal : 0;
+    log(
+      job,
+      `${year}: ACTUAL database coverage = ${actual.gamesWithBoth}/${actual.gamesTotal} games (${(actualRate * 100).toFixed(1)}%) -- ${
+        Math.abs(actualRate - predictedGameCoverage) < 0.1
+          ? "matches the independence prediction within ~10pts: fully explained by non-FBS games + zero-opportunity teams, not a lookup bug."
+          : "DIFFERS meaningfully from the independence prediction -- something beyond non-FBS filtering + zero-opportunity teams is still suppressing coverage."
+      }`,
+    );
   });
 }
 

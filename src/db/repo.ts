@@ -513,6 +513,30 @@ export async function getGameSourceIdToIdMap(sport: Sport, season: number): Prom
   return new Map(result.rows.map((r) => [r.source_id, r.id]));
 }
 
+/**
+ * How many of this season's games have off_finishing_drives_ppo populated
+ * for BOTH the home and away team_game_stats row -- Task 38's reconciliation
+ * check: cfb-finishingdrives-diagnose's (gameId, team) pair-level resolution
+ * counts predict what this per-GAME coverage rate should be, so comparing
+ * the two isolates whether the shortfall is purely "non-FBS games /
+ * zero-opportunity teams" (expected, no bug) or something else still
+ * unaccounted for.
+ */
+export async function getFinishingDrivesGameCoverage(sport: Sport, season: number): Promise<{ gamesTotal: number; gamesWithBoth: number }> {
+  const result = await pool.query<{ games_total: string; games_with_both: string }>(
+    `SELECT
+       count(*) AS games_total,
+       count(*) FILTER (WHERE home_stats.off_finishing_drives_ppo IS NOT NULL AND away_stats.off_finishing_drives_ppo IS NOT NULL) AS games_with_both
+     FROM games g
+     LEFT JOIN team_game_stats home_stats ON home_stats.game_id = g.id AND home_stats.team_id = g.home_team_id
+     LEFT JOIN team_game_stats away_stats ON away_stats.game_id = g.id AND away_stats.team_id = g.away_team_id
+     WHERE g.sport = $1 AND g.season = $2 AND g.status = 'final'`,
+    [sport, season],
+  );
+  const row = result.rows[0]!;
+  return { gamesTotal: Number(row.games_total), gamesWithBoth: Number(row.games_with_both) };
+}
+
 export interface InsertPlayInput {
   cfbdPlayId: string;
   gameId: number;
