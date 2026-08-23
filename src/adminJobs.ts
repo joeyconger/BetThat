@@ -23,6 +23,8 @@ import {
   getBacktestGameDetails,
   getCombinedGamesPlayedByGame,
   listBacktestRuns,
+  getPriorSeasonFinalRating,
+  getSeasonGamesForRating,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
@@ -1686,33 +1688,88 @@ export function startCfbAnchorRemovalBreakdownJob(): Promise<JobStatus> {
 }
 
 /**
- * Cheap test of whether a same-data preseason prior fills the early-season
- * gap the anchor-removal breakdown found was NOT actually there in a clean
- * form (mixed, non-monotonic bucket differences, no statistically
- * significant paired-test result) -- per review, the real signal in that
- * breakdown was that the model itself (both anchored and unanchored) sits
- * BELOW its own later-season cover rate in the first four weeks, which is
- * consistent with thin in-season data, just not with the market anchor
- * having been the fix for it. Rather than building Part 2's full ingestion
- * (returning production/talent/portal/polls -- several days of work plus a
- * mandatory hand-verification pass) on spec, this sweeps priorShrinkK
- * (shrink the in-season rating toward the prior season's own RAW final
- * rating, re-injected every week, fading by combined games played -- see
- * RatingParams.priorShrinkK's doc) using data already in hand, and reports
- * the same games-played-bucketed breakdown for each k. If early-bucket
- * cover moves meaningfully off the k=0 baseline, a prior helps and Part 2's
- * fuller version is worth building on top of it. If it stays flat across
- * the whole grid, early-season CFB is hard to predict from any prior and
- * Part 2 should be dropped.
+ * INVALIDATED test, kept out of JOB_STARTERS: an earlier version of this
+ * job swept priorShrinkK, which re-blended the prior season's rating into
+ * the effective rating EVERY WEEK at prediction time (weight fading by
+ * combined games played, but never reaching 0) -- a permanent stale-data
+ * drag term, not a prior. Its monotonic decline as the weight increased was
+ * the expected artifact of that bug, not a finding about whether prior-
+ * season information helps. The mechanism (RatingParams.priorShrinkK,
+ * elo.ts's shrinkTowardPrior, and the wiring in service.ts's
+ * predictAndStoreWeek) has been fully reverted.
+ *
+ * This is the corrected version. A prior is a STARTING VALUE, not a
+ * recurring term: computeAndStoreRatings (service.ts) builds an
+ * `initialRatings` map ONCE per team by calling computeInitialRating (which
+ * calls carryoverRating -- `priorRating * params.seasonCarryover`, i.e.
+ * regression toward league-average 0, plus an spPriorWeight-weighted blend
+ * with prior-season SP+), then computeSeasonRatings (elo.ts) seeds `state`
+ * from that map ONE TIME at the top of the function and the per-game update
+ * loop after that never reads `initialRatings` or any prior-season value
+ * again -- confirmed by reading both functions directly, not inferred.
+ * spPriorWeight itself is applied through this exact same one-time path
+ * (computeInitialRating is called once per team, same as carryoverRating),
+ * so the earlier "spPriorWeight hurts above ~0.3" sweep result (see
+ * config.ts's history) WAS testing a real seed, not a drag term -- it
+ * remains valid, corroborating evidence, not something this test needs to
+ * redo.
+ *
+ * Because seasonCarryover already IS "how much of a team's prior-season
+ * final rating carries into a one-time seed, the rest regressing to
+ * league-average" -- exactly the mechanism asked for -- this sweeps that
+ * one parameter rather than inventing a new one. seasonCarryover=0.6 is
+ * literally today's default (current behavior); seasonCarryover=1.0 is the
+ * raw, unregressed prior-season rating; seasonCarryover=0 is no seed at
+ * all (every team starts at league average). These aren't three
+ * independent strategies, they're three points on the one curve the
+ * grid sweeps -- the honest framing, not three different code paths.
+ * spPriorWeight is held at its current CFB default (0) throughout, since
+ * that's a distinct external signal (SP+), not what's being tested here.
+ *
+ * Bucketed by combined games played, with FINER early buckets than the
+ * anchor-removal breakdown used -- that breakdown's 0-8 bucket lumped a
+ * team with zero prior games this season together with one four games in,
+ * very different informational states for a SEED effect specifically,
+ * which should matter most exactly at gamesPlayed=0 and fade quickly.
+ *
+ * Also logs, per season, how many teams actually receive a nonzero seed --
+ * 2023 is this backtest's first season with NO prior-season ratings ever
+ * computed (see README's "External ratings" section: "the backtest's first
+ * season, with no prior-season ratings available"), so EVERY strategy
+ * seeds EVERY team at 0 there regardless of seasonCarryover. That's a real
+ * structural limitation of this comparison (2023's ~1/3 of games are
+ * seed-invariant in every row of the sweep, diluting but not fabricating
+ * any effect seen in 2024/2025) -- reported explicitly via a live query
+ * rather than left for the reader to discover or just asserted from memory.
  */
-export function startCfbPriorShrinkSweepJob(): Promise<JobStatus> {
-  return runJob("cfb-prior-shrink-sweep", async (job) => {
+export function startCfbSeedStrategySweepJob(): Promise<JobStatus> {
+  return runJob("cfb-seed-strategy-sweep", async (job) => {
     log(
       job,
-      "Sweeping priorShrinkK (shrink toward prior season's own final rating, re-injected every week by combined games played) on full 2023-2025 CFB, bucketed by combined games played -- testing whether a same-data prior helps before committing to Part 2's full ingestion.",
+      "Seed-only prior test: seasonCarryover sweep (one-time week-0 seed via computeInitialRating/carryoverRating -- see elo.ts/service.ts -- with NO blending of prior-season info at any point after initialization). spPriorWeight held at the current CFB default (0) throughout, everything else at current CFB defaults.",
     );
+
     const base = getRatingParams("cfb");
-    const kGrid = [0, 2, 4, 8, 12, 16, 24, 32];
+    const carryoverGrid = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    const BASELINE_CARRYOVER = base.seasonCarryover;
+
+    for (const season of [2023, 2024, 2025]) {
+      const games = await getSeasonGamesForRating("cfb", season, 20);
+      const teamIds = new Set<number>();
+      for (const g of games) {
+        teamIds.add(g.homeTeamId);
+        teamIds.add(g.awayTeamId);
+      }
+      let withPrior = 0;
+      for (const teamId of teamIds) {
+        const priorRating = await getPriorSeasonFinalRating(teamId, "cfb", season - 1, "elo");
+        if (priorRating !== undefined) withPrior += 1;
+      }
+      log(
+        job,
+        `seed coverage ${season}: ${withPrior}/${teamIds.size} teams have a prior-season (${season - 1}) final rating available -- these are the only teams any nonzero seasonCarryover actually affects; the rest seed at 0 in every row of this sweep.`,
+      );
+    }
 
     const gamesPlayedBySeason = new Map<number, Map<number, number>>();
     for (const season of [2023, 2024, 2025]) {
@@ -1726,26 +1783,42 @@ export function startCfbPriorShrinkSweepJob(): Promise<JobStatus> {
       return null;
     }
     const buckets: { label: string; min: number; max: number }[] = [
-      { label: "0-8 (roughly weeks 1-4)", min: 0, max: 8 },
-      { label: "9-16 (roughly weeks 5-8)", min: 9, max: 16 },
-      { label: "17-24 (roughly weeks 9-12)", min: 17, max: 24 },
-      { label: "25+ (late season)", min: 25, max: Infinity },
+      { label: "0-1", min: 0, max: 1 },
+      { label: "2-3", min: 2, max: 3 },
+      { label: "4-5", min: 4, max: 5 },
+      { label: "6-7", min: 6, max: 7 },
+      { label: "8-9", min: 8, max: 9 },
+      { label: "10-13", min: 10, max: 13 },
+      { label: "14-17", min: 14, max: 17 },
+      { label: "18-21", min: 18, max: 21 },
+      { label: "22+", min: 22, max: Infinity },
     ];
 
-    for (const k of kGrid) {
+    const runsByCarryover = new Map<number, { runId: number; details: Awaited<ReturnType<typeof getBacktestGameDetails>> }>();
+
+    for (const carryover of carryoverGrid) {
       const result = await runBacktest({
-        name: `cfb-prior-shrink-sweep-k${k}`,
+        name: `cfb-seed-strategy-sweep-carryover${carryover}`,
         sport: "cfb",
         seasonStart: 2023,
         seasonEnd: 2025,
-        paramsOverride: { ...base, priorShrinkK: k },
+        paramsOverride: { ...base, seasonCarryover: carryover },
       });
       const overall = await getOverallReport(result.backtestRunId);
       const opening = await getOpeningCoverRate(result.backtestRunId);
       const details = await getBacktestGameDetails(result.backtestRunId);
+      runsByCarryover.set(carryover, { runId: result.backtestRunId, details });
+      const tag =
+        carryover === BASELINE_CARRYOVER
+          ? " [current default]"
+          : carryover === 1
+            ? " [raw prior rating, no regression]"
+            : carryover === 0
+              ? " [no seed at all -- every team starts at league average]"
+              : "";
       log(
         job,
-        `k=${k}: ${result.scored} games, overall cover=${fmtPct(overall.coverRate)} avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}, cover vs open=${fmtPct(opening.coverRateVsOpening)} (run ${result.backtestRunId})`,
+        `seasonCarryover=${carryover}${tag}: ${result.scored} games, overall cover=${fmtPct(overall.coverRate)} avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}, cover vs open=${fmtPct(opening.coverRateVsOpening)} (run ${result.backtestRunId})`,
       );
       for (const bucket of buckets) {
         let n = 0;
@@ -1772,9 +1845,44 @@ export function startCfbPriorShrinkSweepJob(): Promise<JobStatus> {
         );
       }
     }
+
+    const baselineRun = runsByCarryover.get(BASELINE_CARRYOVER)!;
+    log(job, `\npaired tests vs. seasonCarryover=${BASELINE_CARRYOVER} (current default), identical game sets:`);
+    for (const carryover of carryoverGrid) {
+      if (carryover === BASELINE_CARRYOVER) continue;
+      const variant = runsByCarryover.get(carryover)!;
+      const commonGameIds = [...baselineRun.details.keys()].filter((id) => variant.details.has(id));
+      const clvGameIds = commonGameIds.filter(
+        (id) => baselineRun.details.get(id)!.clv !== null && variant.details.get(id)!.clv !== null,
+      );
+      if (clvGameIds.length >= 2) {
+        const baseClv = clvGameIds.map((id) => baselineRun.details.get(id)!.clv!);
+        const varClv = clvGameIds.map((id) => variant.details.get(id)!.clv!);
+        const paired = pairedTTest(baseClv, varClv);
+        log(
+          job,
+          `  seasonCarryover=${carryover}: CLV (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)}`,
+        );
+      }
+      const coveredGameIds = commonGameIds.filter(
+        (id) => baselineRun.details.get(id)!.covered !== null && variant.details.get(id)!.covered !== null,
+      );
+      if (coveredGameIds.length >= 2) {
+        const baseCovered = coveredGameIds.map((id) => (baselineRun.details.get(id)!.covered ? 1 : 0));
+        const varCovered = coveredGameIds.map((id) => (variant.details.get(id)!.covered ? 1 : 0));
+        const paired = pairedTTest(baseCovered, varCovered);
+        log(
+          job,
+          `  seasonCarryover=${carryover}: covered-as-0/1 (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+    }
+
     log(
       job,
-      "\nIf the 0-8 bucket's cover rate moves meaningfully off the k=0 row as k increases, a same-data prior is real and Part 2's fuller ingestion (returning production/talent/portal/polls) is worth building on top of it as a better starting point than last year's rating alone. If it stays flat across the whole grid, early-season CFB is hard to predict from any prior and Part 2 should be dropped rather than expanded.",
+      "\nThis differs structurally from the invalidated priorShrinkK version: the seed is applied ONCE, before any in-season game is processed, and never referenced again by computeSeasonRatings' update loop -- confirmed by code trace (see this function's doc), not just intent. There is no per-week drag term left to blame here, so a real decline as seasonCarryover increases would mean something genuine: that the model's own early-season EPA-based updates already do this better than any prior-season starting point. 2023's games are seed-invariant across every row of this sweep (see seed coverage above) -- that attenuates any real 2024/2025 effect when the three seasons are pooled, it does not fabricate one.",
     );
   });
 }
@@ -2071,7 +2179,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-clv-frozen-ratings": startCfbClvFrozenRatingsJob,
   "cfb-unanchored-rebaseline": startCfbUnanchoredRebaselineJob,
   "cfb-anchor-removal-breakdown": startCfbAnchorRemovalBreakdownJob,
-  "cfb-prior-shrink-sweep": startCfbPriorShrinkSweepJob,
+  "cfb-seed-strategy-sweep": startCfbSeedStrategySweepJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,

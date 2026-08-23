@@ -295,26 +295,6 @@ export interface RatingParams {
    * opponent-adjustment solve does). Untested -- needs a real sweep.
    */
   opponentAdjShrinkageK: number;
-  /**
-   * Games-played shrinkage toward the prior season's final rating (the
-   * RAW value from getPriorSeasonFinalRating, not the already-blended-
-   * with-SP+ carryover computeInitialRating produces for a season's
-   * starting point) — applied at PREDICTION time in predictAndStoreWeek,
-   * every week, not just as a one-time seed: effectiveRating =
-   * shrinkTowardPrior(inSeasonRating, priorFinalRating, combinedGamesPlayed,
-   * k), same n/(n+k) empirical-Bayes shape as opponentAdjShrinkageK/the
-   * old market shrinkage. Distinct from seasonCarryover (which only ever
-   * touches the season's initial rating once, then lets it wash out
-   * through ordinary in-season updates) — this re-injects the prior every
-   * week with a fading weight instead, testing whether the market anchor's
-   * removal (see predictSpread's doc) left a real early-season gap a
-   * cheap same-data prior can fill, before building the fuller Part 2
-   * preseason-prior system (returning production/talent/portal/polls).
-   * 0 = disabled (today's behavior, no shrinkage). Untested — needs a
-   * real sweep; a team with no prior-season rating falls back to pure
-   * in-season rating regardless of k.
-   */
-  priorShrinkK: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -346,7 +326,6 @@ const NFL_PARAMS: RatingParams = {
   pointsPerFgMakeRate: 0,
   pointsPerOpponentAdj: 0, // no raw-play ingestion for NFL yet
   opponentAdjShrinkageK: 4, // irrelevant while pointsPerOpponentAdj is 0 -- placeholder matching CFB's untested default
-  priorShrinkK: 0, // disabled -- untested, needs a real sweep
 };
 
 const CFB_PARAMS: RatingParams = {

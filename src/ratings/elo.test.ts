@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread, shrinkTowardPrior } from "./elo.js";
+import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread } from "./elo.js";
 import { getRatingParams } from "./config.js";
 
 const NFL = getRatingParams("nfl");
@@ -40,26 +40,6 @@ test("computeInitialRating blends against league-average (0), not raw SP+, when 
   // blending it against 0 like the weight says it should.
   const params = { ...CFB, spPriorWeight: 0.4 };
   assert.ok(Math.abs(computeInitialRating(undefined, 20, params) - 0.4 * 20) < 1e-9);
-});
-
-test("shrinkTowardPrior falls back to pure in-season rating when k<=0", () => {
-  assert.equal(shrinkTowardPrior(10, 3, 5, 0), 10);
-  assert.equal(shrinkTowardPrior(10, 3, 5, -1), 10);
-});
-
-test("shrinkTowardPrior falls back to pure in-season rating when no prior rating exists", () => {
-  assert.equal(shrinkTowardPrior(10, undefined, 5, 4), 10);
-});
-
-test("shrinkTowardPrior blends by combinedGamesPlayed/(combinedGamesPlayed+k)", () => {
-  // weight = 4/(4+4) = 0.5 -> 0.5*10 + 0.5*3 = 6.5
-  assert.equal(shrinkTowardPrior(10, 3, 4, 4), 6.5);
-});
-
-test("shrinkTowardPrior fades toward pure in-season as games played grows", () => {
-  const early = shrinkTowardPrior(10, 3, 1, 4);
-  const late = shrinkTowardPrior(10, 3, 20, 4);
-  assert.ok(Math.abs(late - 10) < Math.abs(early - 10));
 });
 
 test("predictSpread always returns the pure rating-differential number (no market input at all)", () => {
