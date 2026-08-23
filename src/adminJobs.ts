@@ -27,6 +27,7 @@ import {
   getPriorSeasonSpRating,
   getSeasonGamesForRating,
   getReturningProductionDistribution,
+  getGameHistoryForSeason,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
@@ -73,6 +74,7 @@ import {
 import { getRatingParams } from "./ratings/config.js";
 import type { RatingParams } from "./ratings/config.js";
 import { computeInitialRating } from "./ratings/elo.js";
+import { computeRatings } from "./ratings/service.js";
 import type { Sport } from "./db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -647,6 +649,81 @@ export function startCfbGarbageTimeHoldoutPairedTestJob(): Promise<JobStatus> {
     log(
       job,
       "Note: this holdout is small (2025 only, ~700-something games), and the underlying no-garbage data itself has a real coverage gap (~50% of games skipped at ingestion, silently falling back to all-plays EPA for those) -- a null result here doesn't rule out a real effect the data can't see yet, and a positive one still wants the full 2023-2025 in-sample sweep's significance checked too before trusting it.",
+    );
+  });
+}
+
+/**
+ * Per-game rating-delta diagnostic for one team/season, requested directly
+ * (the ODU face-validity investigation): for every game, the team's rating
+ * immediately before and after, the delta, and the OPPONENT's rating at
+ * that same pre-game point -- tells you directly whether a big delta came
+ * from an oversized margin against an already-correctly-rated opponent, or
+ * from the model not having registered the opponent as weak yet.
+ *
+ * Deliberately uses computeRatings (read-only, elo.ts/service.ts) instead
+ * of querying the team_ratings table directly -- team_ratings is a SHARED,
+ * MUTABLE table that every backtest run upserts into for whatever season
+ * it touches, and this investigation alone has run a dozen-plus sweep
+ * backtests against 2025 with non-default params since the first query
+ * against it. Querying team_ratings now would reflect whichever sweep ran
+ * last, not the actual default config. computeRatings recomputes from the
+ * real current defaults on demand, so it can't be contaminated this way.
+ *
+ * Hardcoded to Old Dominion / CFB / 2025, same "one-off diagnostic for a
+ * specific case, not a generic tool" pattern as cfb-verify-plays.
+ */
+export function startCfbTeamRatingDeltaDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-team-rating-delta-diagnostic", async (job) => {
+    const season = 2025;
+    const teamName = "Old Dominion";
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const teamId = teamNameToId.get(teamName);
+    if (!teamId) {
+      log(job, `"${teamName}" not found in teams table.`);
+      return;
+    }
+
+    const games = await getGameHistoryForSeason("cfb", season);
+    const teamGames = games
+      .filter((g) => (g.homeTeam === teamName || g.awayTeam === teamName) && g.status === "final")
+      .sort((a, b) => a.week - b.week);
+
+    log(job, `${teamName} ${season}: recomputing ratings before/after each game via computeRatings (default params, no persistence) -- ${teamGames.length} completed games.`);
+    log(job, "week  opponent             result        team_before  team_after  delta    opp_before");
+
+    for (const g of teamGames) {
+      const isHome = g.homeTeam === teamName;
+      const opponentName = isHome ? g.awayTeam : g.homeTeam;
+      const opponentId = teamNameToId.get(opponentName);
+      const teamScore = isHome ? g.homeScore : g.awayScore;
+      const oppScore = isHome ? g.awayScore : g.homeScore;
+      const resultStr = teamScore !== null && oppScore !== null ? `${teamScore}-${oppScore}` : "?-?";
+
+      const before = await computeRatings("cfb", season, g.week - 1);
+      const after = await computeRatings("cfb", season, g.week);
+      const teamBefore = before.get(teamId)?.rating;
+      const teamAfter = after.get(teamId)?.rating;
+      const oppBefore = opponentId ? before.get(opponentId)?.rating : undefined;
+
+      const delta = teamBefore !== undefined && teamAfter !== undefined ? teamAfter - teamBefore : undefined;
+      log(
+        job,
+        [
+          String(g.week).padEnd(5),
+          opponentName.padEnd(20).slice(0, 20),
+          resultStr.padEnd(13),
+          (teamBefore === undefined ? "n/a" : teamBefore.toFixed(2)).padStart(11),
+          (teamAfter === undefined ? "n/a" : teamAfter.toFixed(2)).padStart(10),
+          (delta === undefined ? "n/a" : (delta >= 0 ? "+" : "") + delta.toFixed(2)).padStart(8),
+          oppBefore === undefined ? "n/a" : oppBefore.toFixed(2),
+        ].join("  "),
+      );
+    }
+
+    log(
+      job,
+      "\nRead this as: a large delta against an opponent ALREADY rated well below average means the model isn't discounting the win for opponent quality (points toward opponent-adjustment still mattering, contrary to the CLV sweep). A large delta against an opponent near 0 means the margin itself is doing the work regardless of who it was against (points toward a margin-of-victory dampening fix instead). If one single game accounts for most of the season's net movement, that's the answer in one row, not an aggregate pattern.",
     );
   });
 }
@@ -2574,6 +2651,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbagetime-sweep": startCfbGarbageTimeSweepJob,
   "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
   "cfb-garbagetime-holdout-paired-test": startCfbGarbageTimeHoldoutPairedTestJob,
+  "cfb-team-rating-delta-diagnostic": startCfbTeamRatingDeltaDiagnosticJob,
   "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
   "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
   "cfb-restday-sweep": startCfbRestDaySweepJob,
