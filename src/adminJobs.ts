@@ -25,6 +25,7 @@ import {
   listBacktestRuns,
   getPriorSeasonFinalRating,
   getPriorSeasonSpRating,
+  getManualSpWeeklyDistributionForWeek,
   getSeasonGamesForRating,
   getReturningProductionDistribution,
   getGameHistoryForSeason,
@@ -3041,6 +3042,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-verify-plays": startCfbVerifyPlaysJob,
   "cfb-verify-returning-production": startCfbVerifyReturningProductionJob,
   "cfb-opponent-adjust-snapshot": startCfbOpponentAdjustSnapshotJob,
+  "cfb-solve-vs-elo-vs-sp-diagnostic": startSolveVsEloVsSpDiagnosticJob,
 };
 
 /**
@@ -3361,6 +3363,178 @@ export function startCfbOpponentAdjustSnapshotJob(): Promise<JobStatus> {
     for (const teamId of lowConnectivity.slice(0, 25)) {
       const diag = result.teamDiagnostics.get(teamId)!;
       log(job, `  ${teamIdToName.get(teamId) ?? `#${teamId}`}: gamesPlayed=${diag.gamesPlayed} lastDelta=${diag.lastDelta.toFixed(6)}`);
+    }
+  });
+}
+
+/**
+ * Step 1 of the iterative-solve-replaces-incremental-Elo plan -- gates
+ * everything else. Runs the EXISTING success-rate-based iterative solve
+ * (opponentAdjust.ts + gamePerformance.ts, the exact same machinery
+ * syncOpponentAdjustedStats.ts already runs in production, as-of-week)
+ * standalone over CFB 2025 through week 14, alongside the CURRENT
+ * incremental-Elo rating and the real manually-archived week-14 2025 SP+
+ * snapshot (ingest/manual/syncManualSpWeekly.ts -- NOT a live CFBD pull;
+ * CFBD's own /ratings/sp has no week param, see that file's doc for why
+ * this manual archive is the only real in-season SP+ source available).
+ *
+ * Hypothesis under test: the iterative solve tracks SP+ substantially
+ * better than the incremental Elo loop does. If it doesn't, the
+ * diagnosis (an incremental update bakes in credit permanently; an
+ * iterative solve re-prices it at current opponent values) is wrong and
+ * the rebuild isn't justified -- report either way, don't treat this as
+ * a formality.
+ *
+ * Solve composite = off - def (both success-rate-scale, off_adj/def_adj's
+ * own units, per opponentAdjust.ts's sign convention) -- NOT rescaled to
+ * points. Correlation/rank agreement with SP+ doesn't require matching
+ * absolute scale. This deliberately uses the SUCCESS-RATE solve that
+ * already exists and already runs as-of-week in production, not an
+ * EPA-based solve (which doesn't exist yet, see Step 0 report) --
+ * testing whether iterative opponent-adjustment beats incremental Elo at
+ * tracking SP+ doesn't require the metric generalization first.
+ *
+ * "Through week 14" here means INCLUDING week 14's own games for both
+ * Elo and the solve -- this is a retrospective diagnostic snapshot, not
+ * a no-lookahead prediction, so that's correct (not a leak).
+ */
+export function startSolveVsEloVsSpDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-vs-elo-vs-sp-diagnostic", async (job) => {
+    const season = 2025;
+    const week = 14;
+
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const idToName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) idToName.set(id, name);
+
+    log(job, "computing current incremental-Elo rating (default config)...");
+    const eloState = await computeRatings("cfb", season, week);
+
+    log(job, "computing standalone iterative solve over all plays through week 14...");
+    const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+    const gamesById = new Map<number, GamePlaysGroup>();
+    for (const p of plays) {
+      let g = gamesById.get(p.gameId);
+      if (!g) {
+        g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+        gamesById.set(p.gameId, g);
+      }
+      g.plays.push({
+        offenseTeamId: p.offenseTeamId,
+        defenseTeamId: p.defenseTeamId,
+        down: p.down,
+        distance: p.distance,
+        yardsGained: p.yardsGained,
+        playType: p.playType,
+        offenseScore: p.offenseScore,
+        defenseScore: p.defenseScore,
+        period: p.period,
+        clockMinutes: p.clockMinutes,
+        clockSeconds: p.clockSeconds,
+      });
+    }
+    const performances = buildTeamPerformances([...gamesById.values()]);
+    const solve = computeOpponentAdjustedRatings(performances);
+    log(
+      job,
+      `solve: ${solve.iterations} iterations, converged=${solve.converged}, ${performances.length} team-performance rows over ${gamesById.size} games.`,
+    );
+    const lowConnectivity = identifyLowConnectivityTeams(solve.teamDiagnostics, 6);
+    if (lowConnectivity.length > 0) {
+      log(
+        job,
+        `low-connectivity teams (< 6 total off+def appearances): ${lowConnectivity.map((id) => idToName.get(id) ?? `#${id}`).join(", ")}`,
+      );
+    }
+
+    const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", season, week);
+    log(job, `manual SP+ week ${week}, ${season}: ${spDistribution.size} teams.`);
+
+    interface Row {
+      teamId: number;
+      name: string;
+      elo: number;
+      solve: number;
+      sp: number;
+    }
+    const rows: Row[] = [];
+    for (const [teamId, sp] of spDistribution) {
+      const eloRating = eloState.get(teamId)?.rating;
+      const off = solve.off.get(teamId);
+      const def = solve.def.get(teamId);
+      if (eloRating === undefined || off === undefined || def === undefined) continue;
+      rows.push({ teamId, name: idToName.get(teamId) ?? `team ${teamId}`, elo: eloRating, solve: off - def, sp });
+    }
+    log(job, `${rows.length} teams present in all three sources (Elo, solve, manual SP+).`);
+    if (rows.length < 20) {
+      log(job, "Too few teams in common to trust a correlation or rank comparison -- stopping here. Check week alignment / manual archive coverage before re-running.");
+      return;
+    }
+
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+    const eloCorr = pearson(
+      rows.map((r) => r.elo),
+      rows.map((r) => r.sp),
+    );
+    const solveCorr = pearson(
+      rows.map((r) => r.solve),
+      rows.map((r) => r.sp),
+    );
+    log(job, `\nPearson correlation with SP+: Elo=${eloCorr.toFixed(3)}, solve=${solveCorr.toFixed(3)}.`);
+    log(
+      job,
+      solveCorr > eloCorr
+        ? "Solve tracks SP+ MORE closely than Elo -- hypothesis SUPPORTED so far."
+        : "Solve does NOT track SP+ more closely than Elo -- hypothesis NOT supported. Stop and reconsider before Step 2.",
+    );
+
+    function rankOf(key: "elo" | "solve" | "sp"): Map<number, number> {
+      const sorted = [...rows].sort((a, b) => b[key] - a[key]);
+      const rank = new Map<number, number>();
+      sorted.forEach((r, i) => rank.set(r.teamId, i + 1));
+      return rank;
+    }
+    const eloRank = rankOf("elo");
+    const solveRank = rankOf("solve");
+    const spRank = rankOf("sp");
+
+    function largestDisagreements(rankA: Map<number, number>, label: string): void {
+      const diffs = rows
+        .map((r) => ({ r, diff: Math.abs(rankA.get(r.teamId)! - spRank.get(r.teamId)!) }))
+        .sort((a, b) => b.diff - a.diff)
+        .slice(0, 15);
+      log(job, `\n15 largest ${label}-vs-SP+ rank disagreements (of ${rows.length} teams):`);
+      for (const { r, diff } of diffs) {
+        log(job, `  ${r.name.padEnd(20)} ${label}_rank=${rankA.get(r.teamId)}  sp_rank=${spRank.get(r.teamId)}  diff=${diff}`);
+      }
+    }
+    largestDisagreements(eloRank, "elo");
+    largestDisagreements(solveRank, "solve");
+
+    log(job, "\nCalled-out teams:");
+    for (const name of ["Old Dominion", "Penn State", "Clemson"]) {
+      const row = rows.find((r) => r.name === name);
+      if (!row) {
+        log(job, `  ${name}: not in the combined table (missing from one of the three sources).`);
+        continue;
+      }
+      log(
+        job,
+        `  ${name}: Elo rank ${eloRank.get(row.teamId)} (${row.elo.toFixed(2)}), solve rank ${solveRank.get(row.teamId)} (${row.solve.toFixed(4)}), SP+ rank ${spRank.get(row.teamId)} (${row.sp.toFixed(1)})`,
+      );
     }
   });
 }
