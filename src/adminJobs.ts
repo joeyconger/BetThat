@@ -3046,6 +3046,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-opponent-adjust-snapshot": startCfbOpponentAdjustSnapshotJob,
   "cfb-solve-vs-elo-vs-sp-diagnostic": startSolveVsEloVsSpDiagnosticJob,
   "cfb-solve-vs-elo-vs-sp-widened-diagnostic": startSolveVsEloVsSpWidenedDiagnosticJob,
+  "cfb-solve-coldstart-test": startSolveColdStartTestJob,
 };
 
 /**
@@ -3725,6 +3726,132 @@ export function startSolveVsEloVsSpWidenedDiagnosticJob(): Promise<JobStatus> {
       log(
         job,
         `${season} (final week ${lastWeek}, n=${rows.length}): Elo corr=${eloCorr.toFixed(3)}, solve corr=${solveCorr.toFixed(3)}, delta=${(solveCorr - eloCorr).toFixed(4)}`,
+      );
+    }
+  });
+}
+
+/**
+ * Tests the cold-start explanation for weeks 4/6 losing to Elo in the
+ * widened diagnostic above, rather than assuming it: the raw solve starts
+ * every team at OFF=DEF=0 with no preseason information at all, while Elo
+ * gets seasonCarryover + SP+ as a head start. Seeds the 2025 week-4/week-6
+ * solve with 2024's own final-season solve output, shrunk toward 0 by the
+ * SAME seasonCarryover factor RatingParams uses for Elo -- if that flips
+ * those two weeks to favor the solve, the cold-start explanation is
+ * confirmed (and this is a real preview of Step 2's preseason-seeding
+ * need); if it doesn't, something else is going on early-season and that
+ * needs to be understood before building on top of it.
+ *
+ * The 2024 solve output is safe to seed with directly (not an arbitrary
+ * prior) -- see opponentAdjust.ts's initialOff/initialDef doc: seeding
+ * with a prior that was ITSELF produced by this same function under the
+ * same default anchor doesn't introduce a fresh, arbitrary offset the way
+ * an unrelated/arbitrary prior would.
+ */
+export function startSolveColdStartTestJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-coldstart-test", async (job) => {
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const idToName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) idToName.set(id, name);
+
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+
+    async function computeSolve(season: number, week: number, seed?: { initialOff: Map<number, number>; initialDef: Map<number, number> }) {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+        });
+      }
+      const performances = buildTeamPerformances([...gamesById.values()]);
+      return computeOpponentAdjustedRatings(performances, seed ? { initialOff: seed.initialOff, initialDef: seed.initialDef } : {});
+    }
+
+    const carryover = getRatingParams("cfb").seasonCarryover;
+    log(job, `computing 2024 final-season solve (seed source), seasonCarryover=${carryover}...`);
+    const seasonWeeks2024 = await getDistinctWeeks("cfb", 2024);
+    const lastWeek2024 = Math.max(...seasonWeeks2024);
+    const solve2024 = await computeSolve(2024, lastWeek2024);
+    const initialOff = new Map<number, number>();
+    const initialDef = new Map<number, number>();
+    for (const [teamId, off] of solve2024.off) initialOff.set(teamId, off * carryover);
+    for (const [teamId, def] of solve2024.def) initialDef.set(teamId, def * carryover);
+    log(job, `2024 solve: ${solve2024.off.size} teams, seeded ${initialOff.size} into 2025's prior.`);
+
+    for (const week of [4, 6]) {
+      const eloState = await computeRatings("cfb", 2025, week);
+      const unseeded = await computeSolve(2025, week);
+      const seeded = await computeSolve(2025, week, { initialOff, initialDef });
+      const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", 2025, week);
+
+      function composite(result: typeof unseeded, teamId: number): number | undefined {
+        const off = result.off.get(teamId);
+        const def = result.def.get(teamId);
+        if (off === undefined || def === undefined) return undefined;
+        return off - def;
+      }
+
+      const rows: { teamId: number; elo: number; unseeded: number; seeded: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const eloRating = eloState.get(teamId)?.rating;
+        const u = composite(unseeded, teamId);
+        const s = composite(seeded, teamId);
+        if (eloRating === undefined || u === undefined || s === undefined) continue;
+        rows.push({ teamId, elo: eloRating, unseeded: u, seeded: s, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `week ${week}: only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+      const eloCorr = pearson(
+        rows.map((r) => r.elo),
+        rows.map((r) => r.sp),
+      );
+      const unseededCorr = pearson(
+        rows.map((r) => r.unseeded),
+        rows.map((r) => r.sp),
+      );
+      const seededCorr = pearson(
+        rows.map((r) => r.seeded),
+        rows.map((r) => r.sp),
+      );
+      log(
+        job,
+        `week ${week}: n=${rows.length} -- Elo corr=${eloCorr.toFixed(3)}, unseeded solve corr=${unseededCorr.toFixed(3)}, seeded solve corr=${seededCorr.toFixed(3)}`,
+      );
+      log(
+        job,
+        `  seeded solve ${seededCorr > eloCorr ? "NOW BEATS" : "still trails"} Elo (was ${unseededCorr > eloCorr ? "beating" : "trailing"} unseeded) -- cold-start explanation ${seededCorr > eloCorr && seededCorr > unseededCorr ? "CONFIRMED for this week" : "NOT confirmed for this week"}.`,
       );
     }
   });

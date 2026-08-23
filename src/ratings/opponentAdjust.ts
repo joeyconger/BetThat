@@ -76,6 +76,44 @@ export interface OpponentAdjustmentOptions {
   maxIterations?: number;
   tolerance?: number;
   dampingFactor?: number;
+  /**
+   * Starting point for the iteration instead of the default OFF=DEF=0 for
+   * every team -- a team missing from either map still starts at 0.
+   *
+   * IMPORTANT, verified by a test that initially caught this as a false
+   * assumption: the starting point is NOT irrelevant just because a team
+   * (or the whole graph) is well-connected. Every equation here only ever
+   * involves a team's own OFF/DEF paired against an OPPONENT's DEF/OFF --
+   * never a team's OFF and DEF together, and never either alone. That
+   * means shifting EVERY team's OFF up by the same constant c and EVERY
+   * team's DEF down by that same c leaves every equation satisfied
+   * identically, for ANY graph, however well-connected -- a genuine
+   * structural "gauge freedom" this whole rating family has (the same
+   * kind Bradley-Terry/SRS-style systems have: only OFF-minus-DEF
+   * differences are pinned by game outcomes, never an absolute level for
+   * OFF or DEF alone). The default off=def=0 start just happens to anchor
+   * c=0; nothing in the data forces that choice over any other.
+   *
+   * The practical consequence: seeding with an ARBITRARY, inconsistent
+   * prior can silently shift the whole population's OFF/DEF split by an
+   * uncontrolled constant. Seeding with a prior that was ITSELF produced
+   * by this same function under the same default anchor (e.g. the team's
+   * own prior-season solve output, shrunk toward 0 the way
+   * RatingParams.seasonCarryover shrinks Elo's carryover) is safe --
+   * it's already anchored the same way unseeded teams are, so it doesn't
+   * introduce a fresh, arbitrary offset. Note the OFF-DEF composite's
+   * RELATIVE structure across teams (who ranks above whom, correlation
+   * with an external rating) is unaffected by a uniform c-shift either
+   * way, since every team's composite moves by the identical 2c -- only
+   * absolute-value interpretation needs the anchor to be consistent.
+   *
+   * Separately, an underdetermined team (too few games, a low-
+   * connectivity early-season snapshot -- see this file's header doc)
+   * has additional degrees of freedom beyond just this one global c, so
+   * its own starting point matters even more directly.
+   */
+  initialOff?: Map<number, number>;
+  initialDef?: Map<number, number>;
 }
 
 const DEFAULT_MAX_ITERATIONS = 200;
@@ -119,8 +157,8 @@ export function computeOpponentAdjustedRatings(
   let off = new Map<number, number>();
   let def = new Map<number, number>();
   for (const teamId of teamIds) {
-    off.set(teamId, 0);
-    def.set(teamId, 0);
+    off.set(teamId, options.initialOff?.get(teamId) ?? 0);
+    def.set(teamId, options.initialDef?.get(teamId) ?? 0);
   }
 
   let iterations = 0;

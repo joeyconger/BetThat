@@ -56,6 +56,76 @@ test("computeOpponentAdjustedRatings: undamped Jacobi updates on a single 2-team
   assert.ok(close(result.def.get(A)!, -0.05), `def[A] ~-0.05 (got ${result.def.get(A)})`);
 });
 
+test("computeOpponentAdjustedRatings: an initial prior breaks the tie in an underdetermined case instead of defaulting to 0", () => {
+  // Same 2-team/1-game underdetermined case as above, but off_A is seeded
+  // with a prior of 0.2 (def_B, off_B, def_A left at the default 0). Per
+  // that test's derivation: u=off_A+def_B is pinned to 0.1 by the data
+  // after one iteration REGARDLESS of starting point; v=off_A-def_B stays
+  // at its INITIAL value forever. Seeding only off_A makes v's initial
+  // value 0.2-0=0.2 instead of 0, so off_A=(0.1+0.2)/2=0.15,
+  // def_B=(0.1-0.2)/2=-0.05 -- off_B/def_A are untouched (not seeded),
+  // same symmetric -0.05/-0.05 split as the unseeded case.
+  const performances: TeamPerformance[] = [
+    { teamId: A, opponentId: B, rawOffenseValue: 0.6 },
+    { teamId: B, opponentId: A, rawOffenseValue: 0.4 },
+  ];
+  const initialOff = new Map([[A, 0.2]]);
+  const result = computeOpponentAdjustedRatings(performances, { initialOff });
+  assert.equal(result.converged, true);
+  assert.ok(close(result.off.get(A)!, 0.15), `off[A] ~0.15 (got ${result.off.get(A)})`);
+  assert.ok(close(result.def.get(B)!, -0.05), `def[B] ~-0.05 (got ${result.def.get(B)})`);
+  assert.ok(close(result.off.get(B)!, -0.05), `off[B] ~-0.05 (got ${result.off.get(B)})`);
+  assert.ok(close(result.def.get(A)!, -0.05), `def[A] ~-0.05 (got ${result.def.get(A)})`);
+});
+
+test("computeOpponentAdjustedRatings: a uniform prior (off+c, def-c for EVERY team) persists rather than washing out -- the one genuine gauge freedom this system has", () => {
+  // Same round-robin as the all-zero test below. Every equation here only
+  // ever involves a team's OFF or DEF paired against an OPPONENT's DEF or
+  // OFF -- never a team's own OFF and DEF together, never either alone --
+  // so shifting EVERY team's off by the same c and every team's def by
+  // -c leaves every equation satisfied identically, for ANY graph however
+  // well-connected (same "gauge freedom" Bradley-Terry/SRS-style systems
+  // have). This was caught by an EARLIER, WRONG version of this test that
+  // assumed a well-connected team's answer is prior-independent -- it
+  // isn't, in this one specific direction; see initialOff/initialDef's
+  // doc for the full explanation and why a consistently-anchored prior
+  // (e.g. a prior computed by this same function) is still safe to use.
+  const performances: TeamPerformance[] = [
+    { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 1, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 1, rawOffenseValue: 0.5 },
+  ];
+  const c = 2;
+  const initialOff = new Map([
+    [1, c],
+    [2, c],
+    [3, c],
+  ]);
+  const initialDef = new Map([
+    [1, -c],
+    [2, -c],
+    [3, -c],
+  ]);
+  const result = computeOpponentAdjustedRatings(performances, { initialOff, initialDef, maxIterations: 500 });
+  assert.equal(result.converged, true);
+  for (const teamId of [1, 2, 3]) {
+    assert.ok(close(result.off.get(teamId)!, c, 1e-4), `off[${teamId}] should stay at the seeded c=${c} (got ${result.off.get(teamId)})`);
+    assert.ok(close(result.def.get(teamId)!, -c, 1e-4), `def[${teamId}] should stay at the seeded -c=${-c} (got ${result.def.get(teamId)})`);
+  }
+  // The RELATIVE structure survives the shift intact: all three teams'
+  // off-def composite are still equal to each other (just uniformly
+  // offset by 2c from the unseeded baseline of 0) -- ranking/correlation
+  // against an external rating is unaffected by this gauge freedom, only
+  // absolute-value interpretation needs a consistently-anchored prior.
+  const composite = (teamId: number) => result.off.get(teamId)! - result.def.get(teamId)!;
+  assert.ok(close(composite(1), composite(2), 1e-4));
+  assert.ok(close(composite(2), composite(3), 1e-4));
+  assert.ok(close(composite(1), 2 * c, 1e-4));
+});
+
 test("computeOpponentAdjustedRatings: the same raw offensive output against tougher defenses rates higher than against weaker defenses", () => {
   // X faces two strong defenses (S1, S2); Y faces two weak defenses
   // (W1, W2) -- both X and Y put up the identical raw 0.5 every game.
