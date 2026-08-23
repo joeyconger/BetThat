@@ -26,12 +26,13 @@ const MIN_SP_SAMPLE = 20;
 const MIN_WEEKLY_SP_SAMPLE = 20;
 
 /**
- * Computes each team's rating as of the end of `throughWeek` and persists
- * it. Returns the rating state for reuse. `paramsOverride` lets a
- * calibration sweep (src/backtest/sweep.ts) try different constants
- * without touching config.ts's defaults — omit it for normal use.
+ * Computes each team's rating as of the end of `throughWeek` -- pure read,
+ * no persistence. Factored out of computeAndStoreRatings so read-only
+ * callers (the matchup-sim UI page) don't upsert team_ratings on every
+ * page view; computeAndStoreRatings below is the persisting wrapper admin
+ * jobs and predictAndStoreWeek actually use.
  */
-export async function computeAndStoreRatings(
+export async function computeRatings(
   sport: Sport,
   season: number,
   throughWeek: number,
@@ -74,7 +75,23 @@ export async function computeAndStoreRatings(
     }
   }
 
-  const state = computeSeasonRatings(games, initialRatings, params);
+  return computeSeasonRatings(games, initialRatings, params);
+}
+
+/**
+ * Same as computeRatings, plus persists the result to team_ratings. What
+ * every admin job / predictAndStoreWeek actually calls; computeRatings
+ * above is for read-only callers that shouldn't write on every call (the
+ * matchup-sim UI page).
+ */
+export async function computeAndStoreRatings(
+  sport: Sport,
+  season: number,
+  throughWeek: number,
+  paramsOverride?: RatingParams,
+): Promise<Map<number, TeamRatingState>> {
+  const params = paramsOverride ?? getRatingParams(sport);
+  const state = await computeRatings(sport, season, throughWeek, paramsOverride);
 
   for (const [teamId, teamState] of state) {
     await upsertTeamRating({
@@ -89,6 +106,53 @@ export async function computeAndStoreRatings(
   }
 
   return state;
+}
+
+export interface HypotheticalMatchupResult {
+  home: { teamId: number; rating: number; gamesPlayed: number };
+  away: { teamId: number; rating: number; gamesPlayed: number };
+  modelSpreadHome: number;
+  confidence: number;
+}
+
+/**
+ * Predicts an arbitrary matchup between two teams -- not necessarily a
+ * real scheduled game -- as of the end of `throughWeek` in `season`. Per
+ * predictSpread's doc (see elo.ts), an arbitrary hypothetical matchup with
+ * no market line isn't a degraded case, it's the normal path; this just
+ * needs the two teams' ratings, nothing else required. Deliberately
+ * simpler than predictAndStoreWeek's real-game path: omits the CFBD Elo/
+ * SP+/weekly-SP+ z-score signals and rest-days-diff, since those are
+ * tied to a specific real calendar matchup (a week's external-rating
+ * distribution, two teams' actual rest gap) that doesn't cleanly exist
+ * for a hypothetical pairing -- predictSpread already treats each as a
+ * clean no-op when omitted, the same fallback shape used throughout this
+ * model for missing optional signals, not a special case invented here.
+ */
+export async function predictHypotheticalMatchup(
+  sport: Sport,
+  homeTeamId: number,
+  awayTeamId: number,
+  season: number,
+  throughWeek: number,
+  paramsOverride?: RatingParams,
+): Promise<HypotheticalMatchupResult> {
+  const params = paramsOverride ?? getRatingParams(sport);
+  const state = await computeRatings(sport, season, throughWeek, paramsOverride);
+  const home = state.get(homeTeamId) ?? { rating: 0, gamesPlayed: 0 };
+  const away = state.get(awayTeamId) ?? { rating: 0, gamesPlayed: 0 };
+
+  const prediction = predictSpread(
+    { homeRating: home.rating, awayRating: away.rating, homeGamesPlayed: home.gamesPlayed, awayGamesPlayed: away.gamesPlayed },
+    params,
+  );
+
+  return {
+    home: { teamId: homeTeamId, rating: home.rating, gamesPlayed: home.gamesPlayed },
+    away: { teamId: awayTeamId, rating: away.rating, gamesPlayed: away.gamesPlayed },
+    modelSpreadHome: prediction.modelSpreadHome,
+    confidence: prediction.confidence,
+  };
 }
 
 async function predictAndStoreWeek(

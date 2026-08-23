@@ -3,13 +3,16 @@ import { pool } from "./db/pool.js";
 import { isBasicAuthorized, requireBasicAuth } from "./web/basicAuth.js";
 import { renderHome } from "./web/pages/home.js";
 import { renderBacktestReport } from "./web/pages/backtestReport.js";
-import { renderRatingsPage, renderPredictionsPage } from "./web/pages/ratings.js";
+import { renderSlatePage } from "./web/pages/slate.js";
+import type { SimTeamOption } from "./web/pages/slate.js";
 import {
   listBacktestRuns,
   getTeamRatingsForWeek,
   getPredictionsForWeek,
+  getTeamNameToIdMap,
 } from "./db/repo.js";
 import type { Sport } from "./db/repo.js";
+import { predictHypotheticalMatchup } from "./ratings/service.js";
 import {
   getOverallReport,
   getOverallStatsByRun,
@@ -17,6 +20,14 @@ import {
   getThresholdReport,
   getConfidenceReport,
   getSportSeasonReport,
+  getConferenceReport,
+  getInOutConferenceReport,
+  getWeekBucketReport,
+  getHomeRoadBySpreadSizeReport,
+  getHomeRoadByDeviationReport,
+  getKeyNumberReport,
+  getWeatherReport,
+  getPrecipitationReport,
 } from "./backtest/report.js";
 import { listJobs, getJob, JOB_STARTERS } from "./adminJobs.js";
 
@@ -176,34 +187,91 @@ async function handleRequest(
       res.end("backtest run not found");
       return;
     }
-    const [overall, openingCover, thresholds, confidence, bySeasonSport] = await Promise.all([
+    const isCfb = run.sport === "cfb";
+    const [
+      overall,
+      openingCover,
+      thresholds,
+      confidence,
+      bySeasonSport,
+      keyNumbers,
+      weather,
+      precipitation,
+      conference,
+      inOutConference,
+      weekBucket,
+      homeRoadSpread,
+      homeRoadDeviation,
+    ] = await Promise.all([
       getOverallReport(runId),
       getOpeningCoverRate(runId),
       getThresholdReport(runId),
       getConfidenceReport(runId),
       getSportSeasonReport(runId),
+      getKeyNumberReport(runId),
+      getWeatherReport(runId),
+      getPrecipitationReport(runId),
+      isCfb ? getConferenceReport(runId) : Promise.resolve([]),
+      isCfb ? getInOutConferenceReport(runId) : Promise.resolve([]),
+      isCfb ? getWeekBucketReport(runId) : Promise.resolve([]),
+      isCfb ? getHomeRoadBySpreadSizeReport(runId) : Promise.resolve([]),
+      isCfb ? getHomeRoadByDeviationReport(runId) : Promise.resolve([]),
     ]);
-    html(res, renderBacktestReport(run, overall, openingCover, thresholds, confidence, bySeasonSport));
+    html(
+      res,
+      renderBacktestReport(run, overall, openingCover, thresholds, confidence, bySeasonSport, {
+        keyNumbers,
+        weather,
+        precipitation,
+        conference,
+        inOutConference,
+        weekBucket,
+        homeRoadSpread,
+        homeRoadDeviation,
+      }),
+    );
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/ratings") {
+  if (req.method === "GET" && url.pathname === "/slate") {
     const sport = url.searchParams.get("sport") ?? "";
     const season = url.searchParams.get("season") ?? "";
     const week = url.searchParams.get("week") ?? "";
-    const ratings =
-      isSport(sport) && season && week ? await getTeamRatingsForWeek(sport, Number(season), Number(week)) : null;
-    html(res, renderRatingsPage(sport || "nfl", season, week, ratings));
-    return;
-  }
+    const activeTab = url.searchParams.get("tab") ?? "weekly";
+    const simHome = url.searchParams.get("home") ?? "";
+    const simAway = url.searchParams.get("away") ?? "";
+    const validSport = isSport(sport) ? sport : "cfb";
+    const hasContext = isSport(sport) && season !== "" && week !== "";
 
-  if (req.method === "GET" && url.pathname === "/predictions") {
-    const sport = url.searchParams.get("sport") ?? "";
-    const season = url.searchParams.get("season") ?? "";
-    const week = url.searchParams.get("week") ?? "";
-    const predictions =
-      isSport(sport) && season && week ? await getPredictionsForWeek(sport, Number(season), Number(week)) : null;
-    html(res, renderPredictionsPage(sport || "nfl", season, week, predictions));
+    const [predictions, ratings, teamMap] = await Promise.all([
+      hasContext ? getPredictionsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
+      hasContext ? getTeamRatingsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
+      getTeamNameToIdMap(validSport),
+    ]);
+    const teams: SimTeamOption[] = [...teamMap.entries()]
+      .map(([name, id]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const simResult =
+      hasContext && simHome && simAway && simHome !== simAway
+        ? await predictHypotheticalMatchup(validSport, Number(simHome), Number(simAway), Number(season), Number(week))
+        : null;
+
+    html(
+      res,
+      renderSlatePage({
+        sport: sport || "cfb",
+        season,
+        week,
+        activeTab,
+        predictions,
+        ratings,
+        teams,
+        simHome,
+        simAway,
+        simResult,
+      }),
+    );
     return;
   }
 
