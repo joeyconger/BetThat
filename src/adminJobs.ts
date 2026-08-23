@@ -25,6 +25,7 @@ import {
   listBacktestRuns,
   getPriorSeasonFinalRating,
   getSeasonGamesForRating,
+  getReturningProductionDistribution,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
@@ -1908,6 +1909,181 @@ export function startCfbSeedStrategySweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Step 3 of docs/prompts/returning-production-seed-adjustment.md: sweeps
+ * returningProductionPoints the same way cfb-seed-strategy-sweep swept
+ * seasonCarryover (seed applied ONCE at computeInitialRating, never
+ * re-referenced by computeSeasonRatings' update loop -- see that
+ * function's doc). Requires cfb-returning-production-ingest to have run.
+ *
+ * IMPORTANT difference from the seasonCarryover sweep, worth stating
+ * explicitly rather than silently reusing that job's "2023 is seed-
+ * invariant" framing: seasonCarryover needs season-1 data (absent for
+ * 2023, this backtest's first season), but returning production is read
+ * for THIS season directly (see getReturningProductionDistribution's doc)
+ * -- CFBD has 2023 returning-production data, and computeInitialRating
+ * applies the returningProductionPoints term unconditionally whenever a
+ * deviation exists, independent of whether a carryover/SP+ base exists.
+ * So 2023 is NOT inert here: its teams seed from "0 base +
+ * returningProductionPoints * deviation" (no carryover), a genuinely
+ * different regime from 2024/2025's "carryover+SP+ blend +
+ * returningProductionPoints * deviation" -- pooling all three seasons
+ * blindly would blur two different mechanisms together. Reports pooled
+ * AND 2024-2025-only numbers side by side rather than assuming one
+ * approximates the other.
+ *
+ * Buckets fold 22+ into 18-21 (n=33 in the prior sweep couldn't support
+ * interpretation on its own).
+ */
+export function startCfbReturningProductionSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-returning-production-sweep", async (job) => {
+    log(
+      job,
+      "Returning-production seed adjustment sweep: returningProductionPoints, seed applied ONCE via computeInitialRating, no post-init blending. Reporting pooled (2023-2025) AND 2024-2025-only numbers separately -- see this function's doc for why 2023 is NOT seed-invariant here, unlike the seasonCarryover sweep.",
+    );
+
+    const base = getRatingParams("cfb");
+    const weightGrid = [0, 5, 10, 15, 20, 30, 50];
+    const BASELINE_WEIGHT = 0;
+
+    // Seed-coverage + league-average diagnostic, live per season -- the
+    // exact numbers this sweep's centering math depends on.
+    for (const season of [2023, 2024, 2025]) {
+      const dist = await getReturningProductionDistribution("cfb", season);
+      const values = [...dist.values()];
+      const avg = values.length > 0 ? values.reduce((s, v) => s + v, 0) / values.length : null;
+      const min = values.length > 0 ? Math.min(...values) : null;
+      const max = values.length > 0 ? Math.max(...values) : null;
+      log(
+        job,
+        `returning-production coverage ${season}: ${dist.size} teams, league avg percentPPA=${avg === null ? "n/a" : avg.toFixed(3)}, range=[${min === null ? "n/a" : min.toFixed(3)}, ${max === null ? "n/a" : max.toFixed(3)}]`,
+      );
+    }
+
+    const gamesPlayedBySeason = new Map<number, Map<number, number>>();
+    const gameSeason = new Map<number, number>();
+    for (const season of [2023, 2024, 2025]) {
+      const m = await getCombinedGamesPlayedByGame("cfb", season);
+      gamesPlayedBySeason.set(season, m);
+      for (const gameId of m.keys()) gameSeason.set(gameId, season);
+    }
+    function combinedGamesPlayed(gameId: number): number | null {
+      for (const map of gamesPlayedBySeason.values()) {
+        const v = map.get(gameId);
+        if (v !== undefined) return v;
+      }
+      return null;
+    }
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: "0-1", min: 0, max: 1 },
+      { label: "2-3", min: 2, max: 3 },
+      { label: "4-5", min: 4, max: 5 },
+      { label: "6-7", min: 6, max: 7 },
+      { label: "8-9", min: 8, max: 9 },
+      { label: "10-13", min: 10, max: 13 },
+      { label: "14-17", min: 14, max: 17 },
+      { label: "18+", min: 18, max: Infinity },
+    ];
+
+    function logBuckets(details: Awaited<ReturnType<typeof getBacktestGameDetails>>, only2024_25: boolean): void {
+      for (const bucket of buckets) {
+        let n = 0;
+        let coveredCount = 0;
+        let coveredN = 0;
+        let clvSum = 0;
+        let clvN = 0;
+        for (const [id, d] of details) {
+          if (only2024_25 && gameSeason.get(id) === 2023) continue;
+          const cgp = combinedGamesPlayed(id);
+          if (cgp === null || cgp < bucket.min || cgp > bucket.max) continue;
+          n += 1;
+          if (d.covered !== null) {
+            coveredN += 1;
+            coveredCount += d.covered ? 1 : 0;
+          }
+          if (d.clv !== null) {
+            clvN += 1;
+            clvSum += d.clv;
+          }
+        }
+        log(
+          job,
+          `  ${bucket.label}: ${n} games -- cover=${coveredN > 0 ? ((coveredCount / coveredN) * 100).toFixed(1) + "%" : "n/a"} avgClv=${clvN > 0 ? (clvSum / clvN).toFixed(3) : "n/a"}`,
+        );
+      }
+    }
+
+    const runsByWeight = new Map<number, { runId: number; details: Awaited<ReturnType<typeof getBacktestGameDetails>> }>();
+
+    for (const weight of weightGrid) {
+      const result = await runBacktest({
+        name: `cfb-returning-production-sweep-w${weight}`,
+        sport: "cfb",
+        seasonStart: 2023,
+        seasonEnd: 2025,
+        paramsOverride: { ...base, returningProductionPoints: weight },
+      });
+      const overall = await getOverallReport(result.backtestRunId);
+      const opening = await getOpeningCoverRate(result.backtestRunId);
+      const details = await getBacktestGameDetails(result.backtestRunId);
+      runsByWeight.set(weight, { runId: result.backtestRunId, details });
+      const tag = weight === BASELINE_WEIGHT ? " [current default -- no-op]" : "";
+      log(
+        job,
+        `\nreturningProductionPoints=${weight}${tag}: ${result.scored} games, overall cover=${fmtPct(overall.coverRate)} avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(3)}, cover vs open=${fmtPct(opening.coverRateVsOpening)} (run ${result.backtestRunId})`,
+      );
+      log(job, " pooled (2023-2025):");
+      logBuckets(details, false);
+      log(job, " 2024-2025 only:");
+      logBuckets(details, true);
+    }
+
+    const baselineRun = runsByWeight.get(BASELINE_WEIGHT)!;
+    log(job, `\npaired tests vs. returningProductionPoints=${BASELINE_WEIGHT} (current default), identical game sets:`);
+    for (const weight of weightGrid) {
+      if (weight === BASELINE_WEIGHT) continue;
+      const variant = runsByWeight.get(weight)!;
+      for (const restrictTo2024_25 of [false, true]) {
+        const label = restrictTo2024_25 ? "2024-2025 only" : "pooled";
+        const commonGameIds = [...baselineRun.details.keys()].filter(
+          (id) => variant.details.has(id) && (!restrictTo2024_25 || gameSeason.get(id) !== 2023),
+        );
+        const clvGameIds = commonGameIds.filter(
+          (id) => baselineRun.details.get(id)!.clv !== null && variant.details.get(id)!.clv !== null,
+        );
+        if (clvGameIds.length >= 2) {
+          const baseClv = clvGameIds.map((id) => baselineRun.details.get(id)!.clv!);
+          const varClv = clvGameIds.map((id) => variant.details.get(id)!.clv!);
+          const paired = pairedTTest(baseClv, varClv);
+          log(
+            job,
+            `  returningProductionPoints=${weight} (${label}): CLV (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)}`,
+          );
+        }
+        const coveredGameIds = commonGameIds.filter(
+          (id) => baselineRun.details.get(id)!.covered !== null && variant.details.get(id)!.covered !== null,
+        );
+        if (coveredGameIds.length >= 2) {
+          const baseCovered = coveredGameIds.map((id) => (baselineRun.details.get(id)!.covered ? 1 : 0));
+          const varCovered = coveredGameIds.map((id) => (variant.details.get(id)!.covered ? 1 : 0));
+          const paired = pairedTTest(baseCovered, varCovered);
+          log(
+            job,
+            `  returningProductionPoints=${weight} (${label}): covered-as-0/1 (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+              paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+            }`,
+          );
+        }
+      }
+    }
+
+    log(
+      job,
+      "\nWhat would make this an implementation artifact, and what was checked: (1) the seed must be applied once, never re-referenced in-season -- true by construction, this reuses the exact code path cfb-seed-strategy-sweep validated for seasonCarryover, now extended with the same discipline for returningProductionPoints (see computeInitialRating's doc). (2) 2023 must NOT be silently treated as seed-invariant the way it was for seasonCarryover -- confirmed above it has real coverage and a real league average, and pooled vs. 2024-2025-only numbers are reported separately rather than assuming they'd match. (3) the late-games-played bucket should still wash out to the same value across every weight in this sweep, same non-artifact signature the carryover sweep showed at its 22+ bucket -- check the 18+ row above for that. Do not chase a non-significant delta into adopting a nonzero weight -- this project's convention throughout has been to leave defaults alone absent significance.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -2201,6 +2377,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-unanchored-rebaseline": startCfbUnanchoredRebaselineJob,
   "cfb-anchor-removal-breakdown": startCfbAnchorRemovalBreakdownJob,
   "cfb-seed-strategy-sweep": startCfbSeedStrategySweepJob,
+  "cfb-returning-production-sweep": startCfbReturningProductionSweepJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
