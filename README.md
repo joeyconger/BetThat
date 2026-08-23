@@ -791,11 +791,45 @@ src/
    Part 2 (the full preseason-prior ingestion: returning production,
    transfer portal, recruiting talent, polls) was dropped as a bundle (see
    "Market anchor removed, preseason prior tested and dropped" above), but
-   returning production specifically is being tested on its own, narrowest
-   first. Full ready-to-run spec saved at
-   `docs/prompts/returning-production-seed-adjustment.md` — paste into a
-   fresh session when picking this up. Also flags a still-open anomaly
-   worth closing in the same pass: the 0-1 games-played bucket's avgClv
-   (~0.10) sits well below every other bucket (0.45-0.94) across all six
-   `cfb-seed-strategy-sweep` runs — possibly stale/mis-timestamped week-1
-   opening lines contaminating CLV for that bucket specifically.
+   returning production and transfer portal are each being tested
+   individually, narrowest first, before recruiting talent or polls are
+   considered at all.
+
+   **Returning production — done.** `returningProductionPoints` (one-time
+   week-0 seed adjustment, centered against that season's FBS league
+   average percentPPA — see `computeInitialRating`'s doc) was built,
+   calibrated, and found a clean null: every paired significance test came
+   back non-significant across a 0-50 weight grid, pooled and
+   2024-2025-only alike (`cfb-returning-production-sweep`). Stays at its
+   default of 0. The Step 4 eyeball test (`cfb-returning-production-
+   week1-table`, illustrative weight only) surfaced a real, concrete miss
+   though: Miami's percentPPA was one of the lowest in FBS, which would
+   have badly under-rated a team that actually went 13-3 and reached the
+   CFP National Championship game — they rebuilt almost entirely through
+   the transfer portal, which returning production is structurally blind
+   to. That finding is what motivated the portal work below. Full history
+   in `docs/prompts/returning-production-seed-adjustment.md`.
+
+   Also closed: the week-1 CLV anomaly (0-1 games-played bucket's avgClv
+   sitting well below every other bucket) is confirmed NOT a stale/
+   mis-timestamped-opening-line bug — `syncCfbdHistoricalOdds.ts`'s
+   `captured_at` is a cosmetic placeholder only (exactly one 'opening' row
+   per game, so the timestamp can't affect which value a lookup returns);
+   the real explanation is structural, not a defect: week-1 lines open
+   months before kickoff, a genuinely longer open-to-close window than any
+   other week, which is simply a noisier reference point for CLV.
+
+   **Transfer portal — scoped, not started.** CFBD's `/player/portal` has
+   no production/performance stat at all (talent/pedigree only: `rating`,
+   `stars`, `origin`, `destination`) — the design weights each incoming
+   transfer's rating by the STRENGTH OF THE ORIGIN PROGRAM (reusing this
+   project's own prior-season ratings, no new ingestion needed for that
+   part) rather than treating transfers as flat-value or counting volume,
+   per the Carson-Beck-from-Georgia vs. Colorado's-broader-portal-haul
+   distinction that motivated it. Incoming-only, deliberately, to avoid
+   double-counting with returning production's implicit "who left" signal.
+   Three real open questions (sum vs. average per team, whether `rating`
+   is recruiting-pedigree or performance-evaluated, the transfer-date
+   season cutoff) are flagged for resolution before implementation, not
+   defaulted. Full spec saved at
+   `docs/prompts/portal-incoming-seed-adjustment.md`.
