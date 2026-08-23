@@ -524,18 +524,34 @@ export function carryoverRating(priorRating: number, params: RatingParams): numb
 export function computeInitialRating(
   priorEloRating: number | undefined,
   priorSpRating: number | undefined,
+  returningProductionDeviation: number | undefined,
   params: RatingParams,
 ): number {
+  let base: number;
   if (priorSpRating === undefined) {
-    return priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
+    base = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
+  } else {
+    // Missing carryover (e.g. the first season in a backtest range, where no
+    // prior-season rating was ever computed) blends against league-average
+    // (0), not straight to priorSpRating — otherwise spPriorWeight=0 would
+    // still inject full-strength SP+ whenever carryover happens to be
+    // missing, silently ignoring the weight the caller asked for.
+    const carryover = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
+    base = (1 - params.spPriorWeight) * carryover + params.spPriorWeight * priorSpRating;
   }
-  // Missing carryover (e.g. the first season in a backtest range, where no
-  // prior-season rating was ever computed) blends against league-average
-  // (0), not straight to priorSpRating — otherwise spPriorWeight=0 would
-  // still inject full-strength SP+ whenever carryover happens to be
-  // missing, silently ignoring the weight the caller asked for.
-  const carryover = priorEloRating !== undefined ? carryoverRating(priorEloRating, params) : 0;
-  return (1 - params.spPriorWeight) * carryover + params.spPriorWeight * priorSpRating;
+  // returningProductionDeviation is ALREADY centered by the caller (this
+  // team's percentPPA minus the FBS league-average for that season, see
+  // service.ts) -- a team exactly at league-average returning production
+  // gets no adjustment, only a deviation from it does. Applied additively
+  // on top of the carryover/SP+ blend above, same "points per unit
+  // deviation" shape as eloSignalPoints/spSignalPoints in predictSpread,
+  // just applied once at seed time instead of every week. Missing data
+  // (a team with no returning-production row that season) is NOT
+  // defaulted to 0 deviation -- that would silently assume "exactly
+  // average," a real substitution, not a neutral no-op, once the weight
+  // is nonzero. It seeds exactly as it would with this feature absent.
+  if (returningProductionDeviation === undefined) return base;
+  return base + params.returningProductionPoints * returningProductionDeviation;
 }
 
 /** Standard z-score: how many standard deviations `value` is from the mean of `population`. 0 if the population has no spread. */

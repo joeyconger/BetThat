@@ -20,17 +20,17 @@ test("zScore returns 0 for a population with no spread", () => {
 });
 
 test("computeInitialRating falls back to 0 with no prior data at all", () => {
-  assert.equal(computeInitialRating(undefined, undefined, NFL), 0);
+  assert.equal(computeInitialRating(undefined, undefined, undefined, NFL), 0);
 });
 
 test("computeInitialRating uses pure carryover when there's no SP+ prior", () => {
-  assert.equal(computeInitialRating(10, undefined, NFL), carryoverRating(10, NFL));
+  assert.equal(computeInitialRating(10, undefined, undefined, NFL), carryoverRating(10, NFL));
 });
 
 test("computeInitialRating blends carryover and SP+ prior by spPriorWeight", () => {
   const params = { ...CFB, spPriorWeight: 0.4, seasonCarryover: 0.6 };
   // carryover = 10*0.6 = 6; blend = 0.6*6 + 0.4*20 = 3.6 + 8 = 11.6
-  assert.ok(Math.abs(computeInitialRating(10, 20, params) - 11.6) < 1e-9);
+  assert.ok(Math.abs(computeInitialRating(10, 20, undefined, params) - 11.6) < 1e-9);
 });
 
 test("computeInitialRating blends against league-average (0), not raw SP+, when carryover is missing", () => {
@@ -39,7 +39,18 @@ test("computeInitialRating blends against league-average (0), not raw SP+, when 
   // code returned priorSpRating unconditionally in that branch instead of
   // blending it against 0 like the weight says it should.
   const params = { ...CFB, spPriorWeight: 0.4 };
-  assert.ok(Math.abs(computeInitialRating(undefined, 20, params) - 0.4 * 20) < 1e-9);
+  assert.ok(Math.abs(computeInitialRating(undefined, 20, undefined, params) - 0.4 * 20) < 1e-9);
+});
+
+test("computeInitialRating adds returningProductionPoints * deviation on top of the carryover/SP+ blend", () => {
+  const params = { ...CFB, spPriorWeight: 0, seasonCarryover: 0.6, returningProductionPoints: 10 };
+  // base = 10*0.6 = 6; deviation = 0.05 -> +0.5
+  assert.ok(Math.abs(computeInitialRating(10, undefined, 0.05, params) - 6.5) < 1e-9);
+});
+
+test("computeInitialRating ignores returningProductionPoints when deviation is undefined (missing data, not substituted)", () => {
+  const params = { ...CFB, spPriorWeight: 0, seasonCarryover: 0.6, returningProductionPoints: 10 };
+  assert.equal(computeInitialRating(10, undefined, undefined, params), carryoverRating(10, params));
 });
 
 test("predictSpread always returns the pure rating-differential number (no market input at all)", () => {

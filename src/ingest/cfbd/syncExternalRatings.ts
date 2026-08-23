@@ -1,5 +1,29 @@
-import { getSpRatings, getEloRatings } from "./client.js";
+import { getSpRatings, getEloRatings, getReturningProduction } from "./client.js";
 import { findTeamIdByName, upsertExternalRating } from "../../db/repo.js";
+
+/**
+ * See client.ts's getReturningProduction doc — season-final only, stores
+ * percentPPA (the single combined returning-production fraction, NOT the
+ * passing/receiving/rushing sub-splits) as the year's own value, unlike
+ * syncCfbdSpRatings below (which stores season Y for use as season Y+1's
+ * prior). Called with THIS season's year directly, since /player/returning
+ * for season Y already describes production returning INTO season Y.
+ */
+export async function syncCfbdReturningProduction(year: number): Promise<{ synced: number; skipped: number }> {
+  const rows = await getReturningProduction(year);
+  let synced = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const teamId = await findTeamIdByName("cfb", row.team);
+    if (!teamId) {
+      skipped += 1;
+      continue;
+    }
+    await upsertExternalRating({ teamId, season: year, week: null, source: "cfbd_returning_production", rating: row.percentPPA });
+    synced += 1;
+  }
+  return { synced, skipped };
+}
 
 /** See client.ts's getSpRatings doc — season-final only, used as next season's rating prior. */
 export async function syncCfbdSpRatings(year: number): Promise<{ synced: number; skipped: number }> {

@@ -34,7 +34,7 @@ import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
-import { syncCfbdSpRatings, syncCfbdEloRatings } from "./ingest/cfbd/syncExternalRatings.js";
+import { syncCfbdSpRatings, syncCfbdEloRatings, syncCfbdReturningProduction } from "./ingest/cfbd/syncExternalRatings.js";
 import { syncCfbdHistoricalWeather } from "./ingest/cfbd/syncHistoricalWeather.js";
 import { syncNflHistoricalWeather } from "./ingest/weather/syncWeather.js";
 import {
@@ -211,6 +211,26 @@ export function startCfbExternalRatingsJob(): Promise<JobStatus> {
     log(job, "running CFB backtest 2023-2025 with external ratings");
     const summary = await runBacktest({ name: "cfb-v2-external-ratings", sport: "cfb", seasonStart: 2023, seasonEnd: 2025 });
     log(job, `scored ${summary.scored}, skipped ${summary.skippedNoOdds}, run id ${summary.backtestRunId}`);
+  });
+}
+
+/**
+ * Ingests CFBD returning-production percentPPA for CFB 2023-2025 (each
+ * season's OWN year, not season-1 -- see syncCfbdReturningProduction's
+ * doc). Requires cfb-verify-returning-production to have already come back
+ * clean per docs/prompts/returning-production-seed-adjustment.md's Step 1.
+ * Run this before any cfb-returning-production-sweep -- without it,
+ * RatingParams.returningProductionPoints is a silent per-team no-op (every
+ * team falls back to computeInitialRating's existing carryover/SP+ blend
+ * unchanged, per that function's "missing data" guard).
+ */
+export function startCfbReturningProductionIngestJob(): Promise<JobStatus> {
+  return runJob("cfb-returning-production-ingest", async (job) => {
+    for (const year of [2023, 2024, 2025]) {
+      log(job, `${year}: returning production`);
+      const result = await syncCfbdReturningProduction(year);
+      log(job, `${year}: synced ${result.synced}, skipped ${result.skipped}`);
+    }
   });
 }
 
@@ -2137,6 +2157,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-sweep": startNflSweepJob,
   "cfb-sweep": startCfbSweepJob,
   "cfb-external-ratings": startCfbExternalRatingsJob,
+  "cfb-returning-production-ingest": startCfbReturningProductionIngestJob,
   "cfb-external-sweep": startCfbExternalSweepJob,
   "cfb-walkforward": startCfbWalkforwardJob,
   "cfb-walkforward-no-rivalry": startCfbWalkforwardNoRivalryJob,

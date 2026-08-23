@@ -1087,9 +1087,9 @@ export async function getPriorSeasonFinalRating(
 export interface ExternalRatingInput {
   teamId: number;
   season: number;
-  /** null = season-final value (cfbd_sp, which has no week granularity). */
+  /** null = season-final value (cfbd_sp, cfbd_returning_production -- neither has week granularity). */
   week: number | null;
-  source: "cfbd_sp" | "cfbd_elo" | "manual_sp_weekly";
+  source: "cfbd_sp" | "cfbd_elo" | "manual_sp_weekly" | "cfbd_returning_production";
   rating: number;
 }
 
@@ -1138,6 +1138,26 @@ export async function getCfbdSpDistributionForSeason(sport: Sport, season: numbe
      FROM external_ratings er
      JOIN teams t ON t.id = er.team_id
      WHERE t.sport = $1 AND er.season = $2 AND er.week IS NULL AND er.source = 'cfbd_sp'`,
+    [sport, season],
+  );
+  return new Map(result.rows.map((r) => [r.team_id, r.rating]));
+}
+
+/**
+ * Every team's CFBD returning-production percentPPA for a given season —
+ * the population computeAndStoreRatings centers each team's value against
+ * (see ratings/elo.ts's computeInitialRating doc). Unlike SP+ above, this
+ * is read for THIS season, not season-1: /player/returning for season Y
+ * already describes production returning INTO season Y (based on season
+ * Y-1's accumulated stats), so there's no extra offset the caller needs to
+ * apply — see client.ts's getReturningProduction doc.
+ */
+export async function getReturningProductionDistribution(sport: Sport, season: number): Promise<Map<number, number>> {
+  const result = await pool.query<{ team_id: number; rating: number }>(
+    `SELECT er.team_id, er.rating
+     FROM external_ratings er
+     JOIN teams t ON t.id = er.team_id
+     WHERE t.sport = $1 AND er.season = $2 AND er.week IS NULL AND er.source = 'cfbd_returning_production'`,
     [sport, season],
   );
   return new Map(result.rows.map((r) => [r.team_id, r.rating]));

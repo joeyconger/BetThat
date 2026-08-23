@@ -2,6 +2,7 @@ import {
   getSeasonGamesForRating,
   getPriorSeasonFinalRating,
   getPriorSeasonSpRating,
+  getReturningProductionDistribution,
   getCfbdEloDistributionForWeek,
   getCfbdSpDistributionForSeason,
   getManualSpWeeklyDistributionForWeek,
@@ -45,12 +46,31 @@ export async function computeAndStoreRatings(
     teamIds.add(game.awayTeamId);
   }
 
+  // Fetched once (not per-team) since the league average needs every
+  // team's value regardless -- see getReturningProductionDistribution's
+  // doc and RatingParams.returningProductionPoints'. CFB-only; NFL's map
+  // is always empty since there's no ingestion source for it, same
+  // "empty distribution -> no-op for everyone" pattern as spDistribution/
+  // eloDistribution in predictAndStoreWeek below.
+  const returningProductionDistribution =
+    sport === "cfb" ? await getReturningProductionDistribution(sport, season) : new Map<number, number>();
+  const returningProductionValues = [...returningProductionDistribution.values()];
+  const returningProductionLeagueAverage =
+    returningProductionValues.length > 0
+      ? returningProductionValues.reduce((sum, v) => sum + v, 0) / returningProductionValues.length
+      : undefined;
+
   const initialRatings = new Map<number, number>();
   for (const teamId of teamIds) {
     const priorRating = await getPriorSeasonFinalRating(teamId, sport, season - 1, METHOD);
     const priorSp = sport === "cfb" ? await getPriorSeasonSpRating(teamId, season - 1) : undefined;
-    if (priorRating !== undefined || priorSp !== undefined) {
-      initialRatings.set(teamId, computeInitialRating(priorRating, priorSp, params));
+    const teamReturningProduction = returningProductionDistribution.get(teamId);
+    const returningProductionDeviation =
+      teamReturningProduction !== undefined && returningProductionLeagueAverage !== undefined
+        ? teamReturningProduction - returningProductionLeagueAverage
+        : undefined;
+    if (priorRating !== undefined || priorSp !== undefined || returningProductionDeviation !== undefined) {
+      initialRatings.set(teamId, computeInitialRating(priorRating, priorSp, returningProductionDeviation, params));
     }
   }
 

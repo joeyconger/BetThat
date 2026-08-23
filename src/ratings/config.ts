@@ -295,6 +295,21 @@ export interface RatingParams {
    * opponent-adjustment solve does). Untested -- needs a real sweep.
    */
   opponentAdjShrinkageK: number;
+  /**
+   * Points of week-0 SEED adjustment per unit of (this team's CFBD
+   * returning-production percentPPA minus the FBS league-average
+   * percentPPA for that season) — see computeInitialRating's doc. Applied
+   * ONCE, at season seeding, on top of the existing carryover/spPriorWeight
+   * blend — never re-applied during in-season updates, same one-time-seed
+   * discipline the seasonCarryover sweep validated (see README's "Market
+   * anchor removed, preseason prior tested and dropped"). A team missing a
+   * returning-production row for that season is unaffected regardless of
+   * this weight (see computeInitialRating). CFB-only — no returning-
+   * production data source for NFL. Defaults to 0 (no-op) — untested,
+   * needs a real sweep; see
+   * docs/prompts/returning-production-seed-adjustment.md for the plan.
+   */
+  returningProductionPoints: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -326,6 +341,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerFgMakeRate: 0,
   pointsPerOpponentAdj: 0, // no raw-play ingestion for NFL yet
   opponentAdjShrinkageK: 4, // irrelevant while pointsPerOpponentAdj is 0 -- placeholder matching CFB's untested default
+  returningProductionPoints: 0, // no returning-production data source for NFL
 };
 
 const CFB_PARAMS: RatingParams = {
