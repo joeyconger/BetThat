@@ -654,78 +654,88 @@ export function startCfbGarbageTimeHoldoutPairedTestJob(): Promise<JobStatus> {
 }
 
 /**
- * Per-game rating-delta diagnostic for one team/season, requested directly
- * (the ODU face-validity investigation): for every game, the team's rating
- * immediately before and after, the delta, and the OPPONENT's rating at
- * that same pre-game point -- tells you directly whether a big delta came
- * from an oversized margin against an already-correctly-rated opponent, or
- * from the model not having registered the opponent as weak yet.
+ * Per-game rating-delta diagnostic for one team/season -- for every game,
+ * the team's rating immediately before and after, the delta, and the
+ * OPPONENT's rating at that same pre-game point. Tells you directly
+ * whether a big delta came from an oversized margin against an already-
+ * correctly-rated opponent (points toward errorCapPoints-style margin
+ * dampening), or from the model not having registered the opponent as
+ * weak yet (points toward opponent-adjustment actually mattering,
+ * contrary to the CLV sweep). If one single game accounts for most of a
+ * season's net movement, that's the answer in one row, not an aggregate
+ * pattern -- see the ODU case (README's "Rating-sensibility fix" section)
+ * for the first real use of this.
  *
  * Deliberately uses computeRatings (read-only, elo.ts/service.ts) instead
- * of querying the team_ratings table directly -- team_ratings is a SHARED,
- * MUTABLE table that every backtest run upserts into for whatever season
- * it touches, and this investigation alone has run a dozen-plus sweep
- * backtests against 2025 with non-default params since the first query
- * against it. Querying team_ratings now would reflect whichever sweep ran
- * last, not the actual default config. computeRatings recomputes from the
- * real current defaults on demand, so it can't be contaminated this way.
- *
- * Hardcoded to Old Dominion / CFB / 2025, same "one-off diagnostic for a
- * specific case, not a generic tool" pattern as cfb-verify-plays.
+ * of querying the team_ratings table directly -- team_ratings is a
+ * SHARED, MUTABLE table every backtest run upserts into for whatever
+ * season it touches, so a direct query can reflect whichever sweep ran
+ * last rather than the actual current default config (see
+ * cfb-recompute-ratings' doc for why this matters for the live UI too).
+ * computeRatings recomputes from the real current defaults on demand, so
+ * it can't be contaminated this way.
  */
-export function startCfbTeamRatingDeltaDiagnosticJob(): Promise<JobStatus> {
-  return runJob("cfb-team-rating-delta-diagnostic", async (job) => {
-    const season = 2025;
-    const teamName = "Old Dominion";
-    const teamNameToId = await getTeamNameToIdMap("cfb");
-    const teamId = teamNameToId.get(teamName);
-    if (!teamId) {
-      log(job, `"${teamName}" not found in teams table.`);
-      return;
-    }
+async function logTeamRatingDeltas(job: JobStatus, sport: Sport, season: number, teamName: string): Promise<void> {
+  const teamNameToId = await getTeamNameToIdMap(sport);
+  const teamId = teamNameToId.get(teamName);
+  if (!teamId) {
+    log(job, `"${teamName}" not found in teams table.`);
+    return;
+  }
 
-    const games = await getGameHistoryForSeason("cfb", season);
-    const teamGames = games
-      .filter((g) => (g.homeTeam === teamName || g.awayTeam === teamName) && g.status === "final")
-      .sort((a, b) => a.week - b.week);
+  const games = await getGameHistoryForSeason(sport, season);
+  const teamGames = games
+    .filter((g) => (g.homeTeam === teamName || g.awayTeam === teamName) && g.status === "final")
+    .sort((a, b) => a.week - b.week);
 
-    log(job, `${teamName} ${season}: recomputing ratings before/after each game via computeRatings (default params, no persistence) -- ${teamGames.length} completed games.`);
-    log(job, "week  opponent             result        team_before  team_after  delta    opp_before");
+  log(job, `${teamName} ${season}: recomputing ratings before/after each game via computeRatings (default params, no persistence) -- ${teamGames.length} completed games.`);
+  log(job, "week  opponent             result        team_before  team_after  delta    opp_before");
 
-    for (const g of teamGames) {
-      const isHome = g.homeTeam === teamName;
-      const opponentName = isHome ? g.awayTeam : g.homeTeam;
-      const opponentId = teamNameToId.get(opponentName);
-      const teamScore = isHome ? g.homeScore : g.awayScore;
-      const oppScore = isHome ? g.awayScore : g.homeScore;
-      const resultStr = teamScore !== null && oppScore !== null ? `${teamScore}-${oppScore}` : "?-?";
+  for (const g of teamGames) {
+    const isHome = g.homeTeam === teamName;
+    const opponentName = isHome ? g.awayTeam : g.homeTeam;
+    const opponentId = teamNameToId.get(opponentName);
+    const teamScore = isHome ? g.homeScore : g.awayScore;
+    const oppScore = isHome ? g.awayScore : g.homeScore;
+    const resultStr = teamScore !== null && oppScore !== null ? `${teamScore}-${oppScore}` : "?-?";
 
-      const before = await computeRatings("cfb", season, g.week - 1);
-      const after = await computeRatings("cfb", season, g.week);
-      const teamBefore = before.get(teamId)?.rating;
-      const teamAfter = after.get(teamId)?.rating;
-      const oppBefore = opponentId ? before.get(opponentId)?.rating : undefined;
+    const before = await computeRatings(sport, season, g.week - 1);
+    const after = await computeRatings(sport, season, g.week);
+    const teamBefore = before.get(teamId)?.rating;
+    const teamAfter = after.get(teamId)?.rating;
+    const oppBefore = opponentId ? before.get(opponentId)?.rating : undefined;
 
-      const delta = teamBefore !== undefined && teamAfter !== undefined ? teamAfter - teamBefore : undefined;
-      log(
-        job,
-        [
-          String(g.week).padEnd(5),
-          opponentName.padEnd(20).slice(0, 20),
-          resultStr.padEnd(13),
-          (teamBefore === undefined ? "n/a" : teamBefore.toFixed(2)).padStart(11),
-          (teamAfter === undefined ? "n/a" : teamAfter.toFixed(2)).padStart(10),
-          (delta === undefined ? "n/a" : (delta >= 0 ? "+" : "") + delta.toFixed(2)).padStart(8),
-          oppBefore === undefined ? "n/a" : oppBefore.toFixed(2),
-        ].join("  "),
-      );
-    }
-
+    const delta = teamBefore !== undefined && teamAfter !== undefined ? teamAfter - teamBefore : undefined;
     log(
       job,
-      "\nRead this as: a large delta against an opponent ALREADY rated well below average means the model isn't discounting the win for opponent quality (points toward opponent-adjustment still mattering, contrary to the CLV sweep). A large delta against an opponent near 0 means the margin itself is doing the work regardless of who it was against (points toward a margin-of-victory dampening fix instead). If one single game accounts for most of the season's net movement, that's the answer in one row, not an aggregate pattern.",
+      [
+        String(g.week).padEnd(5),
+        opponentName.padEnd(20).slice(0, 20),
+        resultStr.padEnd(13),
+        (teamBefore === undefined ? "n/a" : teamBefore.toFixed(2)).padStart(11),
+        (teamAfter === undefined ? "n/a" : teamAfter.toFixed(2)).padStart(10),
+        (delta === undefined ? "n/a" : (delta >= 0 ? "+" : "") + delta.toFixed(2)).padStart(8),
+        oppBefore === undefined ? "n/a" : oppBefore.toFixed(2),
+      ].join("  "),
     );
-  });
+  }
+}
+
+/** Hardcoded to Old Dominion / CFB / 2025 -- the original ODU face-validity investigation. See logTeamRatingDeltas' doc. */
+export function startCfbTeamRatingDeltaDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-team-rating-delta-diagnostic", (job) => logTeamRatingDeltas(job, "cfb", 2025, "Old Dominion"));
+}
+
+/**
+ * Same diagnostic for Penn State / CFB / 2025 week 14 -- flagged as a
+ * second face-validity case (6-6 record showing up rated 10th) right
+ * after errorCapPoints=35 was adopted and re-persisted. Worth checking
+ * whether this is the same single-outlier-blowout pattern ODU showed
+ * (in which case the cap should already be helping, and this is asking
+ * whether it needs to go further) or a different mechanism entirely.
+ */
+export function startCfbPennStateRatingDeltaDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-pennstate-rating-delta-diagnostic", (job) => logTeamRatingDeltas(job, "cfb", 2025, "Penn State"));
 }
 
 /**
@@ -2761,6 +2771,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
   "cfb-garbagetime-holdout-paired-test": startCfbGarbageTimeHoldoutPairedTestJob,
   "cfb-team-rating-delta-diagnostic": startCfbTeamRatingDeltaDiagnosticJob,
+  "cfb-pennstate-rating-delta-diagnostic": startCfbPennStateRatingDeltaDiagnosticJob,
   "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
   "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
   "cfb-restday-sweep": startCfbRestDaySweepJob,
