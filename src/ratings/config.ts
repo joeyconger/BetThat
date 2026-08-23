@@ -354,6 +354,23 @@ const CFB_PARAMS: RatingParams = {
   // highest of every combo tested). Re-sweep if pointsPerEpa/baseK change,
   // since this pair was only tested holding those two fixed.
   pointsPerEpa: 20,
+  // seasonCarryover=0.6: explicitly locked in (was previously just
+  // inherited from NFL_PARAMS with no CFB-specific validation) via
+  // cfb-seed-strategy-sweep, 0-1 grid, holding spPriorWeight=0 and every
+  // other param at current defaults -- a proper seed-only test (the
+  // one-time computeInitialRating/carryoverRating blend, no post-init
+  // blending -- see elo.ts). 0/0.2/0.4/0.6 are statistically
+  // indistinguishable from each other (paired CLV test vs 0.6: p=0.54,
+  // 0.27, 0.11); 0.8 and 1.0 (raw, unregressed prior-season rating) are
+  // SIGNIFICANTLY worse (p=0.0096, p=0.0077). Motivated by, and directly
+  // supersedes, an earlier invalidated test (priorShrinkK, fully reverted)
+  // that re-blended the prior into the effective rating every week instead
+  // of seeding once -- see git history and task notes for why that result
+  // didn't count. This clean version still found no benefit to a preseason
+  // prior (if anything, a cost to over-weighting one), which is why Part 2
+  // (a fuller CFBD-sourced preseason prior -- returning production/talent/
+  // portal/polls) was dropped rather than built. See README.
+  seasonCarryover: 0.6,
   spPriorWeight: 0, // swept 0-1: consistently HURT cover rate once weighted above ~0.3 — SP+'s uncertain preseason-vs-final timing (see README) looks like it's actively wrong, not just unhelpful
   eloSignalPoints: 1.5, // swept 0-3: genuine, fairly clean positive effect on cover rate, peaking around 1.5-2
   // spSignalPoints: swept 0-3 (cfb-spsignal-sweep, run 210-215) — unlike

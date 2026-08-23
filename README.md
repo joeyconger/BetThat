@@ -605,6 +605,64 @@ holdout test, not a confirmed edge, before acting on it.
   open problem, not a resolved one, until a real fix is found or this gets
   properly walk-forward tested.
 
+## Market anchor removed, preseason prior tested and dropped
+
+`predictSpread` (`src/ratings/elo.ts`) used to blend the model's own
+rating-differential line toward the market's opening line by a games-played
+shrinkage factor, widening confidence with the market spread's size. That
+anchor is now gone entirely — `predictSpread` always returns the pure
+rating-differential number; `marketSpreadHome` is still fetched and stored
+(display + CLV scoring) but never enters a model-produced number.
+`marketShrinkageK`/`bigSpreadShrinkRef` were removed from `RatingParams`.
+Every backtest run before this change is not comparable to any run after
+it. Honest post-removal baseline (`cfb-unanchored-rebaseline`, full
+2023-2025): 2268 games, cover vs open 52.9%, avgClv 0.633.
+
+That headline cover-rate improvement over the old anchored baseline did
+NOT survive scrutiny: restricted to the ~75% of games where the anchored
+and unanchored models picked the same side, cover was identical (50.1% vs
+50.1%) — the aggregate shift came entirely from which side got picked on
+the games where the two models disagreed, not from better forecasting
+(`cfb-anchor-removal-breakdown` job). Paired significance tests on
+identical game sets found neither CLV nor cover-rate differences
+significant. Bucketed by combined games played, the removal did not show
+the predicted "clearly worse early, comparable-or-better late" pattern —
+suggesting the market anchor was never doing real early-season work in the
+first place, weakening (not strengthening) the case for replacing it with
+a fitted preseason prior.
+
+Two attempts followed to test whether a *same-data* prior (no new
+ingestion) helps anyway, before committing to a fuller CFBD-sourced
+preseason-prior system (returning production, recruiting talent, transfer
+portal, preseason polls — Part 2 of a larger plan, never built):
+
+1. **Invalidated**: `priorShrinkK`, which re-blended the prior season's
+   final rating into the effective rating *every week* at prediction time
+   (weight fading by combined games played, but never reaching 0) — a
+   permanent stale-data drag term, not a prior. Its clean monotonic
+   decline as the weight increased was the expected artifact of that bug,
+   not a finding about priors. Fully reverted.
+2. **Valid**: `cfb-seed-strategy-sweep` swept `seasonCarryover` — the
+   existing one-time week-0 seed mechanism (`computeInitialRating`/
+   `carryoverRating` in `elo.ts`, applied once before any in-season game
+   and never referenced again by `computeSeasonRatings`' update loop,
+   confirmed by code trace) — holding `spPriorWeight=0` and everything
+   else at current defaults. Result: 0/0.2/0.4/0.6 (today's default) are
+   statistically indistinguishable on paired CLV (p=0.54/0.27/0.11 vs
+   0.6); 0.8 and 1.0 (the raw, unregressed prior-season rating) are
+   *significantly worse* (p=0.0096, p=0.0077). The 22+-games-played bucket
+   came back bit-for-bit identical across all six independent runs — the
+   seed genuinely washes out late, a real non-artifact signal this
+   mechanism has that the invalidated one never did.
+
+**Conclusion**: even a correctly-implemented, seed-only preseason prior
+found no benefit to leaning on prior-season information, and a real cost
+to over-weighting it. `seasonCarryover` stays at its current default
+(0.6) — see `src/ratings/config.ts`'s comment on that field for the exact
+numbers. Part 2 (the fuller CFBD ingestion) is dropped. The model now
+stands as the pure rating-differential number with no market input and no
+preseason prior beyond the existing lightly-regressed carryover seed.
+
 ## New scaffolds: key numbers, weather, public/sharp splits
 
 Three new investigation angles, in different states of readiness:
@@ -659,7 +717,7 @@ games ──┬─→ team_game_stats   (team form entering the game: EPA/succes
         ├─→ odds_snapshots    (every line pull: opening / movement / closing, with timestamps)
         ├─→ injuries
         ├─→ weather
-        ├─→ model_predictions (Phase 2: this model's line, anchored to the market line at run time)
+        ├─→ model_predictions (Phase 2: this model's own rating-differential line -- no market input, see "Market anchor removed" below)
         └─→ backtest_results  (Phase 3: model vs. opening vs. closing vs. actual, CLV)
 ```
 
@@ -690,7 +748,7 @@ src/
     odds/                       # current lines (Odds API) + SBR historical archive import (unfinished scaffold)
     injuries/                    # ESPN unofficial injuries (unverified)
     weather/                      # Open-Meteo, NFL stadiums
-  ratings/                # Phase 2 — EPA-driven Elo, market-anchored
+  ratings/                # Phase 2 — EPA-driven Elo, no market input (see "Market anchor removed" below)
     config.ts              # tunable params per sport, flagged as uncalibrated defaults
     elo.ts                   # pure rating math (no DB) — computeSeasonRatings, predictSpread
     service.ts                 # DB orchestration: computeAndStoreRatings, generatePredictionsForWeek(+Backtest)
