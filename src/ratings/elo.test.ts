@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread } from "./elo.js";
+import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread, type GameForRating } from "./elo.js";
 import { getRatingParams } from "./config.js";
 
 const NFL = getRatingParams("nfl");
@@ -214,47 +214,56 @@ test("computeSeasonRatings ignores varianceShrinkK entirely when it's 0 (today's
   assert.equal(withZero.get(1)!.dispersion, 0);
 });
 
-test("computeSeasonRatings' varianceShrinkK leaves a perfectly consistent team's rating unchanged (dispersion=0)", () => {
-  // Team 1 (home) plays 3 fresh opponents -- each starts at rating 0, so
-  // homeSosMultiplier is exactly 1 every week (opponent rating is always 0
-  // at kickoff). Each week's EPA is chosen so rawError is exactly 10,
-  // even though predictedMargin itself shifts as team 1's own rating
-  // accumulates -- so the three residuals are identical (dispersion=0)
-  // despite the rating itself moving every week.
-  const K = NFL.baseK;
-  const R = 10;
+// Builds one team's 3-game trajectory against fresh (never-before-seen)
+// opponents, with residuals engineered to hit an exact target mean m and
+// exact target sample stdev d: residuals = [m-d, m+d, m] always has mean m
+// (their average is m regardless of d) and sample stdev (n-1) exactly d
+// (deviations from mean are [-d, d, 0], sum of squares = 2d^2, variance =
+// d^2). finalRating works out to NFL.baseK * 3 * m exactly, since every
+// game's homeSosMultiplier is 1 (opponent is always a fresh, unrated team).
+function buildDispersionTeam(teamId: number, opponentIdBase: number, m: number, d: number): { games: GameForRating[]; finalRating: number } {
+  const residuals = [m - d, m + d, m];
   let rating = 0;
-  const games = [];
-  for (let week = 1; week <= 3; week++) {
+  const games: GameForRating[] = [];
+  for (let i = 0; i < 3; i++) {
+    const week = i + 1;
     const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
-    const actualMargin = predictedMargin + R;
+    const actualMargin = predictedMargin + residuals[i]!;
     games.push({
-      gameId: week,
+      gameId: teamId * 100 + week,
       week,
-      homeTeamId: 1,
-      awayTeamId: 100 + week, // fresh opponent every week, never faced before
+      homeTeamId: teamId,
+      awayTeamId: opponentIdBase + i,
       homeOffEpa: actualMargin / 35,
       homeDefEpa: 0,
       awayOffEpa: 0,
       awayDefEpa: 0,
     });
-    rating += K * R;
+    rating += NFL.baseK * residuals[i]!;
   }
+  return { games, finalRating: rating };
+}
+
+test("computeSeasonRatings' varianceShrinkK has no effect below MIN_DISPERSION_FIT_TEAMS (needs a real population to fit a trend)", () => {
+  // Single team, 3 games, residuals=[10,10,10] -> dispersion=0 by
+  // construction AND the league population (1 team) is far below
+  // MIN_DISPERSION_FIT_TEAMS, so no fit happens either way -- both reasons
+  // agree the team should be untouched.
+  const { games, finalRating } = buildDispersionTeam(1, 101, 10, 0);
   const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
   const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 5 });
+  assert.ok(Math.abs(withoutShrink.get(1)!.rating - finalRating) < 1e-6);
   assert.equal(withShrink.get(1)!.dispersion, 0);
-  assert.ok(Math.abs(withoutShrink.get(1)!.rating - rating) < 1e-6);
+  assert.equal(withShrink.get(1)!.excessDispersion, 0);
   assert.ok(Math.abs(withShrink.get(1)!.rating - withoutShrink.get(1)!.rating) < 1e-9);
 });
 
-test("computeSeasonRatings' varianceShrinkK pulls an erratic team's rating toward 0 proportional to its residual dispersion", () => {
-  // Team 1 (home) vs. 3 fresh opponents, residuals engineered to be
-  // exactly [10, 30, -10] -- sample stdev (n-1) of that set is exactly 20:
-  // mean=10, squared deviations [0, 400, 400], variance=800/2=400, sqrt=20.
-  const K = NFL.baseK;
-  const residuals = [10, 30, -10];
+test("computeSeasonRatings' varianceShrinkK has no effect below MIN_DISPERSION_GAMES (needs 3+ games to trust a team's own dispersion)", () => {
+  // Only 2 games for this team -- dispersion untrusted regardless of the
+  // league population.
   let rating = 0;
-  const games = [];
+  const residuals = [10, 30];
+  const games: GameForRating[] = [];
   for (let i = 0; i < residuals.length; i++) {
     const week = i + 1;
     const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
@@ -269,42 +278,76 @@ test("computeSeasonRatings' varianceShrinkK pulls an erratic team's rating towar
       awayOffEpa: 0,
       awayDefEpa: 0,
     });
-    rating += K * residuals[i]!;
-  }
-  const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
-  assert.ok(Math.abs(withoutShrink.get(1)!.rating - 7.5) < 1e-6);
-
-  // varianceShrinkK=20, dispersion=20 -> shrinkWeight = 20/(20+20) = 0.5
-  const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 20 });
-  assert.ok(Math.abs(withShrink.get(1)!.dispersion - 20) < 1e-6);
-  assert.ok(Math.abs(withShrink.get(1)!.rating - 7.5 * 0.5) < 1e-6);
-});
-
-test("computeSeasonRatings' varianceShrinkK has no effect below MIN_DISPERSION_GAMES (needs 3+ games to trust dispersion)", () => {
-  const K = NFL.baseK;
-  const residuals = [10, 30]; // only 2 games
-  let rating = 0;
-  const games = [];
-  for (let i = 0; i < residuals.length; i++) {
-    const week = i + 1;
-    const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
-    const actualMargin = predictedMargin + residuals[i]!;
-    games.push({
-      gameId: week,
-      week,
-      homeTeamId: 1,
-      awayTeamId: 100 + week,
-      homeOffEpa: actualMargin / 35,
-      homeDefEpa: 0,
-      awayOffEpa: 0,
-      awayDefEpa: 0,
-    });
-    rating += K * residuals[i]!;
+    rating += NFL.baseK * residuals[i]!;
   }
   const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
   const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 5 });
   assert.equal(withShrink.get(1)!.dispersion, 0);
+  assert.equal(withShrink.get(1)!.excessDispersion, 0);
   assert.ok(Math.abs(withShrink.get(1)!.rating - withoutShrink.get(1)!.rating) < 1e-9);
+});
+
+test("computeSeasonRatings' varianceShrinkK leaves every team untouched when dispersion is exactly explained by rating (perfect league-wide fit)", () => {
+  // 12 teams (well above MIN_DISPERSION_FIT_TEAMS) with ratings and
+  // dispersions placed EXACTLY on a line (dispersion = 5 + 0.2*rating) --
+  // OLS through perfectly colinear points has exactly zero residual for
+  // every point, so excessDispersion must be exactly 0 for all 12, no
+  // matter how widely their RAW dispersion actually varies (5 at rating 0
+  // up to 32 at rating 135).
+  const allGames: GameForRating[] = [];
+  const targets: { teamId: number; rating: number }[] = [];
+  for (let i = 0; i < 12; i++) {
+    const teamId = i + 1;
+    const targetRating = i * 15; // 0, 15, 30, ..., 165
+    const m = (targetRating / NFL.baseK) / 3; // finalRating = baseK*3*m
+    const d = 5 + 0.2 * targetRating; // exactly on the intended line
+    const { games, finalRating } = buildDispersionTeam(teamId, 1000 + teamId * 10, m, d);
+    allGames.push(...games);
+    targets.push({ teamId, rating: finalRating });
+  }
+  const state = computeSeasonRatings(allGames, new Map(), { ...NFL, varianceShrinkK: 10 });
+  for (const t of targets) {
+    const s = state.get(t.teamId)!;
+    assert.ok(Math.abs(s.excessDispersion) < 1e-6, `team ${t.teamId} excessDispersion should be ~0, got ${s.excessDispersion}`);
+    assert.ok(Math.abs(s.rating - t.rating) < 1e-6, `team ${t.teamId} rating should be unshrunk`);
+  }
+});
+
+test("computeSeasonRatings' varianceShrinkK shrinks a team whose dispersion is abnormal for its OWN rating tier, leaving league-typical teams alone", () => {
+  // Same 12-team line as above, PLUS a 13th team sitting at a middling
+  // rating (~30) but with dispersion far above what that rating tier
+  // predicts (~11 expected, given ~38 actual) -- an ODU-shaped case: not
+  // the highest- or lowest-rated team, just abnormally erratic for its
+  // tier. One outlier among 13 points perturbs the fitted line only
+  // slightly, so anchor teams get a loose (not exact-zero) tolerance.
+  const allGames: GameForRating[] = [];
+  const anchorTeamIds: number[] = [];
+  for (let i = 0; i < 12; i++) {
+    const teamId = i + 1;
+    const targetRating = i * 15;
+    const m = (targetRating / NFL.baseK) / 3;
+    const d = 5 + 0.2 * targetRating;
+    const { games } = buildDispersionTeam(teamId, 1000 + teamId * 10, m, d);
+    allGames.push(...games);
+    anchorTeamIds.push(teamId);
+  }
+  const outlierTeamId = 13;
+  const outlierTargetRating = 30;
+  const outlierM = (outlierTargetRating / NFL.baseK) / 3;
+  const { games: outlierGames, finalRating: outlierUnshrunkRating } = buildDispersionTeam(outlierTeamId, 1000 + outlierTeamId * 10, outlierM, 38);
+  allGames.push(...outlierGames);
+
+  const state = computeSeasonRatings(allGames, new Map(), { ...NFL, varianceShrinkK: 10 });
+  const outlier = state.get(outlierTeamId)!;
+  // Line predicts ~5+0.2*30=11 at that rating; actual dispersion is 38, so
+  // excess should be substantial even after the fit shifts slightly.
+  assert.ok(outlier.excessDispersion > 15, `outlier excessDispersion should be well above 0, got ${outlier.excessDispersion}`);
+  assert.ok(outlier.rating < outlierUnshrunkRating - 1, "outlier should be meaningfully shrunk toward 0");
+
+  for (const teamId of anchorTeamIds) {
+    const s = state.get(teamId)!;
+    assert.ok(s.excessDispersion < 3, `anchor team ${teamId} excessDispersion should stay small, got ${s.excessDispersion}`);
+  }
 });
 
 test("computeSeasonRatings ignores success rate entirely when successRateWeight is 0 (today's default)", () => {

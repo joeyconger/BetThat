@@ -326,21 +326,35 @@ export interface RatingParams {
   errorCapPoints: number;
   /**
    * n/(n+k)-style shrinkage of a team's final rating toward league average
-   * (0), where the "n" side is the team's OWN season-to-date residual
-   * dispersion (sample stdev of actual-vs-predicted error across its
-   * games), not a games-played count like every other shrinkage in this
-   * file -- see computeSeasonRatings' post-loop shrink pass in elo.ts for
-   * the full mechanism and TeamRatingState.dispersion's doc. A team whose
-   * results are internally consistent (low dispersion) keeps its rating;
-   * an erratic team (some big wins, some bad losses, wide game-to-game
-   * swings) gets pulled toward average -- this is a DIFFERENT failure mode
-   * from errorCapPoints (which limits how much any single game can move a
-   * rating): this limits how much a team's accumulated rating can be
-   * trusted when the games behind it don't agree with each other. 0
-   * (default) = no-op. Untested at definition time -- see this field's
-   * value comment below once swept for the actual result, and the
-   * README's rating-sensibility section for the ODU/Penn State/Clemson
-   * face-validity cases that motivated it.
+   * (0), where the "n" side is the team's EXCESS residual dispersion --
+   * NOT raw dispersion, see TeamRatingState.excessDispersion's doc and
+   * computeSeasonRatings' post-loop regression in elo.ts. Raw dispersion
+   * alone conflates two things (how erratic a team really is, and the
+   * fact that good teams naturally swing wider than mediocre ones), so
+   * this fits dispersion ~ rating across the whole league each week and
+   * shrinks only on the positive residual -- dispersion beyond what a
+   * team's own rating tier predicts. A team sitting on the league's
+   * dispersion-vs-rating line is untouched no matter how big its raw
+   * dispersion is; a team abnormally erratic FOR ITS TIER is the one that
+   * gets pulled in. This is a DIFFERENT failure mode from errorCapPoints
+   * (which limits how much any single game can move a rating): this
+   * limits how much a team's accumulated rating can be trusted when its
+   * own results don't agree with each other, relative to teams of
+   * similar quality. 0 (default) = no-op.
+   *
+   * An earlier version of this shrank directly on raw dispersion instead
+   * of the regression residual -- caught in production because it
+   * inverted the top of the CFB 2025 week 14 rankings (demoted the two
+   * teams the real CFP committee had at 1-2 in favor of a lower-rated
+   * team with lower dispersion but a worse record), since raw dispersion
+   * scales with rating and the shrink ended up as a near-uniform rescale
+   * that punished high-rated teams hardest just for being high-rated.
+   * Untested at definition time under the corrected mechanism -- any
+   * sweep result calibrated against the old raw-dispersion version is
+   * void (excess dispersion is a much smaller quantity than raw
+   * dispersion). See this field's value comment below once re-swept, and
+   * the README's rating-sensibility section for the ODU/Penn State/
+   * Clemson face-validity cases that motivated it.
    */
   varianceShrinkK: number;
 }

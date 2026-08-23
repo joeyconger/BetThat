@@ -156,6 +156,20 @@ export interface TeamRatingState {
    * the matchup-sim UI can eventually show it as a per-team error band.
    */
   dispersion: number;
+  /**
+   * Dispersion in EXCESS of what a linear fit of dispersion-on-rating
+   * predicts for a team at this rating level, clamped to >= 0 -- see the
+   * post-loop regression in computeSeasonRatings. Raw dispersion alone
+   * conflates two different things: how erratic a team's results really
+   * are, and the fact that good teams naturally generate wider point-
+   * differential swings than mediocre ones (blowouts and grind-it-out wins
+   * both being normal for a genuinely strong team). This is what
+   * varianceShrinkK actually shrinks on -- a team sitting exactly on the
+   * league's dispersion-vs-rating line gets 0 here regardless of its raw
+   * dispersion. 0 whenever dispersion is (not enough games, or the
+   * league-wide fit isn't trusted yet -- see MIN_DISPERSION_FIT_TEAMS).
+   */
+  excessDispersion: number;
 }
 
 /**
@@ -225,7 +239,7 @@ export function computeSeasonRatings(
 ): Map<number, TeamRatingState> {
   const state = new Map<number, TeamRatingState>();
   for (const [teamId, rating] of initialRatings) {
-    state.set(teamId, { rating, gamesPlayed: 0, dispersion: 0 });
+    state.set(teamId, { rating, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 });
   }
   const residualsByTeam = new Map<number, number[]>();
   function pushResidual(teamId: number, value: number): void {
@@ -256,8 +270,8 @@ export function computeSeasonRatings(
   const sorted = [...games].sort((a, b) => a.week - b.week || a.gameId - b.gameId);
 
   for (const game of sorted) {
-    const home = state.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
-    const away = state.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
+    const home = state.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
+    const away = state.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
 
     // Prefer garbage-time-excluded EPA/success rate when params.excludeGarbageTime
     // is set and that game actually has it ingested -- falls back to the
@@ -548,50 +562,112 @@ export function computeSeasonRatings(
       rating: home.rating + params.baseK * error * homeSosMultiplier,
       gamesPlayed: home.gamesPlayed + 1,
       dispersion: 0,
+      excessDispersion: 0,
     });
     state.set(game.awayTeamId, {
       rating: away.rating - params.baseK * error * awaySosMultiplier,
       gamesPlayed: away.gamesPlayed + 1,
       dispersion: 0,
+      excessDispersion: 0,
     });
   }
 
   // Consistency-based shrinkage toward league mean (0) -- a team whose
   // season-to-date residuals (see pushResidual above) are tightly clustered
-  // keeps its rating; a team whose residuals swing wildly gets pulled
-  // toward average, same n/(n+k)-family shape as every other shrinkage in
-  // this codebase (market shrinkage in predictSpread, opponentAdj shrinkage
-  // above, priorShrinkK), just shrinking toward 0 by DISPERSION instead of
-  // toward a prior by sample size. This is a different failure mode from
-  // errorCapPoints: the cap limits how much any ONE game can move a
-  // rating; this limits how much a team's FULL rating can be trusted when
-  // its own game-to-game results don't agree with each other -- a 6-6
-  // team sitting in the top 10 on the strength of a couple of huge capped
-  // surprises (Penn State, CFB 2025 week 14) is exactly this case: the
-  // point-estimate rating looks confident, but the underlying evidence is
-  // inconsistent. varianceShrinkK=0 (default) is a no-op -- see
-  // cfb-variance-comparison in adminJobs.ts for the diagnostic this was
-  // built to answer, and the README's rating-sensibility section for the
-  // ODU/Penn State/Clemson history that motivated it.
+  // keeps its rating; a team whose residuals swing wildly BEYOND WHAT'S
+  // NORMAL FOR ITS RATING TIER gets pulled toward average.
+  //
+  // Raw dispersion alone is NOT that signal -- it conflates two different
+  // things. Good teams legitimately generate wider point-differential
+  // swings than mediocre ones (a blowout of a bad team and a grind-it-out
+  // win over a good one are both normal for a genuinely strong team), so
+  // raw dispersion correlates with rating on its own. Shrinking directly
+  // on it (an earlier version of this code did exactly that) ends up as a
+  // near-uniform rescale that penalizes high-rated teams hardest simply
+  // for being high-rated, not for being unreliable -- caught via a real
+  // production case where it inverted the top of the CFB 2025 week 14
+  // table, demoting the two teams the actual CFP committee had at 1-2 in
+  // favor of a lower-rated, lower-dispersion team with a worse record.
+  //
+  // The fix: fit dispersion ~ a + b*rating across the whole league at
+  // this snapshot (simple OLS, see fitLinear), and shrink only on the
+  // POSITIVE residual -- dispersion in excess of what a team's own rating
+  // tier predicts. A team sitting on the league's dispersion-vs-rating
+  // line (Ohio State having big dispersion at a big rating, say) gets
+  // excessDispersion=0 and is untouched; a team whose dispersion is
+  // abnormally high FOR ITS TIER (Old Dominion having ODU-sized swings at
+  // a middling rating) is the one that actually gets pulled in. Same
+  // n/(n+k)-family shape as every other shrinkage in this codebase
+  // (market shrinkage in predictSpread, opponentAdj shrinkage above,
+  // priorShrinkK), just keyed off the regression residual instead of raw
+  // dispersion or sample size.
+  //
+  // This is a different failure mode from errorCapPoints: the cap limits
+  // how much any ONE game can move a rating; this limits how much a
+  // team's FULL rating can be trusted when its own game-to-game results
+  // don't agree with each other, RELATIVE TO teams of similar quality.
+  // varianceShrinkK=0 (default) is a no-op -- see cfb-variance-comparison
+  // in adminJobs.ts for the diagnostic this was built to answer, and the
+  // README's rating-sensibility section for the ODU/Penn State/Clemson
+  // history that motivated it. NOTE: units here are excess (residual)
+  // dispersion, not raw dispersion -- typically much smaller, since most
+  // of a team's raw dispersion is usually explained by its rating tier.
+  // Any calibration done against raw-dispersion-driven shrink is void and
+  // needs a fresh sweep.
+  const dispersionByTeam = new Map<number, number>();
+  const fitPairs: { rating: number; dispersion: number }[] = [];
   for (const [teamId, teamState] of state) {
     const residuals = residualsByTeam.get(teamId) ?? [];
-    const dispersion = residuals.length >= MIN_DISPERSION_GAMES ? sampleStdev(residuals) : 0;
+    if (residuals.length < MIN_DISPERSION_GAMES) continue;
+    const dispersion = sampleStdev(residuals);
+    dispersionByTeam.set(teamId, dispersion);
+    fitPairs.push({ rating: teamState.rating, dispersion });
+  }
+  const fit =
+    fitPairs.length >= MIN_DISPERSION_FIT_TEAMS
+      ? fitLinear(fitPairs.map((p) => p.rating), fitPairs.map((p) => p.dispersion))
+      : null;
+
+  for (const [teamId, teamState] of state) {
+    const dispersion = dispersionByTeam.get(teamId) ?? 0;
+    const excessDispersion = fit && dispersionByTeam.has(teamId) ? Math.max(0, dispersion - (fit.intercept + fit.slope * teamState.rating)) : 0;
     const shrinkWeight =
-      params.varianceShrinkK > 0 && dispersion > 0 ? params.varianceShrinkK / (params.varianceShrinkK + dispersion) : 1;
-    state.set(teamId, { ...teamState, rating: teamState.rating * shrinkWeight, dispersion });
+      params.varianceShrinkK > 0 && excessDispersion > 0
+        ? params.varianceShrinkK / (params.varianceShrinkK + excessDispersion)
+        : 1;
+    state.set(teamId, { ...teamState, rating: teamState.rating * shrinkWeight, dispersion, excessDispersion });
   }
 
   return state;
 }
 
-/** Minimum season-to-date games before a team's residual dispersion is trusted as a signal -- same "don't guess off a tiny sample" threshold as MIN_SUCCESS_CONTEXT_GAMES above. Below it, varianceShrinkK has no effect for that team (dispersion reported as 0, shrinkWeight stays 1). */
+/** Minimum season-to-date games before a team's residual dispersion is trusted as a signal -- same "don't guess off a tiny sample" threshold as MIN_SUCCESS_CONTEXT_GAMES above. Below it, a team is excluded from the league-wide dispersion-vs-rating fit and its own excessDispersion stays 0 (varianceShrinkK has no effect on it). */
 const MIN_DISPERSION_GAMES = 3;
+
+/** Minimum number of teams with a trustworthy dispersion before the league-wide dispersion-vs-rating regression is fit at all -- fitting a line through a handful of points is noise, not a signal; below this, excessDispersion is 0 for everyone (varianceShrinkK is a no-op that week). Real CFB/NFL populations clear this easily by mid-season; only early weeks (not enough teams with 3+ games yet) hit the fallback. */
+const MIN_DISPERSION_FIT_TEAMS = 10;
 
 /** Sample standard deviation (n-1 denominator) of a team's season-to-date raw per-game errors. Mean-centered on the team's OWN average residual, not 0 -- a team that's consistently under- or over-rated by the same amount every week is "consistent" (low dispersion) even though its average error isn't zero; that's deliberate, since the point of this measure is game-to-game volatility, not average bias (which the rating update itself already corrects for over time). */
 function sampleStdev(values: number[]): number {
   const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
   const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
   return Math.sqrt(variance);
+}
+
+/** Ordinary least squares fit of y ~ intercept + slope*x. Returns slope=0 (flat at the mean) if x has no spread at all, rather than dividing by zero. */
+function fitLinear(xs: number[], ys: number[]): { intercept: number; slope: number } {
+  const n = xs.length;
+  const meanX = xs.reduce((sum, x) => sum + x, 0) / n;
+  const meanY = ys.reduce((sum, y) => sum + y, 0) / n;
+  let covariance = 0;
+  let varianceX = 0;
+  for (let i = 0; i < n; i++) {
+    covariance += (xs[i]! - meanX) * (ys[i]! - meanY);
+    varianceX += (xs[i]! - meanX) ** 2;
+  }
+  const slope = varianceX > 0 ? covariance / varianceX : 0;
+  const intercept = meanY - slope * meanX;
+  return { intercept, slope };
 }
 
 /** Regresses a prior season's final rating toward league-average (0) for the new season's starting point. */

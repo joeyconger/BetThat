@@ -139,8 +139,8 @@ export async function predictHypotheticalMatchup(
 ): Promise<HypotheticalMatchupResult> {
   const params = paramsOverride ?? getRatingParams(sport);
   const state = await computeRatings(sport, season, throughWeek, paramsOverride);
-  const home = state.get(homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
-  const away = state.get(awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
+  const home = state.get(homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
+  const away = state.get(awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
 
   const prediction = predictSpread(
     { homeRating: home.rating, awayRating: away.rating, homeGamesPlayed: home.gamesPlayed, awayGamesPlayed: away.gamesPlayed },
@@ -193,8 +193,8 @@ async function predictAndStoreWeek(
   let predicted = 0;
 
   for (const game of games) {
-    const home = ratingState.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
-    const away = ratingState.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0 };
+    const home = ratingState.get(game.homeTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
+    const away = ratingState.get(game.awayTeamId) ?? { rating: 0, gamesPlayed: 0, dispersion: 0, excessDispersion: 0 };
     const marketSpreadHome = (await getMarketLine(game.id)) ?? null;
 
     const homeElo = eloDistribution.get(game.homeTeamId);
