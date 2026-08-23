@@ -180,6 +180,46 @@ export function getSpRatings(year: number): Promise<CfbdTeamSp[]> {
   return cfbdGet<CfbdTeamSp[]>("/ratings/sp", { year });
 }
 
+/**
+ * CFBD's /player/returning -- confirmed real field list via their official
+ * Python client's model source (github.com/CFBD/cfbd-python,
+ * returning_production.py), same "confirmed via their client library
+ * docs, not guessed" standard as explosiveness/pointsPerFieldPosition
+ * elsewhere in this file. One row per team per season, requires `year`
+ * and/or `team`. IMPORTANT, and worth stating explicitly since it
+ * contradicts a natural assumption: there is NO offense/defense split
+ * here -- "returning production" (Bill Connelly's original metric) is
+ * purely an OFFENSIVE concept (which returning skill players/OL
+ * contributed PPA last year). The splits CFBD actually publishes are
+ * passing/receiving/rushing, all offensive sub-categories, not
+ * offense/defense. percentPPA is the single combined number (fraction of
+ * last year's team PPA production that's expected back, 0-1 scale per the
+ * client model's float type -- STILL UNVERIFIED against a real response
+ * in this sandbox, which has no network route to CFBD's API; see
+ * cfb-verify-returning-production for the hand-verification pass).
+ */
+export interface CfbdReturningProduction {
+  season: number;
+  team: string;
+  conference: string | null;
+  totalPPA: number;
+  totalPassingPPA: number;
+  totalReceivingPPA: number;
+  totalRushingPPA: number;
+  percentPPA: number;
+  percentPassingPPA: number;
+  percentReceivingPPA: number;
+  percentRushingPPA: number;
+  usage: number;
+  passingUsage: number;
+  receivingUsage: number;
+  rushingUsage: number;
+}
+
+export function getReturningProduction(year: number): Promise<CfbdReturningProduction[]> {
+  return cfbdGet<CfbdReturningProduction[]>("/player/returning", { year });
+}
+
 export interface CfbdTeamElo {
   year: number;
   team: string;

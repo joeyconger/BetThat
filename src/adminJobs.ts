@@ -1,6 +1,6 @@
 import { runBacktest } from "./backtest/run.js";
 import { syncCfbdTeams } from "./ingest/cfbd/syncTeams.js";
-import { getPlays, getGames, getTeams, getWinProbabilityData, getDrives } from "./ingest/cfbd/client.js";
+import { getPlays, getGames, getTeams, getWinProbabilityData, getDrives, getReturningProduction } from "./ingest/cfbd/client.js";
 import type { CfbdPlayWinProbability } from "./ingest/cfbd/client.js";
 import { syncCfbdGames } from "./ingest/cfbd/syncGames.js";
 import { syncCfbdGameStats, syncCfbdGarbageTimeStats } from "./ingest/cfbd/syncStats.js";
@@ -2189,6 +2189,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-more-segments": startCfbMoreSegmentsJob,
   "cfb-playtype-discover": startCfbPlayTypeDiscoverJob,
   "cfb-verify-plays": startCfbVerifyPlaysJob,
+  "cfb-verify-returning-production": startCfbVerifyReturningProductionJob,
   "cfb-opponent-adjust-snapshot": startCfbOpponentAdjustSnapshotJob,
 };
 
@@ -2340,6 +2341,93 @@ export function startCfbVerifyPlaysJob(): Promise<JobStatus> {
     log(job, "  3. Does ppa's sign make sense (positive on a good gain/TD, negative on a sack/turnover/loss)?");
     log(job, "  4. If wp(home) printed: does it look like a PRE-play or POST-play probability relative to the down/distance/score on the same row?");
     log(job, "  5. Does playType match a value in playSuccess.ts's SCRIMMAGE_PLAY_TYPES where it should (and NOT where it's actually a punt/kickoff/penalty/etc.)?");
+  });
+}
+
+/**
+ * Hand-verification pass for CFBD's /player/returning (see
+ * getReturningProduction's doc in client.ts for the field list, sourced
+ * from CFBD's official Python client since this sandbox has no network
+ * route to CFBD's own API) -- same standard as cfb-verify-plays, run
+ * before Step 2 (wiring returning production into the week-0 seed) per
+ * docs/prompts/returning-production-seed-adjustment.md. Checks: real
+ * values for a few known teams (hand-check against public reporting),
+ * team-name resolution against our own teams table, per-season coverage
+ * count, and a basic scale/range sanity check on percentPPA/usage.
+ */
+export function startCfbVerifyReturningProductionJob(): Promise<JobStatus> {
+  return runJob("cfb-verify-returning-production", async (job) => {
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    log(job, `${teamNameToId.size} CFB teams in our own teams table`);
+
+    for (const season of [2024, 2025]) {
+      log(job, `\nfetching ${season} returning production`);
+      const rows = await getReturningProduction(season);
+      log(job, `${rows.length} rows returned for ${season}`);
+
+      const resolved = rows.filter((r) => teamNameToId.has(r.team));
+      log(
+        job,
+        `team-name resolution: ${resolved.length}/${rows.length} (${((resolved.length / rows.length) * 100).toFixed(1)}%) match a name in our teams table -- unresolved names logged below if any.`,
+      );
+      const unresolved = rows.filter((r) => !teamNameToId.has(r.team));
+      for (const r of unresolved.slice(0, 15)) {
+        log(job, `  unresolved: "${r.team}" (conference=${r.conference})`);
+      }
+      if (unresolved.length > 15) log(job, `  ...and ${unresolved.length - 15} more`);
+
+      const percentPpaValues = rows.map((r) => r.percentPPA);
+      const usageValues = rows.map((r) => r.usage);
+      log(
+        job,
+        `percentPPA range: [${Math.min(...percentPpaValues).toFixed(3)}, ${Math.max(...percentPpaValues).toFixed(3)}] -- expect roughly 0-1 if this is a fraction, hand-check against the raw numbers below if it looks like a 0-100 scale instead.`,
+      );
+      log(job, `usage range: [${Math.min(...usageValues).toFixed(3)}, ${Math.max(...usageValues).toFixed(3)}]`);
+
+      // A handful of known programs to hand-check against public reporting
+      // (e.g. a Google search for "<team> <season> returning production")
+      // -- deliberately a mix of "known high returning production" and
+      // "known heavy roster turnover" programs so a real signal should be
+      // visible in the printed numbers, not just plausible-looking noise.
+      const spotCheckTeams = ["Georgia", "Alabama", "Ohio State", "Michigan", "Texas", "Colorado"];
+      log(job, `\nspot-check rows -- hand-verify these against public reporting for ${season}:`);
+      log(job, "team                 conf       totalPPA totPass totRecv totRush  %PPA  %Pass  %Recv  %Rush  usage  useP  useR  useRu");
+      for (const teamName of spotCheckTeams) {
+        const row = rows.find((r) => r.team === teamName);
+        if (!row) {
+          log(job, `  ${teamName}: NOT FOUND in ${season} response`);
+          continue;
+        }
+        log(
+          job,
+          [
+            row.team.padEnd(20).slice(0, 20),
+            (row.conference ?? "?").padEnd(10).slice(0, 10),
+            row.totalPPA.toFixed(1).padStart(8),
+            row.totalPassingPPA.toFixed(1).padStart(7),
+            row.totalReceivingPPA.toFixed(1).padStart(7),
+            row.totalRushingPPA.toFixed(1).padStart(7),
+            row.percentPPA.toFixed(3).padStart(6),
+            row.percentPassingPPA.toFixed(3).padStart(6),
+            row.percentReceivingPPA.toFixed(3).padStart(6),
+            row.percentRushingPPA.toFixed(3).padStart(6),
+            row.usage.toFixed(3).padStart(6),
+            row.passingUsage.toFixed(3).padStart(6),
+            row.receivingUsage.toFixed(3).padStart(6),
+            row.rushingUsage.toFixed(3).padStart(6),
+          ].join(" "),
+        );
+      }
+    }
+
+    log(
+      job,
+      "\nCheck, against real public reporting for these teams/seasons:\n" +
+        "  1. Do percentPPA values look like the 'returning production %' numbers reported in preseason CFB media (roughly 40-95% range, teams known for heavy portal/draft losses near the low end, teams known for a veteran roster near the high end)?\n" +
+        "  2. Is percentPPA a 0-1 fraction or a 0-100 percentage -- this determines the exact centering math in Step 2.\n" +
+        "  3. Does a team missing entirely from a season's response (e.g. a first-year FBS transition) make sense, or does it suggest a resolution bug?\n" +
+        "  4. Confirmed already, not something to re-check: there is NO offense/defense split in this endpoint -- only passing/receiving/rushing (all offensive). Any downstream design assuming an offense/defense split is wrong.",
+    );
   });
 }
 
