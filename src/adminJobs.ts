@@ -1121,6 +1121,82 @@ export const startCfbComponentSweepFieldPositionJob = () => runComponentSweepJob
 export const startCfbComponentSweepFgMakeRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[6]!);
 export const startCfbComponentSweepOpponentAdjJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[7]!);
 
+/**
+ * The original pointsPerOpponentAdj screening (config.ts's history) ran
+ * BEFORE Part 1's market-anchor removal -- under a completely different
+ * prediction path. A fresh in-sample sweep post-anchor-removal
+ * (cfb-component-sweep-opponentadj) came back with a different shape:
+ * cover-vs-close actually looked BETTER at weight=40/60 (50.6% -> 51.3-
+ * 51.4%) while avgClv still declined, unlike the old sweep's clean
+ * monotonic decline on every metric. This runs a proper paired
+ * significance test (identical game sets) comparing weight=40 and
+ * weight=60 against weight=0, on both CLV and covered, using the most
+ * recent runs of each from listBacktestRuns() by the exact name
+ * runComponentSweep uses (`sweep-pointsPerOpponentAdj-cfb-v{value}`) --
+ * requires cfb-component-sweep-opponentadj to have just run.
+ */
+export function startCfbOpponentAdjPairedTestJob(): Promise<JobStatus> {
+  return runJob("cfb-opponentadj-paired-test", async (job) => {
+    const runs = await listBacktestRuns();
+    function latestRunForValue(value: number) {
+      const name = `sweep-pointsPerOpponentAdj-cfb-v${value}`;
+      const matches = runs.filter((r) => r.name === name);
+      return matches.sort((a, b) => b.id - a.id)[0];
+    }
+    const baseline = latestRunForValue(0);
+    if (!baseline) {
+      log(job, "No sweep-pointsPerOpponentAdj-cfb-v0 run found -- run cfb-component-sweep-opponentadj first.");
+      return;
+    }
+    log(job, `baseline (pointsPerOpponentAdj=0): run ${baseline.id}`);
+    const baselineDetails = await getBacktestGameDetails(baseline.id);
+
+    for (const value of [40, 60]) {
+      const variant = latestRunForValue(value);
+      if (!variant) {
+        log(job, `No sweep-pointsPerOpponentAdj-cfb-v${value} run found -- skipping.`);
+        continue;
+      }
+      const variantDetails = await getBacktestGameDetails(variant.id);
+      const commonGameIds = [...baselineDetails.keys()].filter((id) => variantDetails.has(id));
+      log(job, `\npointsPerOpponentAdj=${value} (run ${variant.id}) vs. 0 (run ${baseline.id}), ${commonGameIds.length} identical games:`);
+
+      const clvGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.clv !== null && variantDetails.get(id)!.clv !== null,
+      );
+      if (clvGameIds.length >= 2) {
+        const baseClv = clvGameIds.map((id) => baselineDetails.get(id)!.clv!);
+        const varClv = clvGameIds.map((id) => variantDetails.get(id)!.clv!);
+        const paired = pairedTTest(baseClv, varClv);
+        log(
+          job,
+          `  CLV (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+      const coveredGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.covered !== null && variantDetails.get(id)!.covered !== null,
+      );
+      if (coveredGameIds.length >= 2) {
+        const baseCovered = coveredGameIds.map((id) => (baselineDetails.get(id)!.covered ? 1 : 0));
+        const varCovered = coveredGameIds.map((id) => (variantDetails.get(id)!.covered ? 1 : 0));
+        const paired = pairedTTest(baseCovered, varCovered);
+        log(
+          job,
+          `  covered-as-0/1 (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+    }
+    log(
+      job,
+      "\nIf covered improves significantly while CLV doesn't decline significantly, that's a real, if modest, case for reopening pointsPerOpponentAdj post-anchor-removal. If neither is significant, this is noise around the same null the pre-anchor-removal sweep found, just with different in-sample point estimates -- still doesn't clear the bar for a walk-forward test.",
+    );
+  });
+}
+
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
     log(job, `sweeping cfb ${spec.label}, 2023-2025`);
@@ -2448,6 +2524,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
+  "cfb-opponentadj-paired-test": startCfbOpponentAdjPairedTestJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
   "cfb-jointrefit-predictive-holdout": startCfbJointRefitPredictiveHoldoutJob,
