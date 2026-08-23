@@ -24,6 +24,7 @@ import {
   getCombinedGamesPlayedByGame,
   listBacktestRuns,
   getPriorSeasonFinalRating,
+  getPriorSeasonSpRating,
   getSeasonGamesForRating,
   getReturningProductionDistribution,
 } from "./db/repo.js";
@@ -71,6 +72,7 @@ import {
 } from "./backtest/report.js";
 import { getRatingParams } from "./ratings/config.js";
 import type { RatingParams } from "./ratings/config.js";
+import { computeInitialRating } from "./ratings/elo.js";
 import type { Sport } from "./db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -2084,6 +2086,84 @@ export function startCfbReturningProductionSweepJob(): Promise<JobStatus> {
 }
 
 /**
+ * Step 4 (the actual deliverable) of
+ * docs/prompts/returning-production-seed-adjustment.md: a week-0 2025 seed
+ * table with the returning-production adjustment applied, for eyeballing
+ * -- independent of whether returningProductionPoints calibrates to
+ * anything significant (per cfb-returning-production-sweep, it doesn't:
+ * every paired test came back non-significant across the whole 0-50 grid,
+ * pooled and 2024-2025-only alike). Uses an illustrative nonzero weight
+ * (20, mid-grid) purely to make the adjustment's DIRECTION and MAGNITUDE
+ * visible per team, not as a calibration recommendation -- the sweep
+ * result says leave returningProductionPoints at its actual default (0).
+ * Sorted by delta (descending) so the biggest movers in both directions
+ * are easy to scan from either end of the table.
+ */
+export function startCfbReturningProductionWeek1TableJob(): Promise<JobStatus> {
+  return runJob("cfb-returning-production-week1-table", async (job) => {
+    const ILLUSTRATIVE_WEIGHT = 20;
+    const season = 2025;
+    const base = getRatingParams("cfb");
+    const illustrativeParams = { ...base, returningProductionPoints: ILLUSTRATIVE_WEIGHT };
+
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const teamIdToName = new Map([...teamNameToId.entries()].map(([name, id]) => [id, name]));
+
+    const returningProduction = await getReturningProductionDistribution("cfb", season);
+    const rpValues = [...returningProduction.values()];
+    const leagueAverage = rpValues.length > 0 ? rpValues.reduce((s, v) => s + v, 0) / rpValues.length : undefined;
+    log(job, `${season} returning-production league average percentPPA=${leagueAverage === null ? "n/a" : leagueAverage!.toFixed(3)}, ${returningProduction.size} teams covered`);
+
+    interface Row {
+      team: string;
+      priorRating: number | undefined;
+      returningProduction: number | undefined;
+      baseSeed: number;
+      adjustedSeed: number;
+      delta: number;
+    }
+    const rows: Row[] = [];
+    for (const [teamId, rpValue] of returningProduction) {
+      const priorRating = await getPriorSeasonFinalRating(teamId, "cfb", season - 1, "elo");
+      const priorSp = await getPriorSeasonSpRating(teamId, season - 1);
+      const deviation = leagueAverage !== undefined ? rpValue - leagueAverage : undefined;
+      const baseSeed = computeInitialRating(priorRating, priorSp, undefined, base);
+      const adjustedSeed = computeInitialRating(priorRating, priorSp, deviation, illustrativeParams);
+      rows.push({
+        team: teamIdToName.get(teamId) ?? `team_${teamId}`,
+        priorRating,
+        returningProduction: rpValue,
+        baseSeed,
+        adjustedSeed,
+        delta: adjustedSeed - baseSeed,
+      });
+    }
+    rows.sort((a, b) => b.delta - a.delta);
+
+    log(job, `\nweek-0 ${season} seed table, illustrative returningProductionPoints=${ILLUSTRATIVE_WEIGHT} -- sorted by delta, biggest positive movers first:`);
+    log(job, "team                 priorRating  percentPPA  baseSeed  adjustedSeed  delta");
+    for (const r of rows) {
+      log(
+        job,
+        [
+          r.team.padEnd(20).slice(0, 20),
+          (r.priorRating === undefined ? "n/a" : r.priorRating.toFixed(2)).padStart(11),
+          r.returningProduction!.toFixed(3).padStart(10),
+          r.baseSeed.toFixed(2).padStart(8),
+          r.adjustedSeed.toFixed(2).padStart(12),
+          (r.delta >= 0 ? "+" : "") + r.delta.toFixed(2),
+        ].join("  "),
+      );
+    }
+
+    log(
+      job,
+      "\nEyeball check: for the teams with the LARGEST NEGATIVE delta (bottom of the table -- lowest returning production relative to league average), are any of them known 2024 portal-reload programs (heavy transfer-IN activity that offset heavy departures)? Returning production only measures who's LEAVING -- it's structurally blind to who's arriving via the portal. A team that looks wrong here (large negative delta despite being a known strong 2025 roster on public preseason rankings) is the concrete signal that portal ingestion is worth building next, rather than an a priori argument for it.",
+    );
+  });
+}
+
+/**
  * Ingests turnover-play PPA sums + counts for CFB 2023-2025 via CFBD's
  * /plays endpoint -- a different endpoint than every other ingestion job
  * here, requiring one call per week rather than per season (see
@@ -2378,6 +2458,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-anchor-removal-breakdown": startCfbAnchorRemovalBreakdownJob,
   "cfb-seed-strategy-sweep": startCfbSeedStrategySweepJob,
   "cfb-returning-production-sweep": startCfbReturningProductionSweepJob,
+  "cfb-returning-production-week1-table": startCfbReturningProductionWeek1TableJob,
   "cfb-clv-placebo": startCfbClvPlaceboJob,
   "cfb-2025-check": startCfb2025CheckJob,
   "cfb-confidence-report": startCfbConfidenceReportJob,
