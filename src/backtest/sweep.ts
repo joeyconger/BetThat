@@ -588,7 +588,8 @@ export type ComponentParamKey =
   | "pointsPerFinishingDrives"
   | "pointsPerFieldPosition"
   | "pointsPerFgMakeRate"
-  | "pointsPerOpponentAdj";
+  | "pointsPerOpponentAdj"
+  | "errorCapPoints";
 
 const DEFAULT_COMPONENT_WEIGHT_GRID = [0, 1, 2, 4, 8];
 

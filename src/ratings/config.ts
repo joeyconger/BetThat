@@ -310,6 +310,20 @@ export interface RatingParams {
    * docs/prompts/returning-production-seed-adjustment.md for the plan.
    */
   returningProductionPoints: number;
+  /**
+   * Winsorizing-style hard cap on the per-game "error" (actual vs.
+   * predicted performance surprise) that drives the rating update in
+   * computeSeasonRatings -- see that function's doc, right where `error`
+   * is computed, for the full reasoning. Applied AFTER predictedMargin
+   * (which already incorporates both teams' current ratings, i.e.
+   * opponent-adjustment is already structurally present here) and AFTER
+   * every additive component (EPA, success rate, explosiveness, etc.)
+   * has contributed to actualMargin -- this caps the FINAL surprise
+   * magnitude, not any one input. 0 (default) = no-op. Untested at
+   * definition time -- see this field's value comment below once
+   * swept for the actual result.
+   */
+  errorCapPoints: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -342,6 +356,7 @@ const NFL_PARAMS: RatingParams = {
   pointsPerOpponentAdj: 0, // no raw-play ingestion for NFL yet
   opponentAdjShrinkageK: 4, // irrelevant while pointsPerOpponentAdj is 0 -- placeholder matching CFB's untested default
   returningProductionPoints: 0, // no returning-production data source for NFL
+  errorCapPoints: 0, // disabled -- untested, needs a real sweep
 };
 
 const CFB_PARAMS: RatingParams = {

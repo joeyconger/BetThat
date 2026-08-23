@@ -461,7 +461,28 @@ export function computeSeasonRatings(
       actualMargin += params.pointsPerOpponentAdj * (homeNetAdj - awayNetAdj);
     }
 
-    const error = actualMargin - predictedMargin;
+    // Diminishing returns on how large a single game's "surprise" (actual
+    // vs. predicted performance) can move the rating -- winsorizing-style
+    // hard cap on the error term itself, applied AFTER every additive
+    // component above has already contributed, not a cap on any one
+    // input. Motivated by a real case: a single outlier blowout (backup-
+    // heavy garbage time inflating the EPA/success-rate performance
+    // signal well past what even an opponent-adjusted prediction already
+    // expected) accounted for more of a team's full-season rating
+    // movement than every other game combined -- see
+    // cfb-team-rating-delta-diagnostic in adminJobs.ts, the per-game
+    // diagnostic that found this. errorCapPoints=0 (default) is a no-op;
+    // a nonzero cap clamps
+    // symmetrically, so a huge upset surprise is dampened exactly the
+    // same way a huge blowout surprise is -- this is NOT opponent-
+    // adjustment (predictedMargin already handles that, see this
+    // function's doc) and NOT garbage-time exclusion (excludeGarbageTime
+    // targets which PLAYS count toward EPA; this targets how much a
+    // single game's already-computed performance signal, however it was
+    // built, can move the rating once it's very large).
+    const rawError = actualMargin - predictedMargin;
+    const error =
+      params.errorCapPoints > 0 ? Math.max(-params.errorCapPoints, Math.min(params.errorCapPoints, rawError)) : rawError;
 
     // Update each team's success-rate context with this game's RAW (not
     // opponent-adjusted) achieved/allowed rates, so a team's own context is

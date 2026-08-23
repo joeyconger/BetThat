@@ -67,6 +67,15 @@ function getComponentFields(game: GameForRating, key: ComponentParamKey): Compon
       return { homeOff: game.homeOffFgMakeRate, homeDef: game.homeDefFgMakeRate, awayOff: game.awayOffFgMakeRate, awayDef: game.awayDefFgMakeRate };
     case "pointsPerOpponentAdj":
       return { homeOff: game.homeOffAdj, homeDef: game.homeDefAdj, awayOff: game.awayOffAdj, awayDef: game.awayDefAdj };
+    case "errorCapPoints":
+      // Not one of JOINT_REFIT_COMPONENTS below (a cap on the aggregate
+      // error, not a per-side off/def differential component) -- this
+      // function is only ever actually called with keys drawn from that
+      // fixed array, so this case is unreachable at runtime. Returning
+      // all-null (the existing "no data for this component" signal,
+      // same as any other missing field) rather than throwing keeps that
+      // guarantee from being load-bearing.
+      return { homeOff: null, homeDef: null, awayOff: null, awayDef: null };
   }
 }
 

@@ -128,6 +128,75 @@ test("computeSeasonRatings updates both teams from a single game's EPA different
   assert.equal(away.gamesPlayed, 1);
 });
 
+test("computeSeasonRatings ignores errorCapPoints entirely when it's 0 (today's default)", () => {
+  const game = {
+    gameId: 1,
+    week: 1,
+    homeTeamId: 1,
+    awayTeamId: 2,
+    homeOffEpa: 0.5,
+    homeDefEpa: -0.5,
+    awayOffEpa: -0.5,
+    awayDefEpa: 0.5,
+  };
+  const withZero = computeSeasonRatings([game], new Map(), NFL);
+  const withUndefinedEquivalent = computeSeasonRatings([game], new Map(), { ...NFL, errorCapPoints: 0 });
+  assert.equal(withZero.get(1)!.rating, withUndefinedEquivalent.get(1)!.rating);
+});
+
+test("computeSeasonRatings clamps a large error to the cap when errorCapPoints > 0", () => {
+  // Same huge-blowout-style game as above: epaMargin = 35*(1.0 - -1.0) = 35;
+  // predictedMargin = 0-0+1.5 = 1.5; rawError = 33.5 -- comfortably past a cap of 10.
+  const game = {
+    gameId: 1,
+    week: 1,
+    homeTeamId: 1,
+    awayTeamId: 2,
+    homeOffEpa: 0.5,
+    homeDefEpa: -0.5,
+    awayOffEpa: -0.5,
+    awayDefEpa: 0.5,
+  };
+  const params = { ...NFL, errorCapPoints: 10 };
+  const state = computeSeasonRatings([game], new Map(), params);
+  const expectedDelta = params.baseK * 10; // clamped error, not the raw 33.5
+  assert.ok(Math.abs(state.get(1)!.rating - expectedDelta) < 1e-9);
+  assert.ok(Math.abs(state.get(2)!.rating - -expectedDelta) < 1e-9);
+});
+
+test("computeSeasonRatings clamps a large negative error (upset) symmetrically", () => {
+  const game = {
+    gameId: 1,
+    week: 1,
+    homeTeamId: 1,
+    awayTeamId: 2,
+    homeOffEpa: -0.5,
+    homeDefEpa: 0.5,
+    awayOffEpa: 0.5,
+    awayDefEpa: -0.5,
+  };
+  const params = { ...NFL, errorCapPoints: 10 };
+  const state = computeSeasonRatings([game], new Map(), params);
+  const expectedDelta = params.baseK * -10;
+  assert.ok(Math.abs(state.get(1)!.rating - expectedDelta) < 1e-9);
+});
+
+test("computeSeasonRatings leaves a small error under the cap unchanged", () => {
+  const game = {
+    gameId: 1,
+    week: 1,
+    homeTeamId: 1,
+    awayTeamId: 2,
+    homeOffEpa: 0.1,
+    homeDefEpa: -0.05,
+    awayOffEpa: -0.05,
+    awayDefEpa: 0.05,
+  };
+  const uncapped = computeSeasonRatings([game], new Map(), NFL);
+  const cappedHigh = computeSeasonRatings([game], new Map(), { ...NFL, errorCapPoints: 1000 });
+  assert.equal(uncapped.get(1)!.rating, cappedHigh.get(1)!.rating);
+});
+
 test("computeSeasonRatings ignores success rate entirely when successRateWeight is 0 (today's default)", () => {
   const gameBase = {
     gameId: 1,

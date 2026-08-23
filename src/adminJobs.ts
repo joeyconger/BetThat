@@ -1245,6 +1245,12 @@ const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey
   // rough scale as the standard/passing-downs splits above, so starting
   // with a similar-order coarse grid before refining.
   { jobName: "cfb-component-sweep-opponentadj", paramKey: "pointsPerOpponentAdj", grid: [0, 20, 40, 60, 80, 100], label: "pointsPerOpponentAdj" },
+  // Winsorizing-style cap on the per-game error term -- see elo.ts's doc
+  // right where `error` is computed, and RatingParams.errorCapPoints.
+  // Grid spans well below the user's suggested 28-35 range (to see if an
+  // even tighter cap does better) up through a much looser one (to see
+  // where the effect fades out), not just the suggested range alone.
+  { jobName: "cfb-component-sweep-errorcap", paramKey: "errorCapPoints", grid: [0, 15, 20, 25, 30, 35, 45, 60], label: "errorCapPoints" },
 ];
 
 /**
@@ -1269,6 +1275,7 @@ export const startCfbComponentSweepFinishingDrivesJob = () => runComponentSweepJ
 export const startCfbComponentSweepFieldPositionJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[5]!);
 export const startCfbComponentSweepFgMakeRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[6]!);
 export const startCfbComponentSweepOpponentAdjJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[7]!);
+export const startCfbComponentSweepErrorCapJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[8]!);
 
 /**
  * The original pointsPerOpponentAdj screening (config.ts's history) ran
@@ -1365,16 +1372,17 @@ function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamK
 /**
  * The real answer to "was any of tonight's Phase 1-4 calibration actually
  * validated, or just fit to the sample it was evaluated on": every one of
- * COMPONENT_SWEEP_JOBS' 8 params (the 7 already-adopted Phase 1-3 weights
- * PLUS pointsPerOpponentAdj, still 0) was originally calibrated against
- * the FULL 2023-2025 sample -- this runs a genuine train(2023-2024)/
- * test(2025) split for each, via runComponentSweepWalkforward, and for
- * comparison also runs a weight=0 baseline on the SAME 2025 holdout, so
- * "did the training-selected weight actually beat doing nothing, out of
- * sample" is a direct, visible comparison rather than an inference.
+ * COMPONENT_SWEEP_JOBS' 9 params (the 7 already-adopted Phase 1-3
+ * weights, pointsPerOpponentAdj (still 0), and errorCapPoints (still 0))
+ * was originally calibrated against the FULL 2023-2025 sample -- this
+ * runs a genuine train(2023-2024)/test(2025) split for each, via
+ * runComponentSweepWalkforward, and for comparison also runs a weight=0
+ * baseline on the SAME 2025 holdout, so "did the training-selected weight
+ * actually beat doing nothing, out of sample" is a direct, visible
+ * comparison rather than an inference.
  *
- * This is a lot of backtest runs (8 params x (6ish training values + 2
- * holdout runs) = ~60+ full season replays) -- expect this to take
+ * This is a lot of backtest runs (9 params x (6-8ish training values + 2
+ * holdout runs) = ~70+ full season replays) -- expect this to take
  * several minutes.
  */
 export function startCfbWalkforwardAllComponentsJob(): Promise<JobStatus> {
@@ -2675,6 +2683,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-fieldposition": startCfbComponentSweepFieldPositionJob,
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
+  "cfb-component-sweep-errorcap": startCfbComponentSweepErrorCapJob,
   "cfb-opponentadj-paired-test": startCfbOpponentAdjPairedTestJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
