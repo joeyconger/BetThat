@@ -26,6 +26,8 @@ import {
   getPriorSeasonFinalRating,
   getPriorSeasonSpRating,
   getManualSpWeeklyDistributionForWeek,
+  getCfbdSpDistributionForSeason,
+  getDistinctWeeks,
   getSeasonGamesForRating,
   getReturningProductionDistribution,
   getGameHistoryForSeason,
@@ -3043,6 +3045,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-verify-returning-production": startCfbVerifyReturningProductionJob,
   "cfb-opponent-adjust-snapshot": startCfbOpponentAdjustSnapshotJob,
   "cfb-solve-vs-elo-vs-sp-diagnostic": startSolveVsEloVsSpDiagnosticJob,
+  "cfb-solve-vs-elo-vs-sp-widened-diagnostic": startSolveVsEloVsSpWidenedDiagnosticJob,
 };
 
 /**
@@ -3534,6 +3537,194 @@ export function startSolveVsEloVsSpDiagnosticJob(): Promise<JobStatus> {
       log(
         job,
         `  ${name}: Elo rank ${eloRank.get(row.teamId)} (${row.elo.toFixed(2)}), solve rank ${solveRank.get(row.teamId)} (${row.solve.toFixed(4)}), SP+ rank ${spRank.get(row.teamId)} (${row.sp.toFixed(1)})`,
+      );
+    }
+  });
+}
+
+/**
+ * Widened version of cfb-solve-vs-elo-vs-sp-diagnostic -- that single
+ * week-14-2025 snapshot showed an essentially-tied aggregate correlation
+ * (Elo=0.909, solve=0.912, well inside a single point estimate's noise:
+ * SE(r) ~ sqrt((1-r^2)/(n-2)) ~ 0.037 for n=130, an order of magnitude
+ * bigger than the observed delta) despite a real face-validity win on
+ * the specific motivating teams (Old Dominion, Clemson; Penn State did
+ * NOT improve). This checks whether that's a general pattern across the
+ * season and across years, or a one-snapshot coincidence.
+ *
+ * Part A: within CFB 2025, six checkpoints across the season (weeks 4,
+ * 6, 8, 10, 12, 14), each using the REAL as-of-that-week manual SP+
+ * archive (no lookahead). Correlations are reported PER WEEK, not
+ * pooled across weeks -- pooling raw rating values across weeks with
+ * different rating spreads (ratings separate more as the season goes on)
+ * would conflate within-week accuracy with between-week rating growth
+ * and isn't a clean test. Also tracks the three named teams'
+ * |rank - SP+ rank| week by week for both methods.
+ *
+ * Part B: cross-season check using CFBD's final-season SP+ snapshot
+ * (external_ratings source='cfbd_sp', week IS NULL) against each
+ * season's own final week's Elo/solve, for 2023 and 2024 -- coarser (one
+ * point per season, real CFBD data since the manual archive only covers
+ * 2025) but tests generalization across different years' team pools.
+ */
+export function startSolveVsEloVsSpWidenedDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-vs-elo-vs-sp-widened-diagnostic", async (job) => {
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const idToName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) idToName.set(id, name);
+
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+
+    async function computeSolveComposite(season: number, week: number): Promise<Map<number, number>> {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+        });
+      }
+      const performances = buildTeamPerformances([...gamesById.values()]);
+      const solve = computeOpponentAdjustedRatings(performances);
+      const composite = new Map<number, number>();
+      for (const teamId of solve.off.keys()) {
+        composite.set(teamId, solve.off.get(teamId)! - solve.def.get(teamId)!);
+      }
+      return composite;
+    }
+
+    log(job, "=== Part A: CFB 2025, checkpoints across the season (real weekly SP+, no lookahead) ===");
+    const season2025 = 2025;
+    const weeks = [4, 6, 8, 10, 12, 14];
+    let solveWins = 0;
+    let eloWins = 0;
+    const trackedNames = ["Old Dominion", "Penn State", "Clemson"];
+    const trackedTrajectory = new Map<string, { week: number; eloDiff: number; solveDiff: number }[]>();
+    for (const name of trackedNames) trackedTrajectory.set(name, []);
+
+    for (const week of weeks) {
+      const eloState = await computeRatings("cfb", season2025, week);
+      const solveComposite = await computeSolveComposite(season2025, week);
+      const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", season2025, week);
+
+      const rows: { teamId: number; name: string; elo: number; solve: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const eloRating = eloState.get(teamId)?.rating;
+        const solve = solveComposite.get(teamId);
+        if (eloRating === undefined || solve === undefined) continue;
+        rows.push({ teamId, name: idToName.get(teamId) ?? `team ${teamId}`, elo: eloRating, solve, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `week ${week}: only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+      const eloCorr = pearson(
+        rows.map((r) => r.elo),
+        rows.map((r) => r.sp),
+      );
+      const solveCorr = pearson(
+        rows.map((r) => r.solve),
+        rows.map((r) => r.sp),
+      );
+      if (solveCorr > eloCorr) solveWins += 1;
+      else eloWins += 1;
+      log(
+        job,
+        `week ${week}: n=${rows.length}, Elo corr=${eloCorr.toFixed(3)}, solve corr=${solveCorr.toFixed(3)}, delta=${(solveCorr - eloCorr).toFixed(4)} (${solveCorr > eloCorr ? "solve" : "elo"} better)`,
+      );
+
+      function rankOf(key: "elo" | "solve" | "sp"): Map<number, number> {
+        const sorted = [...rows].sort((a, b) => b[key] - a[key]);
+        const rank = new Map<number, number>();
+        sorted.forEach((r, i) => rank.set(r.teamId, i + 1));
+        return rank;
+      }
+      const eloRank = rankOf("elo");
+      const solveRank = rankOf("solve");
+      const spRank = rankOf("sp");
+      for (const name of trackedNames) {
+        const row = rows.find((r) => r.name === name);
+        if (!row) continue;
+        trackedTrajectory.get(name)!.push({
+          week,
+          eloDiff: Math.abs(eloRank.get(row.teamId)! - spRank.get(row.teamId)!),
+          solveDiff: Math.abs(solveRank.get(row.teamId)! - spRank.get(row.teamId)!),
+        });
+      }
+    }
+    log(job, `\nAcross ${solveWins + eloWins} checkpoints: solve had the higher correlation in ${solveWins}, Elo in ${eloWins}.`);
+
+    log(job, "\nTracked teams' |rank - SP+ rank| across the season (lower = better; elo=X/solve=Y per week):");
+    for (const name of trackedNames) {
+      const traj = trackedTrajectory.get(name)!;
+      if (traj.length === 0) {
+        log(job, `  ${name}: not present in any checkpoint week (missing from Elo, solve, or that week's manual SP+).`);
+        continue;
+      }
+      log(job, `  ${name}: ` + traj.map((t) => `wk${t.week} elo=${t.eloDiff}/solve=${t.solveDiff}`).join("  "));
+    }
+
+    log(job, "\n=== Part B: cross-season final-snapshot check (CFBD final SP+, 2023 and 2024) ===");
+    for (const season of [2023, 2024]) {
+      const seasonWeeks = await getDistinctWeeks("cfb", season);
+      if (seasonWeeks.length === 0) {
+        log(job, `${season}: no games found -- skipping.`);
+        continue;
+      }
+      const lastWeek = Math.max(...seasonWeeks);
+      const eloState = await computeRatings("cfb", season, lastWeek);
+      const solveComposite = await computeSolveComposite(season, lastWeek);
+      const spDistribution = await getCfbdSpDistributionForSeason("cfb", season);
+
+      const rows: { teamId: number; elo: number; solve: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const eloRating = eloState.get(teamId)?.rating;
+        const solve = solveComposite.get(teamId);
+        if (eloRating === undefined || solve === undefined) continue;
+        rows.push({ teamId, elo: eloRating, solve, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `${season} (final week ${lastWeek}): only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+      const eloCorr = pearson(
+        rows.map((r) => r.elo),
+        rows.map((r) => r.sp),
+      );
+      const solveCorr = pearson(
+        rows.map((r) => r.solve),
+        rows.map((r) => r.sp),
+      );
+      log(
+        job,
+        `${season} (final week ${lastWeek}, n=${rows.length}): Elo corr=${eloCorr.toFixed(3)}, solve corr=${solveCorr.toFixed(3)}, delta=${(solveCorr - eloCorr).toFixed(4)}`,
       );
     }
   });
