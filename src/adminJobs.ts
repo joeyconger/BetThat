@@ -74,7 +74,7 @@ import {
 import { getRatingParams } from "./ratings/config.js";
 import type { RatingParams } from "./ratings/config.js";
 import { computeInitialRating } from "./ratings/elo.js";
-import { computeRatings } from "./ratings/service.js";
+import { computeRatings, computeAndStoreRatings, generateBacktestPredictionsForWeek } from "./ratings/service.js";
 import type { Sport } from "./db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -1425,6 +1425,35 @@ export function startCfbErrorCapPairedTestJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Re-persists real (non-backtest) team_ratings + model_predictions for
+ * CFB 2025 using CURRENT config defaults, no override -- needed after
+ * adopting errorCapPoints=35 (or any config change) because
+ * computeAndStoreRatings/predictAndStoreWeek write to those SAME shared
+ * tables every time ANY backtest run touches a season (see
+ * cfb-team-rating-delta-diagnostic's doc for why this matters) -- the
+ * dozens of sweep/paired-test backtests run while investigating the ODU
+ * case left team_ratings/model_predictions for 2025 reflecting whichever
+ * run went last (errorCapPoints=60, the final sweep grid value), not
+ * today's actual default. The Slate UI's Weekly Slate and Power Ratings
+ * tabs read directly from these tables (Matchup Sim doesn't -- it uses
+ * the read-only computeRatings, always fresh), so this is what actually
+ * makes the live site reflect the current config, not just the code
+ * being deployed.
+ */
+export function startCfbRecomputeRatingsJob(): Promise<JobStatus> {
+  return runJob("cfb-recompute-ratings", async (job) => {
+    const season = 2025;
+    log(job, `Recomputing and persisting real CFB ${season} ratings + predictions, weeks 1-15, current config defaults (no override).`);
+    for (let week = 1; week <= 15; week++) {
+      const state = await computeAndStoreRatings("cfb", season, week);
+      const { predicted } = await generateBacktestPredictionsForWeek("cfb", season, week);
+      log(job, `week ${week}: ${state.size} teams rated, ${predicted} predictions generated`);
+    }
+    log(job, "done -- /slate should now reflect the current default config.");
+  });
+}
+
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
     log(job, `sweeping cfb ${spec.label}, 2023-2025`);
@@ -2757,6 +2786,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-component-sweep-errorcap": startCfbComponentSweepErrorCapJob,
   "cfb-errorcap-paired-test": startCfbErrorCapPairedTestJob,
+  "cfb-recompute-ratings": startCfbRecomputeRatingsJob,
   "cfb-opponentadj-paired-test": startCfbOpponentAdjPairedTestJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
