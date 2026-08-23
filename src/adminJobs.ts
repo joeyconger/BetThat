@@ -580,6 +580,78 @@ export function startCfbGarbageTimeWalkforwardJob(): Promise<JobStatus> {
 }
 
 /**
+ * The reference comparison at the end of cfb-garbagetime-walkforward's log
+ * is a hardcoded number from cfb-successrate-walkforward's holdout -- a
+ * run from BEFORE Part 1's market-anchor removal, under a different
+ * prediction path entirely. Not a valid apples-to-apples A/B for whether
+ * excludeGarbageTime helps under the CURRENT (unanchored) model. This
+ * runs both excludeGarbageTime settings on the SAME 2025-only holdout,
+ * current CFB defaults otherwise, and a proper paired significance test
+ * on identical games -- the real comparison, replacing reliance on that
+ * stale reference line. Motivated by a real ODU case (see chat): the
+ * model rated them a plausible top-20-ish team in week 12 largely off
+ * blowout wins over already-known-bad Sun Belt teams (Troy, Georgia
+ * Southern), and pulling the actual team_game_stats for those games
+ * showed the EPA/success-rate-implied margin running moderately hotter
+ * than the real scoreboard margin in both -- consistent with garbage-time
+ * inflation, though not enough on its own to explain the full rating
+ * jump (the other additive components -- explosiveness, downs splits,
+ * sack rate, etc. -- account for the rest).
+ */
+export function startCfbGarbageTimeHoldoutPairedTestJob(): Promise<JobStatus> {
+  return runJob("cfb-garbagetime-holdout-paired-test", async (job) => {
+    log(job, "excludeGarbageTime false vs true, 2025-only holdout, current CFB defaults otherwise -- the real apples-to-apples comparison under the unanchored model.");
+    const results = await runGarbageTimeSweep("cfb", 2025, 2025);
+    for (const r of results) {
+      log(job, `excludeGarbageTime=${r.excludeGarbageTime}: ${r.games} games, cover=${fmtPct(r.coverRate)}, avgClv=${r.avgClv === null ? "n/a" : r.avgClv.toFixed(3)} (run ${r.runId})`);
+    }
+    const baseline = results.find((r) => !r.excludeGarbageTime);
+    const variant = results.find((r) => r.excludeGarbageTime);
+    if (!baseline || !variant) {
+      log(job, "expected both excludeGarbageTime=false and =true runs -- missing one, can't pair.");
+      return;
+    }
+    const baselineDetails = await getBacktestGameDetails(baseline.runId);
+    const variantDetails = await getBacktestGameDetails(variant.runId);
+    const commonGameIds = [...baselineDetails.keys()].filter((id) => variantDetails.has(id));
+    log(job, `${commonGameIds.length} identical games between the two runs.`);
+
+    const clvGameIds = commonGameIds.filter(
+      (id) => baselineDetails.get(id)!.clv !== null && variantDetails.get(id)!.clv !== null,
+    );
+    if (clvGameIds.length >= 2) {
+      const baseClv = clvGameIds.map((id) => baselineDetails.get(id)!.clv!);
+      const varClv = clvGameIds.map((id) => variantDetails.get(id)!.clv!);
+      const paired = pairedTTest(baseClv, varClv);
+      log(
+        job,
+        `CLV (excludeGarbageTime=true - false) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+          paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+        }`,
+      );
+    }
+    const coveredGameIds = commonGameIds.filter(
+      (id) => baselineDetails.get(id)!.covered !== null && variantDetails.get(id)!.covered !== null,
+    );
+    if (coveredGameIds.length >= 2) {
+      const baseCovered = coveredGameIds.map((id) => (baselineDetails.get(id)!.covered ? 1 : 0));
+      const varCovered = coveredGameIds.map((id) => (variantDetails.get(id)!.covered ? 1 : 0));
+      const paired = pairedTTest(baseCovered, varCovered);
+      log(
+        job,
+        `covered-as-0/1 (excludeGarbageTime=true - false) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+          paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+        }`,
+      );
+    }
+    log(
+      job,
+      "Note: this holdout is small (2025 only, ~700-something games), and the underlying no-garbage data itself has a real coverage gap (~50% of games skipped at ingestion, silently falling back to all-plays EPA for those) -- a null result here doesn't rule out a real effect the data can't see yet, and a positive one still wants the full 2023-2025 in-sample sweep's significance checked too before trusting it.",
+    );
+  });
+}
+
+/**
  * Sweeps opponentAdjustWeight -- opponent-adjusted success rate (see
  * backtest/sweep.ts's runOpponentAdjustSweep and RatingParams doc). No
  * ingestion job needed first: unlike excludeGarbageTime, this only
@@ -2501,6 +2573,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbage-time-ingest": startCfbGarbageTimeIngestJob,
   "cfb-garbagetime-sweep": startCfbGarbageTimeSweepJob,
   "cfb-garbagetime-walkforward": startCfbGarbageTimeWalkforwardJob,
+  "cfb-garbagetime-holdout-paired-test": startCfbGarbageTimeHoldoutPairedTestJob,
   "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
   "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
   "cfb-restday-sweep": startCfbRestDaySweepJob,
