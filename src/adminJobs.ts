@@ -739,6 +739,22 @@ export function startCfbPennStateRatingDeltaDiagnosticJob(): Promise<JobStatus> 
 }
 
 /**
+ * Same diagnostic for Clemson / CFB / 2025 -- second example cited
+ * alongside Penn State of a team with bad losses to weak opponents whose
+ * rating still looks propped up by close losses to good opponents. This
+ * is a different complaint from errorCapPoints (which caps a single
+ * game's surprise in isolation): the ask is cross-game -- a team's bad
+ * losses should discount how much credit ITS OWN close losses to good
+ * teams get elsewhere in the season. Need the full, chronological game
+ * list (not just the capped rows) to see whether the bad losses land
+ * before or after the good near-misses -- that determines whether a
+ * sequential single-pass discount can even work without a second pass.
+ */
+export function startCfbClemsonRatingDeltaDiagnosticJob(): Promise<JobStatus> {
+  return runJob("cfb-clemson-rating-delta-diagnostic", (job) => logTeamRatingDeltas(job, "cfb", 2025, "Clemson"));
+}
+
+/**
  * Sweeps opponentAdjustWeight -- opponent-adjusted success rate (see
  * backtest/sweep.ts's runOpponentAdjustSweep and RatingParams doc). No
  * ingestion job needed first: unlike excludeGarbageTime, this only
@@ -2772,6 +2788,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-garbagetime-holdout-paired-test": startCfbGarbageTimeHoldoutPairedTestJob,
   "cfb-team-rating-delta-diagnostic": startCfbTeamRatingDeltaDiagnosticJob,
   "cfb-pennstate-rating-delta-diagnostic": startCfbPennStateRatingDeltaDiagnosticJob,
+  "cfb-clemson-rating-delta-diagnostic": startCfbClemsonRatingDeltaDiagnosticJob,
   "cfb-oppadjust-sweep": startCfbOpponentAdjustSweepJob,
   "cfb-oppadjust-walkforward": startCfbOpponentAdjustWalkforwardJob,
   "cfb-restday-sweep": startCfbRestDaySweepJob,
