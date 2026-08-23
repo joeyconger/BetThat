@@ -675,7 +675,13 @@ export function startCfbGarbageTimeHoldoutPairedTestJob(): Promise<JobStatus> {
  * computeRatings recomputes from the real current defaults on demand, so
  * it can't be contaminated this way.
  */
-async function logTeamRatingDeltas(job: JobStatus, sport: Sport, season: number, teamName: string): Promise<void> {
+async function logTeamRatingDeltas(
+  job: JobStatus,
+  sport: Sport,
+  season: number,
+  teamName: string,
+  uncappedComparison = false,
+): Promise<void> {
   const teamNameToId = await getTeamNameToIdMap(sport);
   const teamId = teamNameToId.get(teamName);
   if (!teamId) {
@@ -688,8 +694,18 @@ async function logTeamRatingDeltas(job: JobStatus, sport: Sport, season: number,
     .filter((g) => (g.homeTeam === teamName || g.awayTeam === teamName) && g.status === "final")
     .sort((a, b) => a.week - b.week);
 
-  log(job, `${teamName} ${season}: recomputing ratings before/after each game via computeRatings (default params, no persistence) -- ${teamGames.length} completed games.`);
-  log(job, "week  opponent             result        team_before  team_after  delta    opp_before");
+  const uncappedParams = uncappedComparison ? { ...getRatingParams(sport), errorCapPoints: 0 } : undefined;
+  log(
+    job,
+    `${teamName} ${season}: recomputing ratings before/after each game via computeRatings (default params, no persistence) -- ${teamGames.length} completed games.` +
+      (uncappedComparison ? " Also showing the uncapped (errorCapPoints=0) delta for comparison." : ""),
+  );
+  log(
+    job,
+    "week  opponent             result        team_before  team_after  delta" +
+      (uncappedComparison ? "    raw_delta" : "") +
+      "    opp_before",
+  );
 
   for (const g of teamGames) {
     const isHome = g.homeTeam === teamName;
@@ -704,8 +720,21 @@ async function logTeamRatingDeltas(job: JobStatus, sport: Sport, season: number,
     const teamBefore = before.get(teamId)?.rating;
     const teamAfter = after.get(teamId)?.rating;
     const oppBefore = opponentId ? before.get(opponentId)?.rating : undefined;
-
     const delta = teamBefore !== undefined && teamAfter !== undefined ? teamAfter - teamBefore : undefined;
+
+    let rawDelta: number | undefined;
+    if (uncappedParams) {
+      // Both sides of this delta use uncappedParams (not teamBefore/teamAfter
+      // above, which are the capped run) so the raw delta reflects only this
+      // one game's error in an uncapped world, isolated from cumulative drift
+      // the uncapped setting would also cause in every prior game.
+      const rawBefore = await computeRatings(sport, season, g.week - 1, uncappedParams);
+      const rawAfter = await computeRatings(sport, season, g.week, uncappedParams);
+      const teamRawBefore = rawBefore.get(teamId)?.rating;
+      const teamRawAfter = rawAfter.get(teamId)?.rating;
+      rawDelta = teamRawBefore !== undefined && teamRawAfter !== undefined ? teamRawAfter - teamRawBefore : undefined;
+    }
+
     log(
       job,
       [
@@ -715,6 +744,9 @@ async function logTeamRatingDeltas(job: JobStatus, sport: Sport, season: number,
         (teamBefore === undefined ? "n/a" : teamBefore.toFixed(2)).padStart(11),
         (teamAfter === undefined ? "n/a" : teamAfter.toFixed(2)).padStart(10),
         (delta === undefined ? "n/a" : (delta >= 0 ? "+" : "") + delta.toFixed(2)).padStart(8),
+        ...(uncappedParams
+          ? [(rawDelta === undefined ? "n/a" : (rawDelta >= 0 ? "+" : "") + rawDelta.toFixed(2)).padStart(9)]
+          : []),
         oppBefore === undefined ? "n/a" : oppBefore.toFixed(2),
       ].join("  "),
     );
@@ -751,7 +783,7 @@ export function startCfbPennStateRatingDeltaDiagnosticJob(): Promise<JobStatus> 
  * sequential single-pass discount can even work without a second pass.
  */
 export function startCfbClemsonRatingDeltaDiagnosticJob(): Promise<JobStatus> {
-  return runJob("cfb-clemson-rating-delta-diagnostic", (job) => logTeamRatingDeltas(job, "cfb", 2025, "Clemson"));
+  return runJob("cfb-clemson-rating-delta-diagnostic", (job) => logTeamRatingDeltas(job, "cfb", 2025, "Clemson", true));
 }
 
 /**
