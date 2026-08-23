@@ -1353,6 +1353,78 @@ export function startCfbOpponentAdjPairedTestJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * cfb-component-sweep-errorcap came back non-monotonic: tight caps (15,
+ * 20) hurt BOTH cover and avgClv vs. the uncapped baseline (clip too
+ * aggressively, cutting legitimate large surprises along with pathological
+ * ones), while 30-35 beat the baseline on both -- the same range the
+ * ODU diagnostic's hand math suggested. Paired significance test on 30
+ * and 35 against 0, identical games, same pattern as
+ * cfb-opponentadj-paired-test. Requires cfb-component-sweep-errorcap to
+ * have just run.
+ */
+export function startCfbErrorCapPairedTestJob(): Promise<JobStatus> {
+  return runJob("cfb-errorcap-paired-test", async (job) => {
+    const runs = await listBacktestRuns();
+    function latestRunForValue(value: number) {
+      const name = `sweep-errorCapPoints-cfb-v${value}`;
+      const matches = runs.filter((r) => r.name === name);
+      return matches.sort((a, b) => b.id - a.id)[0];
+    }
+    const baseline = latestRunForValue(0);
+    if (!baseline) {
+      log(job, "No sweep-errorCapPoints-cfb-v0 run found -- run cfb-component-sweep-errorcap first.");
+      return;
+    }
+    log(job, `baseline (errorCapPoints=0): run ${baseline.id}`);
+    const baselineDetails = await getBacktestGameDetails(baseline.id);
+
+    for (const value of [30, 35]) {
+      const variant = latestRunForValue(value);
+      if (!variant) {
+        log(job, `No sweep-errorCapPoints-cfb-v${value} run found -- skipping.`);
+        continue;
+      }
+      const variantDetails = await getBacktestGameDetails(variant.id);
+      const commonGameIds = [...baselineDetails.keys()].filter((id) => variantDetails.has(id));
+      log(job, `\nerrorCapPoints=${value} (run ${variant.id}) vs. 0 (run ${baseline.id}), ${commonGameIds.length} identical games:`);
+
+      const clvGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.clv !== null && variantDetails.get(id)!.clv !== null,
+      );
+      if (clvGameIds.length >= 2) {
+        const baseClv = clvGameIds.map((id) => baselineDetails.get(id)!.clv!);
+        const varClv = clvGameIds.map((id) => variantDetails.get(id)!.clv!);
+        const paired = pairedTTest(baseClv, varClv);
+        log(
+          job,
+          `  CLV (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+      const coveredGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.covered !== null && variantDetails.get(id)!.covered !== null,
+      );
+      if (coveredGameIds.length >= 2) {
+        const baseCovered = coveredGameIds.map((id) => (baselineDetails.get(id)!.covered ? 1 : 0));
+        const varCovered = coveredGameIds.map((id) => (variantDetails.get(id)!.covered ? 1 : 0));
+        const paired = pairedTTest(baseCovered, varCovered);
+        log(
+          job,
+          `  covered-as-0/1 (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+    }
+    log(
+      job,
+      "\nEven if neither clears significance here, remember the standard for this specific param is different from a pure edge-hunting param per the earlier discussion: face validity (does the power ratings tab look sane) is legitimate evidence on its own for a reference tool, as long as this doesn't show a real CLV COST. A significant CLV cost would be a real reason to hold off regardless of face validity; a null CLV result alongside better cover and fixed face validity is a reasonable adopt.",
+    );
+  });
+}
+
 function runComponentSweepJob(spec: { jobName: string; paramKey: ComponentParamKey; grid: number[]; label: string }): Promise<JobStatus> {
   return runJob(spec.jobName, async (job) => {
     log(job, `sweeping cfb ${spec.label}, 2023-2025`);
@@ -2684,6 +2756,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-fgmakerate": startCfbComponentSweepFgMakeRateJob,
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-component-sweep-errorcap": startCfbComponentSweepErrorCapJob,
+  "cfb-errorcap-paired-test": startCfbErrorCapPairedTestJob,
   "cfb-opponentadj-paired-test": startCfbOpponentAdjPairedTestJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,
   "cfb-jointrefit-holdout": startCfbJointRefitHoldoutJob,
