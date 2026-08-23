@@ -787,3 +787,15 @@ src/
    real scheduled game); the one real gap is confirming it degrades
    sensibly with no market line to anchor to, since a hypothetical matchup
    has no real market price.
+6. **Returning production as a week-0 seed adjustment** — not started.
+   Part 2 (the full preseason-prior ingestion: returning production,
+   transfer portal, recruiting talent, polls) was dropped as a bundle (see
+   "Market anchor removed, preseason prior tested and dropped" above), but
+   returning production specifically is being tested on its own, narrowest
+   first. Full ready-to-run spec saved at
+   `docs/prompts/returning-production-seed-adjustment.md` — paste into a
+   fresh session when picking this up. Also flags a still-open anomaly
+   worth closing in the same pass: the 0-1 games-played bucket's avgClv
+   (~0.10) sits well below every other bucket (0.45-0.94) across all six
+   `cfb-seed-strategy-sweep` runs — possibly stale/mis-timestamped week-1
+   opening lines contaminating CLV for that bucket specifically.
