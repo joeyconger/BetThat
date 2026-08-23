@@ -588,6 +588,31 @@ const CFB_PARAMS: RatingParams = {
   // real games played, i.e. still very early season). Irrelevant while
   // pointsPerOpponentAdj is 0; needs a real sweep once/if that changes.
   opponentAdjShrinkageK: 4,
+  // errorCapPoints=35: adopted on face-validity grounds, not a pure CLV
+  // edge -- see README's "Market anchor removed" section (this history
+  // appended there) and cfb-team-rating-delta-diagnostic. A single
+  // outlier blowout (Old Dominion over Troy, 2025
+  // week 12) accounted for more of a team's full-season rating movement
+  // than every other game combined, driven by an EPA/success-rate-
+  // implied performance signal that ran well past even an already
+  // opponent-adjusted expectation. Swept 0-60 (cfb-component-sweep-
+  // errorcap): non-monotonic -- tight caps (15, 20) actively HURT both
+  // cover and avgClv vs. the uncapped baseline (clip legitimate large
+  // surprises along with pathological ones), while 30-35 beat the
+  // baseline on both. Paired test (cfb-errorcap-paired-test) on 30 and
+  // 35 against 0: neither showed a significant CLV cost (p=0.67 at 30,
+  // p=0.88 at 35, the latter's point estimate even positive) or a
+  // significant cover gain -- a null result on the metric that
+  // determines betting edge, which is the standard finding for most
+  // params in this file. Adopted anyway because this param's purpose is
+  // different: it targets rating SENSIBILITY for the read-only power-
+  // ratings/matchup-sim UI, not CLV -- a null CLV result with no
+  // significant cost, alongside a real fix to a concrete face-validity
+  // failure, clears that bar even though it wouldn't clear the bar for
+  // a pure edge-hunting param. 35 over 30: marginally better point
+  // estimates on both avgClv (0.64 vs 0.62) and cover (tied at 51.3%,
+  // but 35's paired CLV mean diff was positive vs 30's negative).
+  errorCapPoints: 35,
 };
 
 export function getRatingParams(sport: Sport): RatingParams {

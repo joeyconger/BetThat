@@ -296,7 +296,10 @@ test("computeSeasonRatings clamps the SOS multiplier instead of letting an extre
 });
 
 test("computeSeasonRatings' SOS multiplier is neutralized for CFB (sosWeight=0) -- an extreme opponent rating has zero effect on the update", () => {
-  const params = { ...CFB, successRateWeight: 0 };
+  // errorCapPoints explicitly zeroed -- CFB's real default (35) would
+  // clamp this test's deliberately huge synthetic error, which would
+  // test the cap instead of the thing this test actually isolates.
+  const params = { ...CFB, successRateWeight: 0, errorCapPoints: 0 };
   const state = computeSeasonRatings(
     [{ gameId: 1, week: 1, homeTeamId: 1, awayTeamId: 2, homeOffEpa: 0.1, homeDefEpa: -0.05, awayOffEpa: -0.05, awayDefEpa: 0.05 }],
     new Map([[2, 100000]]), // extreme away rating -- would blow up homeSosMultiplier if sosWeight were nonzero

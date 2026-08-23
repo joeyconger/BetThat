@@ -663,6 +663,79 @@ numbers. Part 2 (the fuller CFBD ingestion) is dropped. The model now
 stands as the pure rating-differential number with no market input and no
 preseason prior beyond the existing lightly-regressed carryover seed.
 
+## Rating-sensibility fix: errorCapPoints (a UI face-validity finding, not a CLV edge)
+
+Building the Slate UI's Power Ratings tab surfaced a real problem the
+backtest metrics never would have: browsing week-12 2025 CFB ratings
+showed Old Dominion (3 losses, including blowout losses to Marshall and
+James Madison) rated as a plausible top-20ish team. A per-game rating-
+delta diagnostic (`cfb-team-rating-delta-diagnostic`) traced this to a
+single outlier: beating Troy 33-0 added +22.38 to Old Dominion's rating
+in one week — bigger than the team's entire net movement for the season
+(+19.31 across all 11 games). Without that one game, they'd have finished
+*below* league average.
+
+Two competing explanations were checked with real data before picking a
+fix. First, opponent-adjustment: pulling the same diagnostic for Old
+Dominion's other blowout wins (UL Monroe, Georgia Southern — both already
+rated well below average at the time) showed `predictedMargin` (which
+already incorporates both teams' current ratings, i.e. opponent
+strength) correctly anticipating those blowouts and assigning them near-
+zero further credit — opponent-adjustment is *already* working via the
+rating differential itself, not missing. A third game (App State, a
+narrow 3-point win over an already-bad-rated opponent) was correctly
+*penalized* (-7.53) for underperforming a big expected margin. Troy was
+the outlier specifically because Troy wasn't rated as badly at the time
+(-4.27) as it turned out to deserve, so the model's (already opponent-
+adjusted) expectation was modest — and the actual performance blew
+straight through it. Pulling the real `team_game_stats` for that game
+confirmed the EPA/success-rate-implied performance margin ran hotter
+than even the 33-0 scoreboard margin, consistent with backup-heavy
+garbage time inflating the per-play signal.
+
+This ruled out "more opponent-adjustment" as the fix (consistent with
+`pointsPerOpponentAdj` re-testing negative post-anchor-removal — see
+below) and pointed at a different mechanism: nothing dampens how large a
+single game's *surprise* (actual vs. already-opponent-adjusted expected
+performance) can be, once one game's performance signal runs extreme.
+`errorCapPoints` (`elo.ts`, right where the update's `error` term is
+computed) is a winsorizing-style hard cap on that surprise, applied
+*after* `predictedMargin`'s existing opponent-adjustment and after every
+additive component has already contributed — not a replacement for
+opponent-adjustment, a cap on top of it.
+
+Swept 0-60 (`cfb-component-sweep-errorcap`): non-monotonic. Tight caps
+(15, 20) actively hurt both cover and avgClv vs. the uncapped baseline —
+clipping too aggressively cuts legitimate large surprises (a good team
+blowing out another good team, which should count for a lot) along with
+the pathological ones. 30-35 beat the uncapped baseline on both metrics.
+A paired significance test (`cfb-errorcap-paired-test`) on 30 and 35
+against 0 found no significant CLV cost either way (p=0.67 at 30, p=0.88
+at 35 — the latter's point estimate even positive) and no significant
+cover gain — a null result on the metric that actually determines
+betting edge.
+
+**Adopted `errorCapPoints=35` anyway**, and deliberately holding this
+param to a different standard than the rest of this file: its purpose is
+rating *sensibility* for the read-only Slate UI, not CLV edge. A null
+CLV result with no significant cost, alongside fixing a concrete,
+demonstrated face-validity failure, is legitimate grounds to adopt for a
+reference tool even though it wouldn't clear the bar this project has
+otherwise held all session for a pure edge-hunting param — the CLV
+metric has already shown (via the null opponent-adjustment result) that
+it can't distinguish these configurations anyway, so its silence isn't
+evidence against the fix.
+
+Also re-confirmed while investigating this: `pointsPerOpponentAdj`
+re-tested post-anchor-removal (`cfb-component-sweep-opponentadj` +
+`cfb-opponentadj-paired-test`) still shows a real CLV cost at weight=40
+(p=0.041) and no significant effect at weight=60 — stays at 0. The
+original screening's redundancy explanation (off_adj/def_adj correlates
+-0.71 with the model's own prediction) still holds even freshly re-tested
+under the unanchored model, for the mechanistic reason above:
+`predictedMargin` already structurally contains opponent-adjustment via
+the rating differential itself.
+
 ## New scaffolds: key numbers, weather, public/sharp splits
 
 Three new investigation angles, in different states of readiness:
