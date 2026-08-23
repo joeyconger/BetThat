@@ -1309,6 +1309,13 @@ const COMPONENT_SWEEP_JOBS: Array<{ jobName: string; paramKey: ComponentParamKey
   // even tighter cap does better) up through a much looser one (to see
   // where the effect fades out), not just the suggested range alone.
   { jobName: "cfb-component-sweep-errorcap", paramKey: "errorCapPoints", grid: [0, 15, 20, 25, 30, 35, 45, 60], label: "errorCapPoints" },
+  // Consistency-based shrinkage toward league mean (0) -- see elo.ts's
+  // post-loop shrink pass and RatingParams.varianceShrinkK's doc. Units
+  // are the same raw-error points as errorCapPoints (dispersion is a
+  // sample stdev of the same rawError values that cap clamps), so the
+  // grid brackets a similar range -- coarse first pass, refine toward
+  // whichever region shows a real trend, same as every other sweep here.
+  { jobName: "cfb-component-sweep-varianceshrink", paramKey: "varianceShrinkK", grid: [0, 5, 10, 15, 20, 30, 45, 60], label: "varianceShrinkK" },
 ];
 
 /**
@@ -1334,6 +1341,7 @@ export const startCfbComponentSweepFieldPositionJob = () => runComponentSweepJob
 export const startCfbComponentSweepFgMakeRateJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[6]!);
 export const startCfbComponentSweepOpponentAdjJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[7]!);
 export const startCfbComponentSweepErrorCapJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[8]!);
+export const startCfbComponentSweepVarianceShrinkJob = () => runComponentSweepJob(COMPONENT_SWEEP_JOBS[9]!);
 
 /**
  * The original pointsPerOpponentAdj screening (config.ts's history) ran
@@ -1480,6 +1488,166 @@ export function startCfbErrorCapPairedTestJob(): Promise<JobStatus> {
       job,
       "\nEven if neither clears significance here, remember the standard for this specific param is different from a pure edge-hunting param per the earlier discussion: face validity (does the power ratings tab look sane) is legitimate evidence on its own for a reference tool, as long as this doesn't show a real CLV COST. A significant CLV cost would be a real reason to hold off regardless of face validity; a null CLV result alongside better cover and fixed face validity is a reasonable adopt.",
     );
+  });
+}
+
+/**
+ * Paired significance test for cfb-component-sweep-varianceshrink, same
+ * pattern as startCfbErrorCapPairedTestJob just above -- but tests the
+ * FULL grid against the 0 baseline (not a narrowed subset) since this is
+ * the first pass, unlike errorCapPoints which had already been narrowed
+ * to [30, 35] by the time its paired test was written. Requires
+ * cfb-component-sweep-varianceshrink to have just run.
+ */
+export function startCfbVarianceShrinkPairedTestJob(): Promise<JobStatus> {
+  return runJob("cfb-varianceshrink-paired-test", async (job) => {
+    const runs = await listBacktestRuns();
+    function latestRunForValue(value: number) {
+      const name = `sweep-varianceShrinkK-cfb-v${value}`;
+      const matches = runs.filter((r) => r.name === name);
+      return matches.sort((a, b) => b.id - a.id)[0];
+    }
+    const baseline = latestRunForValue(0);
+    if (!baseline) {
+      log(job, "No sweep-varianceShrinkK-cfb-v0 run found -- run cfb-component-sweep-varianceshrink first.");
+      return;
+    }
+    log(job, `baseline (varianceShrinkK=0): run ${baseline.id}`);
+    const baselineDetails = await getBacktestGameDetails(baseline.id);
+
+    for (const value of [5, 10, 15, 20, 30, 45, 60]) {
+      const variant = latestRunForValue(value);
+      if (!variant) {
+        log(job, `No sweep-varianceShrinkK-cfb-v${value} run found -- skipping.`);
+        continue;
+      }
+      const variantDetails = await getBacktestGameDetails(variant.id);
+      const commonGameIds = [...baselineDetails.keys()].filter((id) => variantDetails.has(id));
+      log(job, `\nvarianceShrinkK=${value} (run ${variant.id}) vs. 0 (run ${baseline.id}), ${commonGameIds.length} identical games:`);
+
+      const clvGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.clv !== null && variantDetails.get(id)!.clv !== null,
+      );
+      if (clvGameIds.length >= 2) {
+        const baseClv = clvGameIds.map((id) => baselineDetails.get(id)!.clv!);
+        const varClv = clvGameIds.map((id) => variantDetails.get(id)!.clv!);
+        const paired = pairedTTest(baseClv, varClv);
+        log(
+          job,
+          `  CLV (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+      const coveredGameIds = commonGameIds.filter(
+        (id) => baselineDetails.get(id)!.covered !== null && variantDetails.get(id)!.covered !== null,
+      );
+      if (coveredGameIds.length >= 2) {
+        const baseCovered = coveredGameIds.map((id) => (baselineDetails.get(id)!.covered ? 1 : 0));
+        const varCovered = coveredGameIds.map((id) => (variantDetails.get(id)!.covered ? 1 : 0));
+        const paired = pairedTTest(baseCovered, varCovered);
+        log(
+          job,
+          `  covered-as-0/1 (variant - baseline) on ${paired.n} games: mean diff=${paired.meanDiff.toFixed(4)}, t=${paired.tStatistic.toFixed(3)}, p=${paired.pValueTwoSided.toFixed(4)} -- ${
+            paired.pValueTwoSided < 0.05 ? "statistically significant at p<0.05." : "NOT statistically significant."
+          }`,
+        );
+      }
+    }
+    log(
+      job,
+      "\nPer the user's explicit framing: keep CLV as a do-no-harm check, not the decider -- the actual decision criterion is whether the top 25 looks right (see cfb-variance-facevalidity). A significant CLV COST here would be a real reason to hold off regardless of face validity; a null-to-positive CLV result alongside fixed face validity is a reasonable adopt.",
+    );
+  });
+}
+
+/**
+ * Direct face-validity check for varianceShrinkK -- the actual decision
+ * criterion per the user's explicit framing ("does the top 25 look
+ * right", CLV as do-no-harm only). Shows CFB 2025 week 14's top 25 by
+ * baseline (varianceShrinkK=0) rating, each team's dispersion, its
+ * shrunk rating at a representative candidate K, and where it lands in
+ * the shrunk ranking -- plus explicit before/after lines for the three
+ * teams that motivated this (Old Dominion, Penn State, Clemson), whether
+ * or not they're still in the top 25 after shrinking.
+ *
+ * K=20 is a representative candidate, not a calibrated choice -- picked
+ * because it's mid-grid in cfb-component-sweep-varianceshrink and matches
+ * the dispersion scale real per-team stdevs are expected to fall in (see
+ * that sweep's grid comment). Re-run this by hand with a different K
+ * (edit CANDIDATE_VARIANCE_SHRINK_K below) once the sweep/paired-test
+ * results point to an actual best value.
+ */
+const CANDIDATE_VARIANCE_SHRINK_K = 20;
+
+export function startCfbVarianceFaceValidityJob(): Promise<JobStatus> {
+  return runJob("cfb-variance-facevalidity", async (job) => {
+    const season = 2025;
+    const week = 14;
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const idToTeamName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) idToTeamName.set(id, name);
+
+    const baseParams = getRatingParams("cfb");
+    const shrunkParams = { ...baseParams, varianceShrinkK: CANDIDATE_VARIANCE_SHRINK_K };
+    const [baseState, shrunkState] = await Promise.all([
+      computeRatings("cfb", season, week, baseParams),
+      computeRatings("cfb", season, week, shrunkParams),
+    ]);
+
+    interface Row {
+      teamId: number;
+      name: string;
+      baseRating: number;
+      dispersion: number;
+      shrunkRating: number;
+    }
+    const rows: Row[] = [];
+    for (const [teamId, base] of baseState) {
+      const shrunk = shrunkState.get(teamId);
+      rows.push({
+        teamId,
+        name: idToTeamName.get(teamId) ?? `team ${teamId}`,
+        baseRating: base.rating,
+        dispersion: base.dispersion,
+        shrunkRating: shrunk?.rating ?? base.rating,
+      });
+    }
+
+    const byBase = [...rows].sort((a, b) => b.baseRating - a.baseRating);
+    const byShrunk = [...rows].sort((a, b) => b.shrunkRating - a.shrunkRating);
+    const shrunkRank = new Map<number, number>();
+    byShrunk.forEach((r, i) => shrunkRank.set(r.teamId, i + 1));
+
+    log(job, `CFB ${season} week ${week}: top 25 by baseline (varianceShrinkK=0) rating, vs. shrunk at K=${CANDIDATE_VARIANCE_SHRINK_K}.`);
+    log(job, "rank  team                  base_rating  dispersion  shrunk_rating  shrunk_rank");
+    byBase.slice(0, 25).forEach((r, i) => {
+      log(
+        job,
+        [
+          String(i + 1).padEnd(4),
+          r.name.padEnd(20).slice(0, 20),
+          r.baseRating.toFixed(2).padStart(11),
+          r.dispersion.toFixed(2).padStart(10),
+          r.shrunkRating.toFixed(2).padStart(13),
+          String(shrunkRank.get(r.teamId)).padStart(11),
+        ].join("  "),
+      );
+    });
+
+    log(job, "\nThe three teams that motivated this:");
+    for (const name of ["Old Dominion", "Penn State", "Clemson"]) {
+      const row = rows.find((r) => r.name === name);
+      if (!row) {
+        log(job, `  ${name}: not found (didn't play through week ${week}?)`);
+        continue;
+      }
+      const baseRank = byBase.findIndex((r) => r.teamId === row.teamId) + 1;
+      log(
+        job,
+        `  ${name}: base rank ${baseRank} (${row.baseRating.toFixed(2)}), dispersion ${row.dispersion.toFixed(2)} -> shrunk rank ${shrunkRank.get(row.teamId)} (${row.shrunkRating.toFixed(2)})`,
+      );
+    }
   });
 }
 
@@ -2846,6 +3014,9 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-component-sweep-opponentadj": startCfbComponentSweepOpponentAdjJob,
   "cfb-component-sweep-errorcap": startCfbComponentSweepErrorCapJob,
   "cfb-errorcap-paired-test": startCfbErrorCapPairedTestJob,
+  "cfb-component-sweep-varianceshrink": startCfbComponentSweepVarianceShrinkJob,
+  "cfb-varianceshrink-paired-test": startCfbVarianceShrinkPairedTestJob,
+  "cfb-variance-facevalidity": startCfbVarianceFaceValidityJob,
   "cfb-recompute-ratings": startCfbRecomputeRatingsJob,
   "cfb-opponentadj-paired-test": startCfbOpponentAdjPairedTestJob,
   "cfb-walkforward-allcomponents": startCfbWalkforwardAllComponentsJob,

@@ -589,7 +589,8 @@ export type ComponentParamKey =
   | "pointsPerFieldPosition"
   | "pointsPerFgMakeRate"
   | "pointsPerOpponentAdj"
-  | "errorCapPoints";
+  | "errorCapPoints"
+  | "varianceShrinkK";
 
 const DEFAULT_COMPONENT_WEIGHT_GRID = [0, 1, 2, 4, 8];
 

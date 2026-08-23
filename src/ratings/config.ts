@@ -324,6 +324,25 @@ export interface RatingParams {
    * swept for the actual result.
    */
   errorCapPoints: number;
+  /**
+   * n/(n+k)-style shrinkage of a team's final rating toward league average
+   * (0), where the "n" side is the team's OWN season-to-date residual
+   * dispersion (sample stdev of actual-vs-predicted error across its
+   * games), not a games-played count like every other shrinkage in this
+   * file -- see computeSeasonRatings' post-loop shrink pass in elo.ts for
+   * the full mechanism and TeamRatingState.dispersion's doc. A team whose
+   * results are internally consistent (low dispersion) keeps its rating;
+   * an erratic team (some big wins, some bad losses, wide game-to-game
+   * swings) gets pulled toward average -- this is a DIFFERENT failure mode
+   * from errorCapPoints (which limits how much any single game can move a
+   * rating): this limits how much a team's accumulated rating can be
+   * trusted when the games behind it don't agree with each other. 0
+   * (default) = no-op. Untested at definition time -- see this field's
+   * value comment below once swept for the actual result, and the
+   * README's rating-sensibility section for the ODU/Penn State/Clemson
+   * face-validity cases that motivated it.
+   */
+  varianceShrinkK: number;
 }
 
 const NFL_PARAMS: RatingParams = {
@@ -357,6 +376,7 @@ const NFL_PARAMS: RatingParams = {
   opponentAdjShrinkageK: 4, // irrelevant while pointsPerOpponentAdj is 0 -- placeholder matching CFB's untested default
   returningProductionPoints: 0, // no returning-production data source for NFL
   errorCapPoints: 0, // disabled -- untested, needs a real sweep
+  varianceShrinkK: 0, // disabled -- untested, needs a real sweep
 };
 
 const CFB_PARAMS: RatingParams = {

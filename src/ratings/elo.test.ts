@@ -197,6 +197,116 @@ test("computeSeasonRatings leaves a small error under the cap unchanged", () => 
   assert.equal(uncapped.get(1)!.rating, cappedHigh.get(1)!.rating);
 });
 
+test("computeSeasonRatings ignores varianceShrinkK entirely when it's 0 (today's default)", () => {
+  const game = {
+    gameId: 1,
+    week: 1,
+    homeTeamId: 1,
+    awayTeamId: 2,
+    homeOffEpa: 0.1,
+    homeDefEpa: -0.05,
+    awayOffEpa: -0.05,
+    awayDefEpa: 0.05,
+  };
+  const withZero = computeSeasonRatings([game], new Map(), NFL);
+  const withUndefinedEquivalent = computeSeasonRatings([game], new Map(), { ...NFL, varianceShrinkK: 0 });
+  assert.equal(withZero.get(1)!.rating, withUndefinedEquivalent.get(1)!.rating);
+  assert.equal(withZero.get(1)!.dispersion, 0);
+});
+
+test("computeSeasonRatings' varianceShrinkK leaves a perfectly consistent team's rating unchanged (dispersion=0)", () => {
+  // Team 1 (home) plays 3 fresh opponents -- each starts at rating 0, so
+  // homeSosMultiplier is exactly 1 every week (opponent rating is always 0
+  // at kickoff). Each week's EPA is chosen so rawError is exactly 10,
+  // even though predictedMargin itself shifts as team 1's own rating
+  // accumulates -- so the three residuals are identical (dispersion=0)
+  // despite the rating itself moving every week.
+  const K = NFL.baseK;
+  const R = 10;
+  let rating = 0;
+  const games = [];
+  for (let week = 1; week <= 3; week++) {
+    const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
+    const actualMargin = predictedMargin + R;
+    games.push({
+      gameId: week,
+      week,
+      homeTeamId: 1,
+      awayTeamId: 100 + week, // fresh opponent every week, never faced before
+      homeOffEpa: actualMargin / 35,
+      homeDefEpa: 0,
+      awayOffEpa: 0,
+      awayDefEpa: 0,
+    });
+    rating += K * R;
+  }
+  const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
+  const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 5 });
+  assert.equal(withShrink.get(1)!.dispersion, 0);
+  assert.ok(Math.abs(withoutShrink.get(1)!.rating - rating) < 1e-6);
+  assert.ok(Math.abs(withShrink.get(1)!.rating - withoutShrink.get(1)!.rating) < 1e-9);
+});
+
+test("computeSeasonRatings' varianceShrinkK pulls an erratic team's rating toward 0 proportional to its residual dispersion", () => {
+  // Team 1 (home) vs. 3 fresh opponents, residuals engineered to be
+  // exactly [10, 30, -10] -- sample stdev (n-1) of that set is exactly 20:
+  // mean=10, squared deviations [0, 400, 400], variance=800/2=400, sqrt=20.
+  const K = NFL.baseK;
+  const residuals = [10, 30, -10];
+  let rating = 0;
+  const games = [];
+  for (let i = 0; i < residuals.length; i++) {
+    const week = i + 1;
+    const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
+    const actualMargin = predictedMargin + residuals[i]!;
+    games.push({
+      gameId: week,
+      week,
+      homeTeamId: 1,
+      awayTeamId: 100 + week,
+      homeOffEpa: actualMargin / 35,
+      homeDefEpa: 0,
+      awayOffEpa: 0,
+      awayDefEpa: 0,
+    });
+    rating += K * residuals[i]!;
+  }
+  const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
+  assert.ok(Math.abs(withoutShrink.get(1)!.rating - 7.5) < 1e-6);
+
+  // varianceShrinkK=20, dispersion=20 -> shrinkWeight = 20/(20+20) = 0.5
+  const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 20 });
+  assert.ok(Math.abs(withShrink.get(1)!.dispersion - 20) < 1e-6);
+  assert.ok(Math.abs(withShrink.get(1)!.rating - 7.5 * 0.5) < 1e-6);
+});
+
+test("computeSeasonRatings' varianceShrinkK has no effect below MIN_DISPERSION_GAMES (needs 3+ games to trust dispersion)", () => {
+  const K = NFL.baseK;
+  const residuals = [10, 30]; // only 2 games
+  let rating = 0;
+  const games = [];
+  for (let i = 0; i < residuals.length; i++) {
+    const week = i + 1;
+    const predictedMargin = rating - 0 + NFL.homeFieldAdvantage;
+    const actualMargin = predictedMargin + residuals[i]!;
+    games.push({
+      gameId: week,
+      week,
+      homeTeamId: 1,
+      awayTeamId: 100 + week,
+      homeOffEpa: actualMargin / 35,
+      homeDefEpa: 0,
+      awayOffEpa: 0,
+      awayDefEpa: 0,
+    });
+    rating += K * residuals[i]!;
+  }
+  const withoutShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 0 });
+  const withShrink = computeSeasonRatings(games, new Map(), { ...NFL, varianceShrinkK: 5 });
+  assert.equal(withShrink.get(1)!.dispersion, 0);
+  assert.ok(Math.abs(withShrink.get(1)!.rating - withoutShrink.get(1)!.rating) < 1e-9);
+});
+
 test("computeSeasonRatings ignores success rate entirely when successRateWeight is 0 (today's default)", () => {
   const gameBase = {
     gameId: 1,
