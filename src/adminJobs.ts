@@ -38,6 +38,7 @@ import { pairedTTest } from "./stats/significance.js";
 import { buildTeamPerformances, buildTeamPerformancesEpa } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
+import type { TeamPerformance } from "./ratings/opponentAdjust.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings, syncCfbdReturningProduction } from "./ingest/cfbd/syncExternalRatings.js";
@@ -3048,6 +3049,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-solve-vs-elo-vs-sp-widened-diagnostic": startSolveVsEloVsSpWidenedDiagnosticJob,
   "cfb-solve-coldstart-test": startSolveColdStartTestJob,
   "cfb-solve-epa-hypothesis-test": startSolveEpaHypothesisTestJob,
+  "cfb-solve-prior-weight-test": startSolvePriorWeightTestJob,
 };
 
 /**
@@ -4025,6 +4027,121 @@ export function startSolveEpaHypothesisTestJob(): Promise<JobStatus> {
         continue;
       }
       log(job, `  ${name}: sp=${sp.toFixed(1)}, elo=${elo.toFixed(2)}, success-rate solve composite=${success.toFixed(4)}, EPA solve composite=${epa.toFixed(4)}`);
+    }
+  });
+}
+
+/**
+ * Tests whether the pseudo-game prior mechanism (opponentAdjust.ts's
+ * options.priors, NOT the falsified initialOff/initialDef seeding)
+ * actually closes the residual early-week gap the EPA hypothesis test
+ * left open: EPA solve still trailed Elo at weeks 4 (-0.175) and 6
+ * (-0.043), consistent with the solve genuinely having less information
+ * early than Elo's carried-over prior.
+ *
+ * Prior source: 2024's own final-season EPA solve output, used directly
+ * (not shrunk toward 0 the way seasonCarryover shrinks a value) -- under
+ * this mechanism the SHRINKAGE comes from the weight itself (how many
+ * pseudo-games of confidence), not from scaling the prior value down
+ * first, which is the more principled parameterization the earlier
+ * (falsified) seeding approach couldn't offer at all.
+ *
+ * Sweeps weight across a small grid on weeks 4 and 6 specifically (the
+ * two that still trail) to see whether any value flips them, and by how
+ * much -- this is a diagnostic, not a calibration; a real sweep/paired
+ * test against CLV or the eventual RMSE metric (Step 4) comes after a
+ * weight looks promising here.
+ */
+export function startSolvePriorWeightTestJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-prior-weight-test", async (job) => {
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+
+    async function buildEpaPerformances(season: number, week: number): Promise<TeamPerformance[]> {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      return buildTeamPerformancesEpa([...gamesById.values()]);
+    }
+
+    log(job, "computing 2024 final-season EPA solve (prior source)...");
+    const seasonWeeks2024 = await getDistinctWeeks("cfb", 2024);
+    const lastWeek2024 = Math.max(...seasonWeeks2024);
+    const performances2024 = await buildEpaPerformances(2024, lastWeek2024);
+    const solve2024 = computeOpponentAdjustedRatings(performances2024);
+    log(job, `2024 EPA solve: ${solve2024.off.size} teams, converged=${solve2024.converged}.`);
+
+    const weightGrid = [0, 2, 5, 10, 20, 40];
+    for (const week of [4, 6]) {
+      const eloState = await computeRatings("cfb", 2025, week);
+      const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", 2025, week);
+      const performances2025 = await buildEpaPerformances(2025, week);
+
+      log(job, `\nweek ${week}:`);
+      for (const weight of weightGrid) {
+        let priors: Map<number, { off: number; def: number; weight: number }> | undefined;
+        if (weight > 0) {
+          priors = new Map();
+          for (const [teamId, off] of solve2024.off) {
+            priors.set(teamId, { off, def: solve2024.def.get(teamId) ?? 0, weight });
+          }
+        }
+        const solve = computeOpponentAdjustedRatings(performances2025, { priors });
+        const composite = new Map<number, number>();
+        for (const teamId of solve.off.keys()) {
+          composite.set(teamId, solve.off.get(teamId)! - solve.def.get(teamId)!);
+        }
+
+        const rows: { elo: number; solve: number; sp: number }[] = [];
+        for (const [teamId, sp] of spDistribution) {
+          const eloRating = eloState.get(teamId)?.rating;
+          const solveVal = composite.get(teamId);
+          if (eloRating === undefined || solveVal === undefined) continue;
+          rows.push({ elo: eloRating, solve: solveVal, sp });
+        }
+        if (rows.length < 20) {
+          log(job, `  weight=${weight}: only ${rows.length} teams in common -- skipping.`);
+          continue;
+        }
+        const eloCorr = pearson(rows.map((r) => r.elo), rows.map((r) => r.sp));
+        const solveCorr = pearson(rows.map((r) => r.solve), rows.map((r) => r.sp));
+        log(
+          job,
+          `  weight=${weight}: n=${rows.length}, converged=${solve.converged} -- Elo=${eloCorr.toFixed(3)}, EPA solve=${solveCorr.toFixed(3)} (delta=${(solveCorr - eloCorr).toFixed(4)}) -- ${solveCorr > eloCorr ? "SOLVE NOW BEATS ELO" : "still trails"}`,
+        );
+      }
     }
   });
 }
