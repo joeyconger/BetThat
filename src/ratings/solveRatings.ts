@@ -17,7 +17,7 @@
  */
 
 import { computeOpponentAdjustedRatings, type TeamPerformance } from "./opponentAdjust.js";
-import { computeFieldPositionSolve, computeFgEfficiency, type RawPlayForSpecialTeams } from "./specialTeams.js";
+import { computeFieldPositionSolve, computeFgEfficiency, residualizeFieldPosition, type RawPlayForSpecialTeams } from "./specialTeams.js";
 
 export interface SolveRatingParams {
   /**
@@ -134,7 +134,19 @@ export function computeSolveRatings(
   // why the raw ST components stay visible even while inert. A team absent
   // from either map (no qualifying field-position drives or FG attempts)
   // gets 0, not an imputed value, per the build spec's missing-data guard.
+  //
+  // Field position is RESIDUALIZED against the EPA off/def solve before
+  // use, not used raw -- Step 2's evaluation found a real (~0.43) but not
+  // extreme correlation between raw field-position DEF and the existing
+  // EPA DEF rating (a genuinely good defense forces more punts and short
+  // fields for reasons unrelated to kicking-game coverage specifically).
+  // Regressing it out here means the ST contribution is, by construction,
+  // the part of field position OFF/DEF doesn't already explain -- same
+  // "regress on rating, keep the residual" technique elo.ts's
+  // excessDispersion already uses. See specialTeams.ts's
+  // residualizeFieldPosition doc for the full reasoning.
   const fieldPositionSolve = computeFieldPositionSolve(stPlays);
+  const fieldPositionResidual = residualizeFieldPosition(fieldPositionSolve.off, fieldPositionSolve.def, solve.off, solve.def);
   const fgEfficiency = computeFgEfficiency(stPlays, params.fgShrinkK ?? 20);
   const fpWeight = params.pointsPerFieldPositionYard ?? 0;
   const fgWeight = params.pointsPerFgAboveExpected ?? 0;
@@ -147,8 +159,8 @@ export function computeSolveRatings(
     const defPoints = params.pointsPerEpaSolve * def;
     const gamesPlayed = (solve.teamDiagnostics.get(teamId)?.gamesPlayed ?? 0) / 2;
 
-    const stFieldPositionOffPoints = fpWeight * (fieldPositionSolve.off.get(teamId) ?? 0);
-    const stFieldPositionDefPoints = fpWeight * (fieldPositionSolve.def.get(teamId) ?? 0);
+    const stFieldPositionOffPoints = fpWeight * (fieldPositionResidual.off.get(teamId) ?? 0);
+    const stFieldPositionDefPoints = fpWeight * (fieldPositionResidual.def.get(teamId) ?? 0);
     const stFgPoints = fgWeight * (fgEfficiency.get(teamId)?.shrunkExcessMakeRate ?? 0);
 
     const rating = offPoints - defPoints + (stFieldPositionOffPoints - stFieldPositionDefPoints) + stFgPoints;

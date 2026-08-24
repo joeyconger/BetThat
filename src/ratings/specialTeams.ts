@@ -240,3 +240,74 @@ export function computeFgEfficiency(
 export function computeFieldPositionSolve(plays: RawPlayForSpecialTeams[]): ReturnType<typeof computeOpponentAdjustedRatings> {
   return computeOpponentAdjustedRatings(buildFieldPositionPerformances(plays));
 }
+
+/** y = intercept + slope*x, the ordinary least squares closed form for one predictor. */
+function fitLine(xs: number[], ys: number[]): { intercept: number; slope: number } {
+  const n = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let cov = 0;
+  let varX = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+    varX += (xs[i]! - meanX) ** 2;
+  }
+  const slope = varX === 0 ? 0 : cov / varX;
+  return { intercept: meanY - slope * meanX, slope };
+}
+
+/**
+ * Regresses field-position off/def (raw solve units) on the corresponding
+ * EPA off/def (raw solve units) across teams, and returns the RESIDUAL --
+ * the part of a team's field-position rating NOT explained by its general
+ * offensive/defensive quality -- instead of the raw field-position value.
+ *
+ * Why: Step 2's evaluation (see the conversation this was built from)
+ * found a real but moderate correlation (~0.43) between the raw field-
+ * position DEF rating and the existing EPA DEF rating -- expected, since
+ * a genuinely good defense forces more punts and creates more short-field
+ * situations for reasons that have nothing to do with kicking-game
+ * coverage specifically, exactly the double-counting risk this file's
+ * header doc already flagged as a design constraint. Rather than just
+ * measuring that overlap and calling it "moderate, not alarming," this
+ * nets it out by construction -- same technique elo.ts's
+ * excessDispersion already uses (regress on rating, keep only the
+ * residual), applied here to field position instead of dispersion.
+ *
+ * A team present in the field-position map but missing from the EPA map
+ * (shouldn't happen in practice -- both are built from the same games)
+ * falls back to its raw, un-residualized field-position value rather than
+ * being dropped, since computeSolveRatings' team set is driven by the EPA
+ * solve and this function must return a value for every team it's asked
+ * about.
+ */
+export function residualizeFieldPosition(
+  fieldPositionOff: Map<number, number>,
+  fieldPositionDef: Map<number, number>,
+  epaOff: Map<number, number>,
+  epaDef: Map<number, number>,
+): { off: Map<number, number>; def: Map<number, number> } {
+  function residualize(fp: Map<number, number>, epa: Map<number, number>): Map<number, number> {
+    const teamIds = [...fp.keys()].filter((id) => epa.has(id));
+    const xs = teamIds.map((id) => epa.get(id)!);
+    const ys = teamIds.map((id) => fp.get(id)!);
+    const result = new Map<number, number>();
+    if (teamIds.length < 20) {
+      // Too few teams to trust a fitted line -- fall back to the raw
+      // value for everyone rather than a noisy regression.
+      for (const [id, v] of fp) result.set(id, v);
+      return result;
+    }
+    const { intercept, slope } = fitLine(xs, ys);
+    for (const [id, v] of fp) {
+      const x = epa.get(id);
+      result.set(id, x === undefined ? v : v - (intercept + slope * x));
+    }
+    return result;
+  }
+
+  return {
+    off: residualize(fieldPositionOff, epaOff),
+    def: residualize(fieldPositionDef, epaDef),
+  };
+}

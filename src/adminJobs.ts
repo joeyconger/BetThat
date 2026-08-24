@@ -2978,6 +2978,130 @@ export function startCfbMoreSegmentsJob(): Promise<JobStatus> {
 }
 
 /**
+ * Calibrates pointsPerEpaSolve (SolveRatingParams) against walk-forward
+ * next-week margin RMSE, with ST weights fixed at 0 throughout -- a
+ * prerequisite for the ST weight sweep, not a variant of it. ST weights
+ * are only meaningful RELATIVE to the OFF/DEF points scale (0.5 points/
+ * yard of field position "means" something different against a base scale
+ * of 50 than against 200) -- sweeping ST weights before this scale is
+ * calibrated would tune one untested placeholder (pointsPerFieldPositionYard)
+ * against another (pointsPerEpaSolve), producing a number that looks
+ * fitted but isn't.
+ *
+ * Candidate values are a grid evaluated via the SAME walk-forward RMSE
+ * discipline as every other calibrated constant in this codebase (prior
+ * weight, EPA-vs-success-rate), not a closed-form in-sample regression --
+ * consistent with this project's established practice of never fitting
+ * and evaluating a constant on the same data.
+ *
+ * Efficiency note: the raw opponent-adjusted OFF/DEF solve doesn't depend
+ * on pointsPerEpaSolve at all (it's a pure linear scale applied AFTER the
+ * solve converges) -- so each checkpoint's plays are fetched and solved
+ * ONCE (at a unit scale of 1), and every candidate's rating is just that
+ * unit rating times the candidate value. This avoids re-querying and
+ * re-solving a whole season's plays once per candidate (10x DB load and
+ * 10x solve time for no reason), and is mathematically exact, not an
+ * approximation -- multiplying a converged off/def solve by a constant
+ * scale gives exactly the same rating computeSolveRatings would produce
+ * running that scale from scratch, since the solve itself is scale-blind.
+ */
+export function startCfbEpaScaleCalibrationJob(): Promise<JobStatus> {
+  return runJob("cfb-epa-scale-calibration", async (job) => {
+    function rmse(errors: number[]): number {
+      return Math.sqrt(errors.reduce((a, b) => a + b * b, 0) / errors.length);
+    }
+    const cfbHfa = getRatingParams("cfb").homeFieldAdvantage;
+
+    async function computeUnitRatings(season: number, week: number) {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      const performances = buildTeamPerformancesEpa([...gamesById.values()]);
+      const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
+      const unitParams: SolveRatingParams = {
+        pointsPerEpaSolve: 1,
+        priorWeight: DEFAULT_SOLVE_RATING_PARAMS.priorWeight,
+        pointsPerFieldPositionYard: 0,
+        pointsPerFgAboveExpected: 0,
+      };
+      return computeSolveRatings(performances, priorSolve, unitParams, []);
+    }
+
+    const candidates = [25, 50, 75, 100, 125, 150, 175, 200, 250, 300];
+    const checkpoints: { season: number; week: number }[] = [];
+    for (const season of [2024, 2025]) {
+      for (let week = 8; week <= 14; week++) checkpoints.push({ season, week });
+    }
+
+    const sumRmseByCandidate = new Map<number, number>(candidates.map((c) => [c, 0]));
+    const nByCandidate = new Map<number, number>(candidates.map((c) => [c, 0]));
+
+    for (const { season, week } of checkpoints) {
+      const nextWeekGames = (await getSeasonGamesForRating("cfb", season, week + 1)).filter((g) => g.week === week + 1);
+      if (nextWeekGames.length < 10) {
+        log(job, `${season} wk${week}: only ${nextWeekGames.length} next-week games -- skipping.`);
+        continue;
+      }
+      const unitRatings = await computeUnitRatings(season, week);
+
+      for (const c of candidates) {
+        const errors: number[] = [];
+        for (const g of nextWeekGames) {
+          const home = unitRatings.get(g.homeTeamId);
+          const away = unitRatings.get(g.awayTeamId);
+          if (!home || !away) continue;
+          const actualMargin = g.homeScore - g.awayScore;
+          errors.push(actualMargin - (c * (home.rating - away.rating) + cfbHfa));
+        }
+        if (errors.length < 10) continue;
+        const r = rmse(errors);
+        sumRmseByCandidate.set(c, sumRmseByCandidate.get(c)! + r);
+        nByCandidate.set(c, nByCandidate.get(c)! + 1);
+      }
+      log(job, `${season} wk${week}: evaluated ${nextWeekGames.length} next-week games across ${candidates.length} candidates`);
+    }
+
+    log(job, `\n=== avg walk-forward margin RMSE by pointsPerEpaSolve candidate ===`);
+    let best = candidates[0]!;
+    let bestAvg = Infinity;
+    for (const c of candidates) {
+      const n = nByCandidate.get(c)!;
+      if (n === 0) {
+        log(job, `pointsPerEpaSolve=${c}: no checkpoints had enough data`);
+        continue;
+      }
+      const avg = sumRmseByCandidate.get(c)! / n;
+      log(job, `pointsPerEpaSolve=${c}: avg RMSE=${avg.toFixed(4)} (n=${n} checkpoints)`);
+      if (avg < bestAvg) {
+        bestAvg = avg;
+        best = c;
+      }
+    }
+    log(job, `\nbest candidate: pointsPerEpaSolve=${best} (avg RMSE=${bestAvg.toFixed(4)}) -- current DEFAULT_SOLVE_RATING_PARAMS value is ${DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve}`);
+  });
+}
+
+/**
  * Step 2 of the special-teams build (see docs/prompts -- this session's
  * conversation has the full spec, not yet saved to a file): does adding
  * the field-position + FG-efficiency ST component move CFB ratings TOWARD
@@ -3299,6 +3423,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-persist-epa-solve-2024": startCfbPersistFinalEpaSolveJob(2024),
   "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
+  "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
 };
 
 /**

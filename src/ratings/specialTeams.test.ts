@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildFieldPositionPerformances, computeFgEfficiency, type RawPlayForSpecialTeams } from "./specialTeams.js";
+import { buildFieldPositionPerformances, computeFgEfficiency, residualizeFieldPosition, type RawPlayForSpecialTeams } from "./specialTeams.js";
 
 const HOME = 1;
 const AWAY = 2;
@@ -133,4 +133,76 @@ test("computeFgEfficiency: a team with zero FG attempts simply doesn't appear in
   const plays: RawPlayForSpecialTeams[] = [fgPlay(1, true, 20), fgPlay(1, false, 20)];
   const results = computeFgEfficiency(plays, 10);
   assert.equal(results.has(2), false);
+});
+
+function mapFromPairs(pairs: [number, number][]): Map<number, number> {
+  return new Map(pairs);
+}
+
+test("residualizeFieldPosition: a PERFECT linear relationship with EPA leaves zero residual for everyone", () => {
+  // fieldPosition = 2*epa + 3 exactly, for 20 teams -- OLS should fit this
+  // exactly (R²=1), so every residual is 0.
+  const epaPairs: [number, number][] = [];
+  const fpPairs: [number, number][] = [];
+  for (let teamId = 1; teamId <= 20; teamId++) {
+    const epa = teamId * 0.1;
+    epaPairs.push([teamId, epa]);
+    fpPairs.push([teamId, 2 * epa + 3]);
+  }
+  const epaOff = mapFromPairs(epaPairs);
+  const fpOff = mapFromPairs(fpPairs);
+  const result = residualizeFieldPosition(fpOff, fpOff, epaOff, epaOff);
+  for (const teamId of epaOff.keys()) {
+    assert.ok(Math.abs(result.off.get(teamId)!) < 1e-9, `team ${teamId} residual should be ~0`);
+  }
+});
+
+test("residualizeFieldPosition: a team with a genuine excess over the fitted line keeps exactly that excess as its residual", () => {
+  const epaPairs: [number, number][] = [];
+  const fpPairs: [number, number][] = [];
+  for (let teamId = 1; teamId <= 20; teamId++) {
+    const epa = teamId * 0.1;
+    epaPairs.push([teamId, epa]);
+    // Team 1 gets a +5 bonus on top of the perfect line every other team follows.
+    fpPairs.push([teamId, 2 * epa + 3 + (teamId === 1 ? 5 : 0)]);
+  }
+  const epaOff = mapFromPairs(epaPairs);
+  const fpOff = mapFromPairs(fpPairs);
+  const result = residualizeFieldPosition(fpOff, fpOff, epaOff, epaOff);
+  // Team 1's excess pulls the fitted line slightly, so its residual won't
+  // be EXACTLY 5, but it should be by far the largest residual and clearly positive.
+  const residuals = [...result.off.entries()];
+  const team1Residual = result.off.get(1)!;
+  const maxOtherResidual = Math.max(...residuals.filter(([id]) => id !== 1).map(([, v]) => Math.abs(v)));
+  assert.ok(team1Residual > 0, "team 1's residual should be positive");
+  assert.ok(team1Residual > maxOtherResidual, "team 1's residual should dwarf every other team's");
+});
+
+test("residualizeFieldPosition: fewer than 20 teams falls back to the raw, un-residualized value", () => {
+  const epaOff = mapFromPairs([
+    [1, 0.1],
+    [2, 0.2],
+  ]);
+  const fpOff = mapFromPairs([
+    [1, 10],
+    [2, -10],
+  ]);
+  const result = residualizeFieldPosition(fpOff, fpOff, epaOff, epaOff);
+  assert.equal(result.off.get(1), 10);
+  assert.equal(result.off.get(2), -10);
+});
+
+test("residualizeFieldPosition: a team missing from the EPA map falls back to its raw field-position value", () => {
+  const epaPairs: [number, number][] = [];
+  const fpPairs: [number, number][] = [];
+  for (let teamId = 1; teamId <= 20; teamId++) {
+    epaPairs.push([teamId, teamId * 0.1]);
+    fpPairs.push([teamId, teamId * 0.2]);
+  }
+  // Team 21 has field-position data but no EPA data.
+  fpPairs.push([21, 42]);
+  const epaOff = mapFromPairs(epaPairs);
+  const fpOff = mapFromPairs(fpPairs);
+  const result = residualizeFieldPosition(fpOff, fpOff, epaOff, epaOff);
+  assert.equal(result.off.get(21), 42);
 });
