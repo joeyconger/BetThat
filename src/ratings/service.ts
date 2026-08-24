@@ -1,11 +1,11 @@
 import {
   getSeasonGamesForRating,
   getPriorSeasonFinalRating,
-  getPriorSeasonSpRating,
-  getReturningProductionDistribution,
   getCfbdEloDistributionForWeek,
   getCfbdSpDistributionForSeason,
   getManualSpWeeklyDistributionForWeek,
+  getPlaysForSeasonThroughWeek,
+  getPriorSeasonEpaSolve,
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
@@ -15,6 +15,8 @@ import {
 import type { Sport } from "../db/repo.js";
 import { getRatingParams, type RatingParams } from "./config.js";
 import { computeSeasonRatings, computeInitialRating, predictSpread, zScore, type TeamRatingState } from "./elo.js";
+import { buildTeamPerformancesEpa, type GamePlaysGroup } from "./gamePerformance.js";
+import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./solveRatings.js";
 
 const METHOD = "elo" as const;
 
@@ -31,6 +33,20 @@ const MIN_WEEKLY_SP_SAMPLE = 20;
  * callers (the matchup-sim UI page) don't upsert team_ratings on every
  * page view; computeAndStoreRatings below is the persisting wrapper admin
  * jobs and predictAndStoreWeek actually use.
+ *
+ * CFB uses the iterative opponent-adjustment solve (solveRatings.ts) as
+ * the primary rating engine -- see docs/prompts/iterative-solve-replaces-elo.md
+ * for the real-data justification (Step 1's 8-checkpoint correlation
+ * comparison against SP+). NFL has no raw-play/PPA ingestion, so it stays
+ * on the incremental Elo path (elo.ts's computeSeasonRatings) unchanged.
+ *
+ * `paramsOverride` for CFB no longer has the effect it used to for the
+ * Elo-specific fields it doesn't share with the new engine (baseK,
+ * sosWeight, errorCapPoints, varianceShrinkK, the pointsPerX additive
+ * components, etc. -- see config.ts's RatingParams doc for the full dead
+ * list) -- those sweeps/paired-tests still run without erroring, they
+ * just no longer change anything for CFB. This is the expected, planned
+ * consequence of the rebuild, not a bug.
  */
 export async function computeRatings(
   sport: Sport,
@@ -38,8 +54,59 @@ export async function computeRatings(
   throughWeek: number,
   paramsOverride?: RatingParams,
 ): Promise<Map<number, TeamRatingState>> {
-  const params = paramsOverride ?? getRatingParams(sport);
-  const games = await getSeasonGamesForRating(sport, season, throughWeek);
+  if (sport === "cfb") {
+    return computeCfbSolveRatings(season, throughWeek);
+  }
+  return computeNflEloRatings(season, throughWeek, paramsOverride);
+}
+
+/** The new primary CFB engine -- see computeRatings' doc. */
+async function computeCfbSolveRatings(season: number, throughWeek: number): Promise<Map<number, TeamRatingState>> {
+  const plays = await getPlaysForSeasonThroughWeek("cfb", season, throughWeek);
+  const gamesById = new Map<number, GamePlaysGroup>();
+  for (const p of plays) {
+    let g = gamesById.get(p.gameId);
+    if (!g) {
+      g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+      gamesById.set(p.gameId, g);
+    }
+    g.plays.push({
+      offenseTeamId: p.offenseTeamId,
+      defenseTeamId: p.defenseTeamId,
+      down: p.down,
+      distance: p.distance,
+      yardsGained: p.yardsGained,
+      playType: p.playType,
+      offenseScore: p.offenseScore,
+      defenseScore: p.defenseScore,
+      period: p.period,
+      clockMinutes: p.clockMinutes,
+      clockSeconds: p.clockSeconds,
+      ppa: p.ppa,
+    });
+  }
+  const performances = buildTeamPerformancesEpa([...gamesById.values()]);
+  const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
+  const solveRatings = computeSolveRatings(performances, priorSolve, DEFAULT_SOLVE_RATING_PARAMS);
+
+  const state = new Map<number, TeamRatingState>();
+  for (const [teamId, r] of solveRatings) {
+    state.set(teamId, {
+      rating: r.rating,
+      gamesPlayed: r.gamesPlayed,
+      dispersion: 0, // Step 3 (deferred) will re-point this at solve residuals.
+      excessDispersion: 0,
+      offRating: r.offPoints,
+      defRating: r.defPoints,
+    });
+  }
+  return state;
+}
+
+/** The old incremental Elo engine -- still the NFL path (no raw-play/PPA ingestion for NFL, see solveRatings.ts's module doc), unchanged from before this rebuild. */
+async function computeNflEloRatings(season: number, throughWeek: number, paramsOverride?: RatingParams): Promise<Map<number, TeamRatingState>> {
+  const params = paramsOverride ?? getRatingParams("nfl");
+  const games = await getSeasonGamesForRating("nfl", season, throughWeek);
 
   const teamIds = new Set<number>();
   for (const game of games) {
@@ -47,31 +114,11 @@ export async function computeRatings(
     teamIds.add(game.awayTeamId);
   }
 
-  // Fetched once (not per-team) since the league average needs every
-  // team's value regardless -- see getReturningProductionDistribution's
-  // doc and RatingParams.returningProductionPoints'. CFB-only; NFL's map
-  // is always empty since there's no ingestion source for it, same
-  // "empty distribution -> no-op for everyone" pattern as spDistribution/
-  // eloDistribution in predictAndStoreWeek below.
-  const returningProductionDistribution =
-    sport === "cfb" ? await getReturningProductionDistribution(sport, season) : new Map<number, number>();
-  const returningProductionValues = [...returningProductionDistribution.values()];
-  const returningProductionLeagueAverage =
-    returningProductionValues.length > 0
-      ? returningProductionValues.reduce((sum, v) => sum + v, 0) / returningProductionValues.length
-      : undefined;
-
   const initialRatings = new Map<number, number>();
   for (const teamId of teamIds) {
-    const priorRating = await getPriorSeasonFinalRating(teamId, sport, season - 1, METHOD);
-    const priorSp = sport === "cfb" ? await getPriorSeasonSpRating(teamId, season - 1) : undefined;
-    const teamReturningProduction = returningProductionDistribution.get(teamId);
-    const returningProductionDeviation =
-      teamReturningProduction !== undefined && returningProductionLeagueAverage !== undefined
-        ? teamReturningProduction - returningProductionLeagueAverage
-        : undefined;
-    if (priorRating !== undefined || priorSp !== undefined || returningProductionDeviation !== undefined) {
-      initialRatings.set(teamId, computeInitialRating(priorRating, priorSp, returningProductionDeviation, params));
+    const priorRating = await getPriorSeasonFinalRating(teamId, "nfl", season - 1, METHOD);
+    if (priorRating !== undefined) {
+      initialRatings.set(teamId, computeInitialRating(priorRating, undefined, undefined, params));
     }
   }
 

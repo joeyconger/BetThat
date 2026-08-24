@@ -170,6 +170,21 @@ export interface TeamRatingState {
    * league-wide fit isn't trusted yet -- see MIN_DISPERSION_FIT_TEAMS).
    */
   excessDispersion: number;
+  /**
+   * Offense/defense decomposition, points-vs-average-team scale --
+   * present for CFB (ratings/solveRatings.ts's engine, `rating` is exactly
+   * offRating - defRating there), undefined for NFL (still on the
+   * incremental Elo path, elo.ts's computeSeasonRatings below, which has
+   * no offense/defense split at all). In-memory only for now, not
+   * persisted to team_ratings' schema (single `rating` column,
+   * migration 0001) -- same "compute on demand, don't persist" precedent
+   * already set by dispersion/excessDispersion above; the solve converges
+   * in roughly a second for a full CFB season, so recompute cost is low.
+   * Revisit persisting this if that stops being true or a live page's
+   * load time needs it.
+   */
+  offRating?: number;
+  defRating?: number;
 }
 
 /**
