@@ -83,7 +83,7 @@ import { computeInitialRating } from "./ratings/elo.js";
 import { computeRatings, computeAndStoreRatings, generateBacktestPredictionsForWeek } from "./ratings/service.js";
 import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./ratings/solveRatings.js";
 import type { SolveRatingParams } from "./ratings/solveRatings.js";
-import { computeFieldPositionSolve } from "./ratings/specialTeams.js";
+import { computeFieldPositionSolve, residualizeFieldPosition, computeFgEfficiency } from "./ratings/specialTeams.js";
 import type { RawPlayForSpecialTeams } from "./ratings/specialTeams.js";
 import type { Sport } from "./db/repo.js";
 
@@ -3129,6 +3129,190 @@ export function startCfbEpaScaleCalibrationJob(): Promise<JobStatus> {
  * yard-of-field-position range once the off-def composite's typical
  * spread is accounted for), not derived or fit.
  */
+/**
+ * Step 3 of the special-teams build: sweeps the ST weight params
+ * (pointsPerFieldPositionYard, pointsPerFgAboveExpected) against
+ * walk-forward next-week margin RMSE -- the spec's own criterion ("Sweep
+ * the ST weights on margin RMSE, not CLV, not on how the top 25 looks"),
+ * run only AFTER pointsPerEpaSolve's own base-scale calibration
+ * (cfb-epa-scale-calibration) and field position's residualization
+ * against DEF (specialTeams.ts's residualizeFieldPosition) -- both
+ * prerequisites for this sweep to be interpretable rather than tuning one
+ * uncalibrated placeholder against another.
+ *
+ * fgShrinkK is held at its documented default (20), not swept here -- the
+ * spec calls out sweeping the WEIGHTS, and shrinkage is a different kind
+ * of parameter (how much a per-team estimate is trusted, not how much
+ * that estimate matters to the final rating); revisit separately if this
+ * sweep's results look sensitive to it.
+ *
+ * Efficiency: same trick as the base-scale calibration job -- each
+ * checkpoint's raw EPA solve, residualized field-position off/def, and FG
+ * shrunkExcessMakeRate are computed ONCE (all independent of the weight
+ * params being swept), then every (fpWeight, fgWeight) grid point is just
+ * arithmetic on those already-computed per-team values. Avoids re-fetching
+ * and re-solving a whole season's plays once per grid point (25x DB load
+ * and solve time for no reason).
+ */
+export function startCfbStWeightSweepJob(): Promise<JobStatus> {
+  return runJob("cfb-st-weight-sweep", async (job) => {
+    function rmse(errors: number[]): number {
+      return Math.sqrt(errors.reduce((a, b) => a + b * b, 0) / errors.length);
+    }
+    const cfbHfa = getRatingParams("cfb").homeFieldAdvantage;
+    const epaScale = DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve;
+    const fgShrinkK = DEFAULT_SOLVE_RATING_PARAMS.fgShrinkK ?? 20;
+
+    interface CheckpointData {
+      epaOff: Map<number, number>;
+      epaDef: Map<number, number>;
+      fpResidualOff: Map<number, number>;
+      fpResidualDef: Map<number, number>;
+      fgExcess: Map<number, number>;
+      nextWeekGames: { homeTeamId: number; awayTeamId: number; homeScore: number; awayScore: number }[];
+    }
+
+    async function buildCheckpointData(season: number, week: number): Promise<CheckpointData | null> {
+      const nextWeekGames = (await getSeasonGamesForRating("cfb", season, week + 1)).filter((g) => g.week === week + 1);
+      if (nextWeekGames.length < 10) return null;
+
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      const performances = buildTeamPerformancesEpa([...gamesById.values()]);
+      const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
+      const priors =
+        priorSolve && DEFAULT_SOLVE_RATING_PARAMS.priorWeight > 0
+          ? new Map([...priorSolve].map(([teamId, p]) => [teamId, { off: p.off, def: p.def, weight: DEFAULT_SOLVE_RATING_PARAMS.priorWeight }] as const))
+          : undefined;
+      const epaSolve = computeOpponentAdjustedRatings(performances, { priors });
+
+      const stPlays: RawPlayForSpecialTeams[] = plays.map((p) => ({
+        gameId: p.gameId,
+        homeTeamId: p.homeTeamId,
+        awayTeamId: p.awayTeamId,
+        offenseTeamId: p.offenseTeamId,
+        playType: p.playType,
+        driveId: p.driveId,
+        driveNumber: p.driveNumber,
+        playNumber: p.playNumber,
+        yardsToGoal: p.yardsToGoal,
+      }));
+      const fieldPositionSolve = computeFieldPositionSolve(stPlays);
+      const fpResidual = residualizeFieldPosition(fieldPositionSolve.off, fieldPositionSolve.def, epaSolve.off, epaSolve.def);
+      const fgEfficiency = computeFgEfficiency(stPlays, fgShrinkK);
+      const fgExcess = new Map<number, number>([...fgEfficiency].map(([teamId, r]) => [teamId, r.shrunkExcessMakeRate]));
+
+      return {
+        epaOff: epaSolve.off,
+        epaDef: epaSolve.def,
+        fpResidualOff: fpResidual.off,
+        fpResidualDef: fpResidual.def,
+        fgExcess,
+        nextWeekGames,
+      };
+    }
+
+    function ratingAt(data: CheckpointData, teamId: number, fpWeight: number, fgWeight: number): number | null {
+      const off = data.epaOff.get(teamId);
+      const def = data.epaDef.get(teamId);
+      if (off === undefined || def === undefined) return null;
+      const epaPoints = epaScale * (off - def);
+      const fpPoints = fpWeight * ((data.fpResidualOff.get(teamId) ?? 0) - (data.fpResidualDef.get(teamId) ?? 0));
+      const fgPoints = fgWeight * (data.fgExcess.get(teamId) ?? 0);
+      return epaPoints + fpPoints + fgPoints;
+    }
+
+    const fpCandidates = [0, 0.1, 0.25, 0.5, 1.0];
+    const fgCandidates = [0, 0.5, 1.5, 3.0, 6.0];
+
+    const checkpoints: { season: number; week: number }[] = [];
+    for (const season of [2024, 2025]) {
+      for (let week = 8; week <= 14; week++) checkpoints.push({ season, week });
+    }
+
+    const sumRmse = new Map<string, number>();
+    const nCheckpoints = new Map<string, number>();
+    for (const fp of fpCandidates) {
+      for (const fg of fgCandidates) {
+        sumRmse.set(`${fp}|${fg}`, 0);
+        nCheckpoints.set(`${fp}|${fg}`, 0);
+      }
+    }
+
+    for (const { season, week } of checkpoints) {
+      const data = await buildCheckpointData(season, week);
+      if (!data) {
+        log(job, `${season} wk${week}: not enough next-week games -- skipping.`);
+        continue;
+      }
+      for (const fp of fpCandidates) {
+        for (const fg of fgCandidates) {
+          const errors: number[] = [];
+          for (const g of data.nextWeekGames) {
+            const home = ratingAt(data, g.homeTeamId, fp, fg);
+            const away = ratingAt(data, g.awayTeamId, fp, fg);
+            if (home === null || away === null) continue;
+            const actualMargin = g.homeScore - g.awayScore;
+            errors.push(actualMargin - (home - away + cfbHfa));
+          }
+          if (errors.length < 10) continue;
+          const key = `${fp}|${fg}`;
+          sumRmse.set(key, sumRmse.get(key)! + rmse(errors));
+          nCheckpoints.set(key, nCheckpoints.get(key)! + 1);
+        }
+      }
+      log(job, `${season} wk${week}: evaluated ${data.nextWeekGames.length} next-week games across ${fpCandidates.length * fgCandidates.length} weight combos`);
+    }
+
+    log(job, `\n=== avg walk-forward margin RMSE by (pointsPerFieldPositionYard, pointsPerFgAboveExpected) ===`);
+    let best = { fp: 0, fg: 0 };
+    let bestAvg = Infinity;
+    let baselineAvg: number | null = null;
+    for (const fp of fpCandidates) {
+      for (const fg of fgCandidates) {
+        const key = `${fp}|${fg}`;
+        const n = nCheckpoints.get(key)!;
+        if (n === 0) continue;
+        const avg = sumRmse.get(key)! / n;
+        log(job, `fp=${fp}, fg=${fg}: avg RMSE=${avg.toFixed(4)} (n=${n})`);
+        if (fp === 0 && fg === 0) baselineAvg = avg;
+        if (avg < bestAvg) {
+          bestAvg = avg;
+          best = { fp, fg };
+        }
+      }
+    }
+    log(
+      job,
+      `\nbest combo: pointsPerFieldPositionYard=${best.fp}, pointsPerFgAboveExpected=${best.fg} (avg RMSE=${bestAvg.toFixed(4)}) -- baseline (0,0) avg RMSE=${baselineAvg?.toFixed(4) ?? "n/a"}`,
+    );
+    if (best.fp === 0 && best.fg === 0) {
+      log(job, `NULL RESULT: no nonzero ST weight combo beat the (0,0) baseline on margin RMSE at this grid resolution. Leaving weights at 0 is the legitimate conclusion here, not a failure to find the right value -- per the build spec, this is an outcome to document, not push past.`);
+    }
+  });
+}
+
 export function startCfbSpecialTeamsEvaluationJob(): Promise<JobStatus> {
   return runJob("cfb-st-evaluation", async (job) => {
     const teamNameToId = await getTeamNameToIdMap("cfb");
@@ -3424,6 +3608,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
   "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
+  "cfb-st-weight-sweep": startCfbStWeightSweepJob,
 };
 
 /**
