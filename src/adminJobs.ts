@@ -3611,6 +3611,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-rawplays-2026": startCfbRawPlaysCurrentSeasonJob(2026),
   "cfb-odds-current": startCfbOddsCurrentJob,
   "cfb-live-predictions-2026": startCfbLivePredictionsJob(2026),
+  "cfb-2026-schedule-diagnose": startCfb2026ScheduleDiagnoseJob,
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
   "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
   "cfb-st-weight-sweep": startCfbStWeightSweepJob,
@@ -4997,4 +4998,41 @@ export function startCfbLivePredictionsJob(year: number): () => Promise<JobStatu
       }
       log(job, "done -- /slate should now reflect live 2026 predictions.");
     });
+}
+
+/**
+ * One-off diagnostic: pulls CFBD's raw, unfiltered /games response for
+ * 2026 directly (no team-resolution, no FBS-only filtering, nothing
+ * written to the DB) to answer "where are this week's games" -- our
+ * synced games table shows week=1 starting 2026-08-29 as the earliest
+ * date, nothing before it, and the user expects real games THIS week.
+ * Two possible explanations to distinguish: (a) CFBD's raw data has
+ * nothing earlier either (the games genuinely aren't in their system
+ * yet), or (b) CFBD has early games that syncCfbdGames.ts's FBS-only
+ * filter (both home and away must resolve against our `teams` table) is
+ * silently dropping -- e.g. a marquee FBS-vs-FCS opener. Reports the 20
+ * earliest-dated games with their week number, teams, and whether each
+ * side is a currently-tracked FBS team, so that's visible without
+ * guessing. Delete once the real answer is known and (if needed) acted on.
+ */
+export function startCfb2026ScheduleDiagnoseJob(): Promise<JobStatus> {
+  return runJob("cfb-2026-schedule-diagnose", async (job) => {
+    const games = await getGames(2026, "regular");
+    log(job, `CFBD raw /games?year=2026&seasonType=regular: ${games.length} total rows (all divisions, unfiltered)`);
+
+    const weeks = [...new Set(games.map((g) => g.week))].sort((a, b) => a - b);
+    log(job, `distinct week values present: ${weeks.join(", ")}`);
+
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const sorted = [...games].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+    log(job, `\n=== 20 earliest-dated games (any week, any division) ===`);
+    for (const g of sorted.slice(0, 20)) {
+      const homeTracked = teamNameToId.has(g.homeTeam);
+      const awayTracked = teamNameToId.has(g.awayTeam);
+      log(
+        job,
+        `week=${g.week} ${g.startDate} -- ${g.awayTeam}${awayTracked ? "" : " (NOT in our FBS teams table)"} @ ${g.homeTeam}${homeTracked ? "" : " (NOT in our FBS teams table)"}`,
+      );
+    }
+  });
 }
