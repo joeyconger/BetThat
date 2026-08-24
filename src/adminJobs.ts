@@ -27,6 +27,7 @@ import {
   getPriorSeasonSpRating,
   getManualSpWeeklyDistributionForWeek,
   getCfbdSpDistributionForSeason,
+  upsertExternalRating,
   getDistinctWeeks,
   getSeasonGamesForRating,
   getReturningProductionDistribution,
@@ -3051,6 +3052,9 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-solve-epa-hypothesis-test": startSolveEpaHypothesisTestJob,
   "cfb-solve-prior-weight-test": startSolvePriorWeightTestJob,
   "cfb-solve-prior-weight-full-checkpoint-test": startSolvePriorWeightFullCheckpointTestJob,
+  "cfb-persist-epa-solve-2023": startCfbPersistFinalEpaSolveJob(2023),
+  "cfb-persist-epa-solve-2024": startCfbPersistFinalEpaSolveJob(2024),
+  "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
 };
 
 /**
@@ -4283,4 +4287,65 @@ export function startSolvePriorWeightFullCheckpointTestJob(): Promise<JobStatus>
     const spDistribution2023 = await getCfbdSpDistributionForSeason("cfb", 2023);
     await checkpoint(`2023 final (week ${lastWeek2023}) -- no valid prior source, weight=0 only`, 2023, lastWeek2023, eloState2023, spDistribution2023, null, [0]);
   });
+}
+
+/**
+ * LOAD-BEARING, not diagnostic: persists a season's final-week EPA solve
+ * (external_ratings, own_epa_solve_off/def, migration 0016) so the NEXT
+ * season's computeRatings("cfb", ...) call (service.ts, now the primary
+ * CFB engine) has a real prior to blend in via weight=2 pseudo-games,
+ * instead of silently falling back to cold-start behavior because
+ * getPriorSeasonEpaSolve found nothing. Must be run for a season BEFORE
+ * that season is usable as a prior for the next one -- run for 2023 and
+ * 2024 to bootstrap 2024's and 2025's priors respectively (2025 itself
+ * can be persisted too, harmless, just not needed until a 2026 season
+ * exists). Computes fresh via computeOpponentAdjustedRatings directly
+ * (NOT via computeRatings, which now IS this same solve for CFB --
+ * calling it here would be circular).
+ */
+export function startCfbPersistFinalEpaSolveJob(season: number): () => Promise<JobStatus> {
+  return () =>
+    runJob(`cfb-persist-epa-solve-${season}`, async (job) => {
+      const seasonWeeks = await getDistinctWeeks("cfb", season);
+      if (seasonWeeks.length === 0) {
+        log(job, `${season}: no games found -- nothing to persist.`);
+        return;
+      }
+      const lastWeek = Math.max(...seasonWeeks);
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, lastWeek);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      const performances = buildTeamPerformancesEpa([...gamesById.values()]);
+      const solve = computeOpponentAdjustedRatings(performances);
+      log(job, `${season} final week ${lastWeek}: ${solve.off.size} teams, converged=${solve.converged}, ${solve.iterations} iterations.`);
+
+      let written = 0;
+      for (const [teamId, off] of solve.off) {
+        const def = solve.def.get(teamId)!;
+        await upsertExternalRating({ teamId, season, week: null, source: "own_epa_solve_off", rating: off });
+        await upsertExternalRating({ teamId, season, week: null, source: "own_epa_solve_def", rating: def });
+        written += 1;
+      }
+      log(job, `persisted ${written} teams' off/def to external_ratings.`);
+    });
 }
