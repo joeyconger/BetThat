@@ -106,4 +106,6 @@ test("computeSolveRatings: a nonzero priorWeight actually pulls the rating towar
 test("DEFAULT_SOLVE_RATING_PARAMS matches the calibrated values documented in solveRatings.ts", () => {
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.priorWeight, 2);
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve, 60);
+  assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerFieldPositionYard, 0.5);
+  assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerFgAboveExpected, 0, "documented null result, not an unfinished placeholder");
 });

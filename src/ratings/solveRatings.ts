@@ -64,28 +64,50 @@ export interface SolveRatingParams {
   priorWeight: number;
   /**
    * Points-scale weight for the field-position special-teams component
-   * (ratings/specialTeams.ts's off/def solve, raw units are "field
-   * position score" ~= 100-yardsToGoal). Optional, defaults to 0 (inert)
-   * -- established pattern for a new, uncalibrated component: the raw
-   * component is always computed (so it's visible for evaluation/
-   * diagnostics), but contributes nothing to `rating` until this is
-   * deliberately set away from 0 via Step 3's RMSE sweep.
+   * (ratings/specialTeams.ts's off/def solve, RESIDUALIZED against the
+   * EPA off/def solve -- see residualizeFieldPosition's doc -- raw units
+   * are "field position score" ~= 100-yardsToGoal).
+   *
+   * Calibrated value: 0.5. Real-data grid sweep (walk-forward next-week
+   * margin RMSE, same 12 checkpoints as pointsPerEpaSolve's calibration,
+   * run AFTER that calibration and the residualization were both in
+   * place) found a smooth, unimodal curve: 0->15.53, 0.1->15.48,
+   * 0.25->15.43, 0.5->15.41 (minimum), 1.0->15.58 (worse than the 0
+   * baseline) -- 0.5 is genuinely bracketed by worse tested values on
+   * both sides, not sitting at an unexplored grid edge. Notably, an
+   * earlier evaluation pass (before the base-scale fix and
+   * residualization) found a similar-sized weight made RMSE WORSE --
+   * the sign flip has a clear mechanical explanation (double-counting
+   * with DEF EPA masking the real signal, an uncalibrated base scale
+   * distorting the comparison), not just "a different number came out."
+   * Effect size is modest (~0.8% RMSE improvement); this was one
+   * exploratory grid, not a held-out confirmation.
    */
   pointsPerFieldPositionYard?: number;
   /**
    * Points-scale weight for the FG-efficiency special-teams component
-   * (specialTeams.ts's shrunkExcessMakeRate). Optional, defaults to 0
-   * (inert), same reasoning as pointsPerFieldPositionYard above.
+   * (specialTeams.ts's shrunkExcessMakeRate).
+   *
+   * Calibrated value: 0 -- a documented NULL result, not an unfinished
+   * placeholder. The same grid sweep found fg=0 was the best choice at
+   * EVERY field-position weight tested, with RMSE degrading monotonically
+   * as the FG weight increased at every level -- no local minimum away
+   * from 0 anywhere on the grid. Per the build spec's own instruction,
+   * this is a legitimate outcome to document, not push past by trying
+   * larger weights or a different shrinkage constant without a new reason
+   * to think either would help.
    */
   pointsPerFgAboveExpected?: number;
   /**
    * Shrinkage constant for FG efficiency (specialTeams.ts's
    * computeFgEfficiency) -- NOT a weight, so it does NOT default to 0 (a
    * shrinkage of 0 would mean no regression at all on a ~17-18-attempt/
-   * season sample, defeating the point). Optional, defaults to 20 (roughly
-   * a season's worth of attempts) if omitted -- like pointsPerEpaSolve,
-   * this is an untested starting order of magnitude, not a derived value.
-   * Needs Step 3 calibration.
+   * season sample, defeating the point). 20 was NOT swept independently
+   * (the build spec calls for sweeping the WEIGHTS; shrinkage is a
+   * different kind of parameter -- how much a per-team estimate is
+   * trusted, not how much it matters to the final rating) -- still an
+   * untested starting order of magnitude. Moot at pointsPerFgAboveExpected=0
+   * today, but revisit if FG is ever reconsidered.
    */
   fgShrinkK?: number;
 }
@@ -94,7 +116,7 @@ export interface SolveRatingParams {
 export const DEFAULT_SOLVE_RATING_PARAMS: SolveRatingParams = {
   pointsPerEpaSolve: 60,
   priorWeight: 2,
-  pointsPerFieldPositionYard: 0,
+  pointsPerFieldPositionYard: 0.5,
   pointsPerFgAboveExpected: 0,
   fgShrinkK: 20,
 };
