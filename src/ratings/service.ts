@@ -17,6 +17,7 @@ import { getRatingParams, type RatingParams } from "./config.js";
 import { computeSeasonRatings, computeInitialRating, predictSpread, zScore, type TeamRatingState } from "./elo.js";
 import { buildTeamPerformancesEpa, type GamePlaysGroup } from "./gamePerformance.js";
 import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./solveRatings.js";
+import type { RawPlayForSpecialTeams } from "./specialTeams.js";
 
 const METHOD = "elo" as const;
 
@@ -87,7 +88,18 @@ async function computeCfbSolveRatings(season: number, throughWeek: number): Prom
   }
   const performances = buildTeamPerformancesEpa([...gamesById.values()]);
   const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
-  const solveRatings = computeSolveRatings(performances, priorSolve, DEFAULT_SOLVE_RATING_PARAMS);
+  const stPlays: RawPlayForSpecialTeams[] = plays.map((p) => ({
+    gameId: p.gameId,
+    homeTeamId: p.homeTeamId,
+    awayTeamId: p.awayTeamId,
+    offenseTeamId: p.offenseTeamId,
+    playType: p.playType,
+    driveId: p.driveId,
+    driveNumber: p.driveNumber,
+    playNumber: p.playNumber,
+    yardsToGoal: p.yardsToGoal,
+  }));
+  const solveRatings = computeSolveRatings(performances, priorSolve, DEFAULT_SOLVE_RATING_PARAMS, stPlays);
 
   const state = new Map<number, TeamRatingState>();
   for (const [teamId, r] of solveRatings) {
@@ -98,6 +110,9 @@ async function computeCfbSolveRatings(season: number, throughWeek: number): Prom
       excessDispersion: 0,
       offRating: r.offPoints,
       defRating: r.defPoints,
+      stFieldPositionOffPoints: r.stFieldPositionOffPoints,
+      stFieldPositionDefPoints: r.stFieldPositionDefPoints,
+      stFgPoints: r.stFgPoints,
     });
   }
   return state;

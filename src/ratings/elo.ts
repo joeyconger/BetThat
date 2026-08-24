@@ -185,6 +185,20 @@ export interface TeamRatingState {
    */
   offRating?: number;
   defRating?: number;
+  /**
+   * Special-teams decomposition (ratings/specialTeams.ts), points scale,
+   * same in-memory-only/CFB-only precedent as offRating/defRating above.
+   * Kept separate from offRating/defRating (not folded into them) so the
+   * matchup UI can show which piece -- OFF, DEF, field position, or FG --
+   * is actually driving a team's rating, per the build spec. 0 whenever
+   * the ST weight params are 0 (the default -- see SolveRatingParams),
+   * even though the underlying raw components are still computed, so
+   * turning ST on/off never changes which fields are populated, only
+   * their values.
+   */
+  stFieldPositionOffPoints?: number;
+  stFieldPositionDefPoints?: number;
+  stFgPoints?: number;
 }
 
 /**

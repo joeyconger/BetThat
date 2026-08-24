@@ -17,6 +17,7 @@
  */
 
 import { computeOpponentAdjustedRatings, type TeamPerformance } from "./opponentAdjust.js";
+import { computeFieldPositionSolve, computeFgEfficiency, type RawPlayForSpecialTeams } from "./specialTeams.js";
 
 export interface SolveRatingParams {
   /**
@@ -47,21 +48,59 @@ export interface SolveRatingParams {
    * that sweep. 0 disables the prior entirely (cold start, no seeding).
    */
   priorWeight: number;
+  /**
+   * Points-scale weight for the field-position special-teams component
+   * (ratings/specialTeams.ts's off/def solve, raw units are "field
+   * position score" ~= 100-yardsToGoal). Optional, defaults to 0 (inert)
+   * -- established pattern for a new, uncalibrated component: the raw
+   * component is always computed (so it's visible for evaluation/
+   * diagnostics), but contributes nothing to `rating` until this is
+   * deliberately set away from 0 via Step 3's RMSE sweep.
+   */
+  pointsPerFieldPositionYard?: number;
+  /**
+   * Points-scale weight for the FG-efficiency special-teams component
+   * (specialTeams.ts's shrunkExcessMakeRate). Optional, defaults to 0
+   * (inert), same reasoning as pointsPerFieldPositionYard above.
+   */
+  pointsPerFgAboveExpected?: number;
+  /**
+   * Shrinkage constant for FG efficiency (specialTeams.ts's
+   * computeFgEfficiency) -- NOT a weight, so it does NOT default to 0 (a
+   * shrinkage of 0 would mean no regression at all on a ~17-18-attempt/
+   * season sample, defeating the point). Optional, defaults to 20 (roughly
+   * a season's worth of attempts) if omitted -- like pointsPerEpaSolve,
+   * this is an untested starting order of magnitude, not a derived value.
+   * Needs Step 3 calibration.
+   */
+  fgShrinkK?: number;
 }
 
 /** See each field's own doc for why these specific values, not a placeholder pair. */
 export const DEFAULT_SOLVE_RATING_PARAMS: SolveRatingParams = {
   pointsPerEpaSolve: 100,
   priorWeight: 2,
+  pointsPerFieldPositionYard: 0,
+  pointsPerFgAboveExpected: 0,
+  fgShrinkK: 20,
 };
 
 export interface SolveTeamRating {
-  /** offPoints - defPoints -- the single scalar ratings/elo.ts's predictSpread needs (rating differential + home field advantage). */
+  /** offPoints - defPoints + (stFieldPositionOffPoints - stFieldPositionDefPoints) + stFgPoints -- the single scalar ratings/elo.ts's predictSpread needs (rating differential + home field advantage). Identical to offPoints - defPoints whenever the ST weight params are 0 (the default). */
   rating: number;
   offPoints: number;
   defPoints: number;
   /** Real games played (NOT opponentAdjust.ts's teamDiagnostics.gamesPlayed, which double-counts offense+defense appearances for the same team -- this is that divided by 2, matching what every other consumer of a "gamesPlayed" field in this codebase expects). */
   gamesPlayed: number;
+  /**
+   * Special-teams decomposition (ratings/specialTeams.ts), always computed
+   * so it's visible for evaluation even while its weight is 0 -- see
+   * elo.ts's TeamRatingState doc for why these stay separate from
+   * offPoints/defPoints rather than folded in.
+   */
+  stFieldPositionOffPoints: number;
+  stFieldPositionDefPoints: number;
+  stFgPoints: number;
 }
 
 /**
@@ -82,6 +121,7 @@ export function computeSolveRatings(
   performances: TeamPerformance[],
   priorSolve: Map<number, { off: number; def: number }> | undefined,
   params: SolveRatingParams,
+  stPlays: RawPlayForSpecialTeams[] = [],
 ): Map<number, SolveTeamRating> {
   const priors =
     priorSolve && params.priorWeight > 0
@@ -90,6 +130,15 @@ export function computeSolveRatings(
 
   const solve = computeOpponentAdjustedRatings(performances, { priors });
 
+  // Always computed, regardless of weight -- see SolveRatingParams' doc on
+  // why the raw ST components stay visible even while inert. A team absent
+  // from either map (no qualifying field-position drives or FG attempts)
+  // gets 0, not an imputed value, per the build spec's missing-data guard.
+  const fieldPositionSolve = computeFieldPositionSolve(stPlays);
+  const fgEfficiency = computeFgEfficiency(stPlays, params.fgShrinkK ?? 20);
+  const fpWeight = params.pointsPerFieldPositionYard ?? 0;
+  const fgWeight = params.pointsPerFgAboveExpected ?? 0;
+
   const ratings = new Map<number, SolveTeamRating>();
   for (const teamId of solve.off.keys()) {
     const off = solve.off.get(teamId)!;
@@ -97,7 +146,21 @@ export function computeSolveRatings(
     const offPoints = params.pointsPerEpaSolve * off;
     const defPoints = params.pointsPerEpaSolve * def;
     const gamesPlayed = (solve.teamDiagnostics.get(teamId)?.gamesPlayed ?? 0) / 2;
-    ratings.set(teamId, { rating: offPoints - defPoints, offPoints, defPoints, gamesPlayed });
+
+    const stFieldPositionOffPoints = fpWeight * (fieldPositionSolve.off.get(teamId) ?? 0);
+    const stFieldPositionDefPoints = fpWeight * (fieldPositionSolve.def.get(teamId) ?? 0);
+    const stFgPoints = fgWeight * (fgEfficiency.get(teamId)?.shrunkExcessMakeRate ?? 0);
+
+    const rating = offPoints - defPoints + (stFieldPositionOffPoints - stFieldPositionDefPoints) + stFgPoints;
+    ratings.set(teamId, {
+      rating,
+      offPoints,
+      defPoints,
+      gamesPlayed,
+      stFieldPositionOffPoints,
+      stFieldPositionDefPoints,
+      stFgPoints,
+    });
   }
   return ratings;
 }

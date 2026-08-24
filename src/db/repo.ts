@@ -667,6 +667,12 @@ export interface PlayForRating {
   clockSeconds: number | null;
   /** CFBD's own EPA-equivalent per play ("predicted points added") -- plays.ppa, migration 0012. Null when CFBD didn't provide a value for that play (e.g. some special-teams/administrative play types). */
   ppa: number | null;
+  /** CFBD's own drive id (plays.drive_id, a bigint -- node-pg returns bigint columns as strings to avoid precision loss, so this is a string despite the DB column being numeric). Groups the kickoff/punt play together with the following possession's snaps, see specialTeams.ts's drive-classification doc for why this table (not CFBD's /drives) is the source of truth for kicking-game-originated field position. */
+  driveId: string | null;
+  driveNumber: number | null;
+  playNumber: number | null;
+  /** Distance from the play's offense to the opponent's goal line at the start of the play -- plays.yards_to_goal. Used both for field-position scoring and FG distance (distance ≈ yardsToGoal + 17). */
+  yardsToGoal: number | null;
 }
 
 /**
@@ -705,10 +711,15 @@ export async function getPlaysForSeasonThroughWeek(
     clock_minutes: number | null;
     clock_seconds: number | null;
     ppa: number | null;
+    drive_id: string | null;
+    drive_number: number | null;
+    play_number: number | null;
+    yards_to_goal: number | null;
   }>(
     `SELECT p.game_id, g.home_team_id, g.away_team_id, p.offense_team_id, p.defense_team_id,
             p.down, p.distance, p.yards_gained, p.play_type, p.offense_score, p.defense_score,
-            p.period, p.clock_minutes, p.clock_seconds, p.ppa
+            p.period, p.clock_minutes, p.clock_seconds, p.ppa,
+            p.drive_id, p.drive_number, p.play_number, p.yards_to_goal
      FROM plays p
      JOIN games g ON g.id = p.game_id
      WHERE g.sport = $1 AND g.season = $2 AND g.status = 'final' ${weekClause}
@@ -731,6 +742,10 @@ export async function getPlaysForSeasonThroughWeek(
     ppa: r.ppa,
     clockMinutes: r.clock_minutes,
     clockSeconds: r.clock_seconds,
+    driveId: r.drive_id,
+    driveNumber: r.drive_number,
+    playNumber: r.play_number,
+    yardsToGoal: r.yards_to_goal,
   }));
 }
 

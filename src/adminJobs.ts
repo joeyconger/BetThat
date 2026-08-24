@@ -32,6 +32,7 @@ import {
   getSeasonGamesForRating,
   getReturningProductionDistribution,
   getGameHistoryForSeason,
+  getPriorSeasonEpaSolve,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
@@ -80,6 +81,10 @@ import { getRatingParams } from "./ratings/config.js";
 import type { RatingParams } from "./ratings/config.js";
 import { computeInitialRating } from "./ratings/elo.js";
 import { computeRatings, computeAndStoreRatings, generateBacktestPredictionsForWeek } from "./ratings/service.js";
+import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./ratings/solveRatings.js";
+import type { SolveRatingParams } from "./ratings/solveRatings.js";
+import { computeFieldPositionSolve } from "./ratings/specialTeams.js";
+import type { RawPlayForSpecialTeams } from "./ratings/specialTeams.js";
 import type { Sport } from "./db/repo.js";
 
 function fmtPct(value: number | null): string {
@@ -2972,6 +2977,244 @@ export function startCfbMoreSegmentsJob(): Promise<JobStatus> {
   });
 }
 
+/**
+ * Step 2 of the special-teams build (see docs/prompts -- this session's
+ * conversation has the full spec, not yet saved to a file): does adding
+ * the field-position + FG-efficiency ST component move CFB ratings TOWARD
+ * SP+ across the population, not just for Oklahoma (the motivating
+ * observation, deliberately reported as one line among many rather than
+ * the headline -- see the build spec).
+ *
+ * GROUND-TRUTH LIMITATION, reported up front rather than glossed over:
+ * real WEEKLY SP+ only exists for 2025 (getManualSpWeeklyDistributionForWeek,
+ * a manual scrape -- CFBD's own /ratings/sp has no historical weekly
+ * granularity wired into this project). For 2024, every week-8-14
+ * checkpoint is compared against the SAME 2024 season-FINAL SP+
+ * distribution -- an approximation (SP+ rank is fairly stable within a
+ * season, but not identical to what it was at each true checkpoint). This
+ * means the 2024 correlation/MAD numbers are noisier evidence than 2025's;
+ * weighted accordingly when reading the rollup, not equal footing.
+ *
+ * Test weights (pointsPerFieldPositionYard=0.5, pointsPerFgAboveExpected=3)
+ * are NOT the calibrated answer -- Step 3's RMSE sweep does that. They
+ * exist only so this evaluation has some nonzero ST contribution to
+ * compare against the weight=0 baseline; picked as a plausible order of
+ * magnitude (3 points per made FG is the actual point value of a field
+ * goal; 0.5 points/yard of opponent-adjusted field-position rating is a
+ * reasonable middle of the commonly-cited ~0.06-0.1 expected-points-per-
+ * yard-of-field-position range once the off-def composite's typical
+ * spread is accounted for), not derived or fit.
+ */
+export function startCfbSpecialTeamsEvaluationJob(): Promise<JobStatus> {
+  return runJob("cfb-st-evaluation", async (job) => {
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+    const idToName = new Map<number, string>();
+    for (const [name, id] of teamNameToId) idToName.set(id, name);
+    const oklahomaId = teamNameToId.get("Oklahoma");
+    if (!oklahomaId) log(job, "WARNING: 'Oklahoma' not found in teamNameToId -- Oklahoma line will be skipped.");
+
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+    function mad(xs: number[], ys: number[]): number {
+      let sum = 0;
+      for (let i = 0; i < xs.length; i++) sum += Math.abs(xs[i]! - ys[i]!);
+      return sum / xs.length;
+    }
+    function rmse(errors: number[]): number {
+      return Math.sqrt(errors.reduce((a, b) => a + b * b, 0) / errors.length);
+    }
+
+    const BASELINE_PARAMS: SolveRatingParams = { ...DEFAULT_SOLVE_RATING_PARAMS };
+    const TEST_ST_PARAMS: SolveRatingParams = {
+      ...DEFAULT_SOLVE_RATING_PARAMS,
+      pointsPerFieldPositionYard: 0.5,
+      pointsPerFgAboveExpected: 3,
+    };
+    const cfbHfa = getRatingParams("cfb").homeFieldAdvantage;
+
+    async function computeStRatings(season: number, week: number, params: SolveRatingParams) {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      const performances = buildTeamPerformancesEpa([...gamesById.values()]);
+      const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
+      const stPlays: RawPlayForSpecialTeams[] = plays.map((p) => ({
+        gameId: p.gameId,
+        homeTeamId: p.homeTeamId,
+        awayTeamId: p.awayTeamId,
+        offenseTeamId: p.offenseTeamId,
+        playType: p.playType,
+        driveId: p.driveId,
+        driveNumber: p.driveNumber,
+        playNumber: p.playNumber,
+        yardsToGoal: p.yardsToGoal,
+      }));
+      return { ratings: computeSolveRatings(performances, priorSolve, params, stPlays), stPlays };
+    }
+
+    const checkpoints: { season: number; week: number }[] = [];
+    for (const season of [2024, 2025]) {
+      for (let week = 8; week <= 14; week++) checkpoints.push({ season, week });
+    }
+
+    let sumBaselineCorr = 0;
+    let sumStCorr = 0;
+    let sumBaselineMad = 0;
+    let sumStMad = 0;
+    let sumBaselineRmse = 0;
+    let sumStRmse = 0;
+    let rmseCheckpoints = 0;
+    let corrCheckpoints = 0;
+    let sumFpDefVsDefCorr = 0;
+    let fpCorrCheckpoints = 0;
+
+    for (const { season, week } of checkpoints) {
+      const spDistribution =
+        season === 2025 ? await getManualSpWeeklyDistributionForWeek("cfb", season, week) : await getCfbdSpDistributionForSeason("cfb", season);
+      if (spDistribution.size < 20) {
+        log(job, `${season} week ${week}: only ${spDistribution.size} teams in SP+ distribution -- skipping.`);
+        continue;
+      }
+
+      const { ratings: baseline, stPlays } = await computeStRatings(season, week, BASELINE_PARAMS);
+      const { ratings: withSt } = await computeStRatings(season, week, TEST_ST_PARAMS);
+
+      const rows: { teamId: number; baseline: number; withSt: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const b = baseline.get(teamId);
+        const s = withSt.get(teamId);
+        if (!b || !s) continue;
+        rows.push({ teamId, baseline: b.rating, withSt: s.rating, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `${season} week ${week}: only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+
+      const baselineCorr = pearson(rows.map((r) => r.baseline), rows.map((r) => r.sp));
+      const stCorr = pearson(rows.map((r) => r.withSt), rows.map((r) => r.sp));
+      const baselineMad = mad(rows.map((r) => r.baseline), rows.map((r) => r.sp));
+      const stMad = mad(rows.map((r) => r.withSt), rows.map((r) => r.sp));
+      sumBaselineCorr += baselineCorr;
+      sumStCorr += stCorr;
+      sumBaselineMad += baselineMad;
+      sumStMad += stMad;
+      corrCheckpoints += 1;
+
+      // Tails check: top 25 by SP+ vs. the rest.
+      const sortedBySp = [...rows].sort((a, b) => b.sp - a.sp);
+      const top25 = sortedBySp.slice(0, 25);
+      const rest = sortedBySp.slice(25);
+      const top25MadDelta = mad(top25.map((r) => r.baseline), top25.map((r) => r.sp)) - mad(top25.map((r) => r.withSt), top25.map((r) => r.sp));
+      const restMadDelta =
+        rest.length >= 10 ? mad(rest.map((r) => r.baseline), rest.map((r) => r.sp)) - mad(rest.map((r) => r.withSt), rest.map((r) => r.sp)) : null;
+
+      log(
+        job,
+        `${season} wk${week}: n=${rows.length} -- corr baseline=${baselineCorr.toFixed(3)} withST=${stCorr.toFixed(3)} (Δ=${(stCorr - baselineCorr).toFixed(4)}); MAD baseline=${baselineMad.toFixed(2)} withST=${stMad.toFixed(2)} (Δimprovement=${(baselineMad - stMad).toFixed(3)}); top25 MADΔ=${top25MadDelta.toFixed(3)}, rest MADΔ=${restMadDelta === null ? "n/a" : restMadDelta.toFixed(3)}`,
+      );
+
+      // Double-counting check: field-position DEF vs. existing DEF rating.
+      const fieldPositionSolve = computeFieldPositionSolve(stPlays);
+      const fpDefRows: { fpDef: number; def: number }[] = [];
+      for (const [teamId, b] of baseline) {
+        const fpDef = fieldPositionSolve.def.get(teamId);
+        if (fpDef === undefined) continue;
+        fpDefRows.push({ fpDef, def: b.defPoints });
+      }
+      if (fpDefRows.length >= 20) {
+        const fpDefCorr = pearson(fpDefRows.map((r) => r.fpDef), fpDefRows.map((r) => r.def));
+        sumFpDefVsDefCorr += fpDefCorr;
+        fpCorrCheckpoints += 1;
+        log(job, `  field-position DEF vs. existing DEF rating: corr=${fpDefCorr.toFixed(3)} (n=${fpDefRows.length}) -- high |corr| would flag double-counting`);
+      }
+
+      // Oklahoma line.
+      if (oklahomaId) {
+        const b = baseline.get(oklahomaId);
+        const s = withSt.get(oklahomaId);
+        if (b && s) {
+          const baselineRank = [...baseline.values()].filter((r) => r.rating > b.rating).length + 1;
+          const stRank = [...withSt.values()].filter((r) => r.rating > s.rating).length + 1;
+          log(job, `  Oklahoma: baseline rating=${b.rating.toFixed(2)} rank=${baselineRank} -- withST rating=${s.rating.toFixed(2)} rank=${stRank}`);
+        }
+      }
+
+      // Walk-forward next-week margin RMSE.
+      const nextWeekGames = (await getSeasonGamesForRating("cfb", season, week + 1)).filter((g) => g.week === week + 1);
+      if (nextWeekGames.length >= 10) {
+        const baselineErrors: number[] = [];
+        const stErrors: number[] = [];
+        for (const g of nextWeekGames) {
+          const homeB = baseline.get(g.homeTeamId);
+          const awayB = baseline.get(g.awayTeamId);
+          const homeS = withSt.get(g.homeTeamId);
+          const awayS = withSt.get(g.awayTeamId);
+          if (!homeB || !awayB || !homeS || !awayS) continue;
+          const actualMargin = g.homeScore - g.awayScore;
+          baselineErrors.push(actualMargin - (homeB.rating - awayB.rating + cfbHfa));
+          stErrors.push(actualMargin - (homeS.rating - awayS.rating + cfbHfa));
+        }
+        if (baselineErrors.length >= 10) {
+          const baselineRmse = rmse(baselineErrors);
+          const stRmse = rmse(stErrors);
+          sumBaselineRmse += baselineRmse;
+          sumStRmse += stRmse;
+          rmseCheckpoints += 1;
+          log(
+            job,
+            `  wk${week + 1} walk-forward margin RMSE (n=${baselineErrors.length}): baseline=${baselineRmse.toFixed(2)} withST=${stRmse.toFixed(2)} (Δimprovement=${(baselineRmse - stRmse).toFixed(3)})`,
+          );
+        }
+      }
+    }
+
+    log(job, `\n=== ROLLUP (${corrCheckpoints} checkpoints with SP+ correlation data) ===`);
+    if (corrCheckpoints > 0) {
+      log(job, `avg SP+ corr: baseline=${(sumBaselineCorr / corrCheckpoints).toFixed(4)} withST=${(sumStCorr / corrCheckpoints).toFixed(4)}`);
+      log(job, `avg SP+ MAD: baseline=${(sumBaselineMad / corrCheckpoints).toFixed(3)} withST=${(sumStMad / corrCheckpoints).toFixed(3)}`);
+    }
+    if (rmseCheckpoints > 0) {
+      log(job, `avg walk-forward margin RMSE (${rmseCheckpoints} checkpoints): baseline=${(sumBaselineRmse / rmseCheckpoints).toFixed(3)} withST=${(sumStRmse / rmseCheckpoints).toFixed(3)}`);
+    }
+    if (fpCorrCheckpoints > 0) {
+      log(job, `avg field-position-DEF vs. existing-DEF correlation (${fpCorrCheckpoints} checkpoints): ${(sumFpDefVsDefCorr / fpCorrCheckpoints).toFixed(3)}`);
+    }
+  });
+}
+
 export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "nfl-backtest-refresh": startNflBacktestJob,
   "cfb-pipeline": startCfbPipelineJob,
@@ -3055,6 +3298,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-persist-epa-solve-2023": startCfbPersistFinalEpaSolveJob(2023),
   "cfb-persist-epa-solve-2024": startCfbPersistFinalEpaSolveJob(2024),
   "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
+  "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
 };
 
 /**
