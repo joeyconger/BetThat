@@ -25,12 +25,26 @@ export interface SolveRatingParams {
    * EPA-per-play units, typically roughly -0.3..+0.3 for real CFB teams)
    * into a points-vs-average-FBS-team scale, the same role
    * RatingParams.pointsPerEpa played for the old incremental Elo loop.
-   * 100 is a reasonable starting order of magnitude (giving roughly
-   * -30..+30 points for real teams) but UNTESTED at definition time --
-   * needs calibration via Step 4's RMSE-based evaluation metric, not
-   * derived from first principles. Do not treat the current value as
-   * final without checking this comment has been updated with a real
-   * sweep result.
+   *
+   * Calibrated value: 60. Real-data grid sweep (walk-forward next-week
+   * margin RMSE, 12 checkpoints across 2024/2025 weeks 8-14) found a flat-
+   * bottomed basin: 50 gave avg RMSE=15.69, 75 gave 15.74 -- both far
+   * better than the original placeholder of 100 (17.23, ~9% worse) and
+   * the curve rises steeply and monotonically past 100 (125->19.84,
+   * 300->48.94). 60 is deliberately the MIDDLE of that basin, not either
+   * tested edge -- 50 was the grid minimum, but it also sat at the edge of
+   * the explored range (only 25, far outside the basin, tested to its
+   * left), so picking 50 itself would mean one side of the chosen value
+   * was never actually measured. 60 sits inside the range bounded by
+   * worse values on BOTH sides (25 and 100), which 50 does not.
+   *
+   * This scale was previously an untested placeholder that every live CFB
+   * prediction ran on -- the 100->60 correction alone measurably
+   * de-overconfidences every predicted margin the site produces,
+   * independent of anything about special teams. Do not casually move
+   * this without re-running that sweep (cfb-epa-scale-calibration in
+   * adminJobs.ts) with ST weights held at 0, since ST weights are
+   * calibrated RELATIVE to this scale, not independently of it.
    */
   pointsPerEpaSolve: number;
   /**
@@ -78,7 +92,7 @@ export interface SolveRatingParams {
 
 /** See each field's own doc for why these specific values, not a placeholder pair. */
 export const DEFAULT_SOLVE_RATING_PARAMS: SolveRatingParams = {
-  pointsPerEpaSolve: 100,
+  pointsPerEpaSolve: 60,
   priorWeight: 2,
   pointsPerFieldPositionYard: 0,
   pointsPerFgAboveExpected: 0,

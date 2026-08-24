@@ -105,5 +105,5 @@ test("computeSolveRatings: a nonzero priorWeight actually pulls the rating towar
 
 test("DEFAULT_SOLVE_RATING_PARAMS matches the calibrated values documented in solveRatings.ts", () => {
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.priorWeight, 2);
-  assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve, 100);
+  assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve, 60);
 });
