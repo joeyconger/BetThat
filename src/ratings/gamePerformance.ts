@@ -27,10 +27,17 @@ export interface RawPlayForPerformance {
   period: number | null;
   clockMinutes: number | null;
   clockSeconds: number | null;
+  /** CFBD's own EPA-equivalent per play (plays.ppa) -- the SAME underlying metric this project has always called EPA elsewhere (team_game_stats.off_epa_play/def_epa_play, syncStats.ts maps CFBD's per-game ppa straight onto those columns). Null when CFBD didn't provide a value for that play. */
+  ppa: number | null;
 }
 
 export interface WeightedSuccessRateResult {
   weightedSuccessRate: number | null;
+  weightedPlayCount: number;
+}
+
+export interface WeightedEpaResult {
+  weightedEpa: number | null;
   weightedPlayCount: number;
 }
 
@@ -70,6 +77,43 @@ export function computeWeightedSuccessRate(
   return { weightedSuccessRate: successWeightSum / totalWeightSum, weightedPlayCount: totalWeightSum };
 }
 
+/**
+ * Garbage-time-weighted EPA (CFBD's ppa) for one team's offense across a
+ * set of plays -- same shape as computeWeightedSuccessRate, a weighted
+ * MEAN instead of a weighted proportion since ppa is continuous, not
+ * binary. Same isScrimmagePlay filter as success rate, matching the
+ * convention this project's existing (CFBD-pre-aggregated) EPA columns
+ * already use, so this is directly comparable to team_game_stats.off_epa_play.
+ */
+export function computeWeightedEpa(
+  plays: RawPlayForPerformance[],
+  teamId: number,
+  garbageTimeConfig: GarbageTimeConfig = DEFAULT_GARBAGE_TIME_CONFIG,
+): WeightedEpaResult {
+  let epaWeightSum = 0;
+  let totalWeightSum = 0;
+
+  for (const play of plays) {
+    if (play.offenseTeamId !== teamId) continue;
+    if (!isScrimmagePlay(play.playType)) continue;
+    if (play.ppa === null) continue;
+
+    const weight = computeGarbageTimeWeight(
+      play.offenseScore,
+      play.defenseScore,
+      play.period,
+      play.clockMinutes,
+      play.clockSeconds,
+      garbageTimeConfig,
+    );
+    totalWeightSum += weight;
+    epaWeightSum += play.ppa * weight;
+  }
+
+  if (totalWeightSum === 0) return { weightedEpa: null, weightedPlayCount: 0 };
+  return { weightedEpa: epaWeightSum / totalWeightSum, weightedPlayCount: totalWeightSum };
+}
+
 export interface GamePlaysGroup {
   gameId: number;
   homeTeamId: number;
@@ -106,6 +150,42 @@ export function buildTeamPerformances(
         teamId: game.awayTeamId,
         opponentId: game.homeTeamId,
         rawOffenseValue: away.weightedSuccessRate,
+      });
+    }
+  }
+
+  return performances;
+}
+
+/**
+ * Same as buildTeamPerformances, but on garbage-time-weighted EPA
+ * (computeWeightedEpa) instead of success rate -- the metric
+ * generalization Step 2 of the iterative-solve plan needs (see
+ * cfb-solve-epa-hypothesis-test in adminJobs.ts, the diagnostic this was
+ * built for).
+ */
+export function buildTeamPerformancesEpa(
+  games: GamePlaysGroup[],
+  garbageTimeConfig: GarbageTimeConfig = DEFAULT_GARBAGE_TIME_CONFIG,
+): TeamPerformance[] {
+  const performances: TeamPerformance[] = [];
+
+  for (const game of games) {
+    const home = computeWeightedEpa(game.plays, game.homeTeamId, garbageTimeConfig);
+    const away = computeWeightedEpa(game.plays, game.awayTeamId, garbageTimeConfig);
+
+    if (home.weightedEpa !== null) {
+      performances.push({
+        teamId: game.homeTeamId,
+        opponentId: game.awayTeamId,
+        rawOffenseValue: home.weightedEpa,
+      });
+    }
+    if (away.weightedEpa !== null) {
+      performances.push({
+        teamId: game.awayTeamId,
+        opponentId: game.homeTeamId,
+        rawOffenseValue: away.weightedEpa,
       });
     }
   }

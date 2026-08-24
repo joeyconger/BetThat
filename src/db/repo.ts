@@ -665,6 +665,8 @@ export interface PlayForRating {
   period: number;
   clockMinutes: number | null;
   clockSeconds: number | null;
+  /** CFBD's own EPA-equivalent per play ("predicted points added") -- plays.ppa, migration 0012. Null when CFBD didn't provide a value for that play (e.g. some special-teams/administrative play types). */
+  ppa: number | null;
 }
 
 /**
@@ -702,10 +704,11 @@ export async function getPlaysForSeasonThroughWeek(
     period: number;
     clock_minutes: number | null;
     clock_seconds: number | null;
+    ppa: number | null;
   }>(
     `SELECT p.game_id, g.home_team_id, g.away_team_id, p.offense_team_id, p.defense_team_id,
             p.down, p.distance, p.yards_gained, p.play_type, p.offense_score, p.defense_score,
-            p.period, p.clock_minutes, p.clock_seconds
+            p.period, p.clock_minutes, p.clock_seconds, p.ppa
      FROM plays p
      JOIN games g ON g.id = p.game_id
      WHERE g.sport = $1 AND g.season = $2 AND g.status = 'final' ${weekClause}
@@ -725,6 +728,7 @@ export async function getPlaysForSeasonThroughWeek(
     offenseScore: r.offense_score,
     defenseScore: r.defense_score,
     period: r.period,
+    ppa: r.ppa,
     clockMinutes: r.clock_minutes,
     clockSeconds: r.clock_seconds,
   }));

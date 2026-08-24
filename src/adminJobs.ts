@@ -35,7 +35,7 @@ import {
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
 import { pairedTTest } from "./stats/significance.js";
-import { buildTeamPerformances } from "./ratings/gamePerformance.js";
+import { buildTeamPerformances, buildTeamPerformancesEpa } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
@@ -3047,6 +3047,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-solve-vs-elo-vs-sp-diagnostic": startSolveVsEloVsSpDiagnosticJob,
   "cfb-solve-vs-elo-vs-sp-widened-diagnostic": startSolveVsEloVsSpWidenedDiagnosticJob,
   "cfb-solve-coldstart-test": startSolveColdStartTestJob,
+  "cfb-solve-epa-hypothesis-test": startSolveEpaHypothesisTestJob,
 };
 
 /**
@@ -3329,6 +3330,7 @@ export function startCfbOpponentAdjustSnapshotJob(): Promise<JobStatus> {
         period: p.period,
         clockMinutes: p.clockMinutes,
         clockSeconds: p.clockSeconds,
+        ppa: p.ppa,
       });
     }
     const games = [...gamesById.values()];
@@ -3435,6 +3437,7 @@ export function startSolveVsEloVsSpDiagnosticJob(): Promise<JobStatus> {
         period: p.period,
         clockMinutes: p.clockMinutes,
         clockSeconds: p.clockSeconds,
+        ppa: p.ppa,
       });
     }
     const performances = buildTeamPerformances([...gamesById.values()]);
@@ -3610,6 +3613,7 @@ export function startSolveVsEloVsSpWidenedDiagnosticJob(): Promise<JobStatus> {
           period: p.period,
           clockMinutes: p.clockMinutes,
           clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
         });
       }
       const performances = buildTeamPerformances([...gamesById.values()]);
@@ -3791,6 +3795,7 @@ export function startSolveColdStartTestJob(): Promise<JobStatus> {
           period: p.period,
           clockMinutes: p.clockMinutes,
           clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
         });
       }
       const performances = buildTeamPerformances([...gamesById.values()]);
@@ -3853,6 +3858,173 @@ export function startSolveColdStartTestJob(): Promise<JobStatus> {
         job,
         `  seeded solve ${seededCorr > eloCorr ? "NOW BEATS" : "still trails"} Elo (was ${unseededCorr > eloCorr ? "beating" : "trailing"} unseeded) -- cold-start explanation ${seededCorr > eloCorr && seededCorr > unseededCorr ? "CONFIRMED for this week" : "NOT confirmed for this week"}.`,
       );
+    }
+  });
+}
+
+/**
+ * Tests EPA (instead of success rate) as the solve's raw metric, across
+ * ALL EIGHT checkpoints the widened diagnostic used (2025 weeks 4-14 +
+ * 2023/2024 final), not just the two early weeks -- reporting only 4/6
+ * would conflate two different findings: EPA being a less noisy small-
+ * sample signal (gain concentrated early) vs. EPA simply being a better
+ * signal at every week (uniform gain). Those have different implications
+ * for Step 2, so all eight get reported the same way.
+ *
+ * Note on the cold-start explanation status: the prior-seeding test above
+ * falsified seeding-as-initial-condition as a FIX, but that doesn't mean
+ * the solve doesn't have less information in week 4 than Elo (which
+ * carries a real prior via seasonCarryover) -- only that the specific
+ * remedy tried doesn't work on a connected graph. This job tests a
+ * DIFFERENT candidate explanation (raw-metric noise), not a re-test of
+ * the same one.
+ */
+export function startSolveEpaHypothesisTestJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-epa-hypothesis-test", async (job) => {
+    const teamNameToId = await getTeamNameToIdMap("cfb");
+
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+
+    /** metric="success" uses the existing garbage-time-weighted success-rate builder; metric="epa" uses the EPA one. Same solve, same as-of-week cut, only the raw input differs. */
+    async function computeSolveComposite(season: number, week: number, metric: "success" | "epa"): Promise<Map<number, number>> {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      const games = [...gamesById.values()];
+      const performances = metric === "epa" ? buildTeamPerformancesEpa(games) : buildTeamPerformances(games);
+      const solve = computeOpponentAdjustedRatings(performances);
+      const composite = new Map<number, number>();
+      for (const teamId of solve.off.keys()) {
+        composite.set(teamId, solve.off.get(teamId)! - solve.def.get(teamId)!);
+      }
+      return composite;
+    }
+
+    log(job, "=== CFB 2025, all 6 checkpoints -- Elo vs. success-rate solve vs. EPA solve, each vs. real weekly SP+ ===");
+    const weeks = [4, 6, 8, 10, 12, 14];
+    let epaBeatsSuccessCount = 0;
+    let epaBeatsEloCount = 0;
+    for (const week of weeks) {
+      const eloState = await computeRatings("cfb", 2025, week);
+      const successComposite = await computeSolveComposite(2025, week, "success");
+      const epaComposite = await computeSolveComposite(2025, week, "epa");
+      const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", 2025, week);
+
+      const rows: { teamId: number; elo: number; success: number; epa: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const eloRating = eloState.get(teamId)?.rating;
+        const success = successComposite.get(teamId);
+        const epa = epaComposite.get(teamId);
+        if (eloRating === undefined || success === undefined || epa === undefined) continue;
+        rows.push({ teamId, elo: eloRating, success, epa, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `week ${week}: only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+      const eloCorr = pearson(rows.map((r) => r.elo), rows.map((r) => r.sp));
+      const successCorr = pearson(rows.map((r) => r.success), rows.map((r) => r.sp));
+      const epaCorr = pearson(rows.map((r) => r.epa), rows.map((r) => r.sp));
+      if (epaCorr > successCorr) epaBeatsSuccessCount += 1;
+      if (epaCorr > eloCorr) epaBeatsEloCount += 1;
+      log(
+        job,
+        `week ${week}: n=${rows.length} -- Elo=${eloCorr.toFixed(3)}, success-rate solve=${successCorr.toFixed(3)}, EPA solve=${epaCorr.toFixed(3)} (EPA-vs-success delta=${(epaCorr - successCorr).toFixed(4)}, EPA-vs-Elo delta=${(epaCorr - eloCorr).toFixed(4)})`,
+      );
+    }
+    log(
+      job,
+      `\nEPA solve beat the success-rate solve in ${epaBeatsSuccessCount}/${weeks.length} weeks, and beat Elo in ${epaBeatsEloCount}/${weeks.length} weeks.`,
+    );
+    log(
+      job,
+      "If the EPA-vs-success gain concentrates in the early weeks (4, 6) rather than being roughly uniform across all six, that supports the small-sample-noise explanation specifically; a roughly uniform gain across all six means EPA is just a better signal generally, not an early-season fix.",
+    );
+
+    log(job, "\n=== Cross-season final-snapshot check (CFBD final SP+), 2023 and 2024 -- same three-way comparison ===");
+    for (const season of [2023, 2024]) {
+      const seasonWeeks = await getDistinctWeeks("cfb", season);
+      if (seasonWeeks.length === 0) {
+        log(job, `${season}: no games found -- skipping.`);
+        continue;
+      }
+      const lastWeek = Math.max(...seasonWeeks);
+      const eloState = await computeRatings("cfb", season, lastWeek);
+      const successComposite = await computeSolveComposite(season, lastWeek, "success");
+      const epaComposite = await computeSolveComposite(season, lastWeek, "epa");
+      const spDistribution = await getCfbdSpDistributionForSeason("cfb", season);
+
+      const rows: { teamId: number; elo: number; success: number; epa: number; sp: number }[] = [];
+      for (const [teamId, sp] of spDistribution) {
+        const eloRating = eloState.get(teamId)?.rating;
+        const success = successComposite.get(teamId);
+        const epa = epaComposite.get(teamId);
+        if (eloRating === undefined || success === undefined || epa === undefined) continue;
+        rows.push({ teamId, elo: eloRating, success, epa, sp });
+      }
+      if (rows.length < 20) {
+        log(job, `${season} (final week ${lastWeek}): only ${rows.length} teams in common -- skipping.`);
+        continue;
+      }
+      const eloCorr = pearson(rows.map((r) => r.elo), rows.map((r) => r.sp));
+      const successCorr = pearson(rows.map((r) => r.success), rows.map((r) => r.sp));
+      const epaCorr = pearson(rows.map((r) => r.epa), rows.map((r) => r.sp));
+      log(
+        job,
+        `${season} (final week ${lastWeek}, n=${rows.length}): Elo=${eloCorr.toFixed(3)}, success-rate solve=${successCorr.toFixed(3)}, EPA solve=${epaCorr.toFixed(3)}`,
+      );
+    }
+
+    log(job, "\nCalled-out teams (week 14, 2025):");
+    const eloState14 = await computeRatings("cfb", 2025, 14);
+    const successComposite14 = await computeSolveComposite(2025, 14, "success");
+    const epaComposite14 = await computeSolveComposite(2025, 14, "epa");
+    const spDistribution14 = await getManualSpWeeklyDistributionForWeek("cfb", 2025, 14);
+    for (const name of ["Old Dominion", "Penn State", "Clemson"]) {
+      const teamId = teamNameToId.get(name);
+      if (!teamId) continue;
+      const sp = spDistribution14.get(teamId);
+      const success = successComposite14.get(teamId);
+      const epa = epaComposite14.get(teamId);
+      const elo = eloState14.get(teamId)?.rating;
+      if (sp === undefined || success === undefined || epa === undefined || elo === undefined) {
+        log(job, `  ${name}: missing from one of the sources.`);
+        continue;
+      }
+      log(job, `  ${name}: sp=${sp.toFixed(1)}, elo=${elo.toFixed(2)}, success-rate solve composite=${success.toFixed(4)}, EPA solve composite=${epa.toFixed(4)}`);
     }
   });
 }

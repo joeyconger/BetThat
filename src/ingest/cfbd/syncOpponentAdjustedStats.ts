@@ -55,6 +55,7 @@ export async function syncOpponentAdjustedStats(
         period: p.period,
         clockMinutes: p.clockMinutes,
         clockSeconds: p.clockSeconds,
+        ppa: p.ppa,
       });
     }
 
