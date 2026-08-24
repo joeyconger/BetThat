@@ -114,6 +114,25 @@ export interface OpponentAdjustmentOptions {
    */
   initialOff?: Map<number, number>;
   initialDef?: Map<number, number>;
+  /**
+   * A real preseason prior, entered as WEIGHTED PSEUDO-GAMES in the
+   * fixed-point equations themselves -- NOT as a starting point (see
+   * initialOff/initialDef's doc: seeding the starting point provably
+   * washes out for any well-connected team, confirmed by a real
+   * production test on 2025 weeks 4/6 that showed zero effect). A team
+   * with a prior of weight W behaves as if it had W additional games
+   * worth of evidence saying its OFF is `off` and its DEF is `def`,
+   * blended with its REAL games in the same weighted-average target each
+   * iteration -- so the prior's influence shrinks proportionally as real
+   * games accumulate (W/(gamesPlayed+W)) instead of disappearing outright
+   * the moment the graph is connected enough to pin the team down. W=0
+   * (or an absent entry) reproduces this function's original,
+   * prior-free behavior exactly -- same n/(n+k)-family shrinkage shape
+   * as every other prior in this codebase (RatingParams.seasonCarryover,
+   * varianceShrinkK, market shrinkage), just entered into the solve's
+   * OWN equations instead of applied to the solve's output afterward.
+   */
+  priors?: Map<number, { off: number; def: number; weight: number }>;
 }
 
 const DEFAULT_MAX_ITERATIONS = 200;
@@ -133,12 +152,22 @@ export function computeOpponentAdjustedRatings(
     teamIds.add(p.teamId);
     teamIds.add(p.opponentId);
   }
+  // A team with a prior but no games yet (true preseason, before that
+  // team's first game of the season) still needs a rating -- without this,
+  // teamIds would only ever contain teams that have already played,
+  // silently dropping a pure-prior team from the output entirely.
+  for (const teamId of options.priors?.keys() ?? []) {
+    teamIds.add(teamId);
+  }
 
   if (teamIds.size === 0) {
     return { off: new Map(), def: new Map(), iterations: 0, converged: true, teamDiagnostics: new Map() };
   }
 
-  const leagueAvg = performances.reduce((sum, p) => sum + p.rawOffenseValue, 0) / performances.length;
+  // 0 (this system's own "league average" convention) when there's no
+  // game data at all to compute a real average from -- e.g. every team
+  // present is a pure-prior, zero-games preseason entry.
+  const leagueAvg = performances.length > 0 ? performances.reduce((sum, p) => sum + p.rawOffenseValue, 0) / performances.length : 0;
 
   // offPerformances[i] = games where team i was on offense (drives OFF_i).
   // defPerformances[i] = games where team i was on defense, i.e. the
@@ -172,23 +201,24 @@ export function computeOpponentAdjustedRatings(
     let maxDelta = 0;
 
     for (const teamId of teamIds) {
+      const prior = options.priors?.get(teamId);
+      const priorWeight = prior?.weight ?? 0;
+
       const offGames = offPerformances.get(teamId)!;
-      const targetOff =
-        offGames.length > 0
-          ? offGames.reduce((sum, p) => sum + (p.rawOffenseValue - def.get(p.opponentId)!), 0) / offGames.length -
-            leagueAvg
-          : off.get(teamId)!;
+      const offSum = offGames.reduce((sum, p) => sum + (p.rawOffenseValue - def.get(p.opponentId)!), 0);
+      const offPriorContribution = prior ? priorWeight * (prior.off + leagueAvg) : 0;
+      const offDenom = offGames.length + priorWeight;
+      const targetOff = offDenom > 0 ? (offSum + offPriorContribution) / offDenom - leagueAvg : off.get(teamId)!;
       const newOff = off.get(teamId)! + dampingFactor * (targetOff - off.get(teamId)!);
       nextOff.set(teamId, newOff);
       const offDelta = Math.abs(newOff - off.get(teamId)!);
       maxDelta = Math.max(maxDelta, offDelta);
 
       const defGames = defPerformances.get(teamId)!;
-      const targetDef =
-        defGames.length > 0
-          ? defGames.reduce((sum, p) => sum + (p.rawOffenseValue - off.get(p.teamId)!), 0) / defGames.length -
-            leagueAvg
-          : def.get(teamId)!;
+      const defSum = defGames.reduce((sum, p) => sum + (p.rawOffenseValue - off.get(p.teamId)!), 0);
+      const defPriorContribution = prior ? priorWeight * (prior.def + leagueAvg) : 0;
+      const defDenom = defGames.length + priorWeight;
+      const targetDef = defDenom > 0 ? (defSum + defPriorContribution) / defDenom - leagueAvg : def.get(teamId)!;
       const newDef = def.get(teamId)! + dampingFactor * (targetDef - def.get(teamId)!);
       nextDef.set(teamId, newDef);
       const defDelta = Math.abs(newDef - def.get(teamId)!);

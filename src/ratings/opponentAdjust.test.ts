@@ -56,6 +56,88 @@ test("computeOpponentAdjustedRatings: undamped Jacobi updates on a single 2-team
   assert.ok(close(result.def.get(A)!, -0.05), `def[A] ~-0.05 (got ${result.def.get(A)})`);
 });
 
+test("computeOpponentAdjustedRatings: priors (pseudo-games) persist in the FIXED POINT, unlike initialOff/initialDef", () => {
+  // Same 2-team/1-game case as the underdetermined tests above, but A now
+  // gets a real prior {off: 0.3, def: -0.1, weight: W} instead of a seed.
+  // Hand-derivation (solving the fixed-point equations directly, not just
+  // one iteration): with leagueAvg=0.5,
+  //   off_A* = [(0.6-def_B*) + W*(0.3+0.5)] / (1+W) - 0.5
+  //   def_B* = 0.1 - off_A*  (B's own fixed point, no prior)
+  // substituting and simplifying: off_A*(1+W) = off_A* + 0.3W, so
+  // off_A* = 0.3 EXACTLY for any W>0 -- the prior fully determines the
+  // direction data alone left free (same free direction the very first
+  // 2-team test found: v=off_A-def_B stays at whatever it's pushed to).
+  // Symmetrically def_A* = -0.1 exactly. This is the key contrast with
+  // initialOff/initialDef: a SEED in that same free direction persists
+  // too, but only because nothing overrides it: a PRIOR persists because
+  // it's actively re-asserted every iteration, which is what lets its
+  // strength scale with weight for a team that also has real, competing
+  // data (see the round-robin test below).
+  const performances: TeamPerformance[] = [
+    { teamId: A, opponentId: B, rawOffenseValue: 0.6 },
+    { teamId: B, opponentId: A, rawOffenseValue: 0.4 },
+  ];
+  const priors = new Map([[A, { off: 0.3, def: -0.1, weight: 5 }]]);
+  const result = computeOpponentAdjustedRatings(performances, { priors });
+  assert.equal(result.converged, true);
+  assert.ok(close(result.off.get(A)!, 0.3, 1e-4), `off[A] ~0.3 (got ${result.off.get(A)})`);
+  assert.ok(close(result.def.get(A)!, -0.1, 1e-4), `def[A] ~-0.1 (got ${result.def.get(A)})`);
+});
+
+test("computeOpponentAdjustedRatings: a team with zero games and only a prior gets rated exactly at its prior, and is included in the output at all", () => {
+  // Without the teamIds fix, a team present ONLY in options.priors (no
+  // games in `performances` at all -- true preseason, before that team's
+  // first game) wouldn't appear in the output. Reuses the round-robin's
+  // 3 teams as real data (so leagueAvg has something to compute from)
+  // plus a 4th, gameless team Q with a prior.
+  const performances: TeamPerformance[] = [
+    { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 1, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 1, rawOffenseValue: 0.5 },
+  ];
+  const Q = 999;
+  const priors = new Map([[Q, { off: 7, def: -4, weight: 3 }]]);
+  const result = computeOpponentAdjustedRatings(performances, { priors });
+  assert.equal(result.converged, true);
+  assert.ok(result.off.has(Q), "gameless prior-only team should still appear in the output");
+  assert.ok(close(result.off.get(Q)!, 7, 1e-4), `off[Q] ~7 (got ${result.off.get(Q)})`);
+  assert.ok(close(result.def.get(Q)!, -4, 1e-4), `def[Q] ~-4 (got ${result.def.get(Q)})`);
+  assert.equal(result.teamDiagnostics.get(Q)!.gamesPlayed, 0);
+});
+
+test("computeOpponentAdjustedRatings: a prior's pull on a well-connected team grows monotonically with its weight, unlike seeding (which had no effect at all once connected)", () => {
+  // Round-robin of 3 (all raw=0.5) converges to off=def=0 for everyone
+  // with no prior (see the all-zero test below) -- real, competing data
+  // pins team 1 down just as firmly as it did in the gauge-freedom test.
+  // Give team 1 a prior of (off=10, def=-10) at increasing weights and
+  // confirm off[1] moves monotonically from 0 toward 10 (not "0 or 10",
+  // the seeding-style all-or-nothing behavior) -- proportional blending
+  // that a mere starting-point seed structurally cannot produce here.
+  const performances: TeamPerformance[] = [
+    { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+    { teamId: 2, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 2, rawOffenseValue: 0.5 },
+    { teamId: 1, opponentId: 3, rawOffenseValue: 0.5 },
+    { teamId: 3, opponentId: 1, rawOffenseValue: 0.5 },
+  ];
+  const weights = [0, 0.5, 2, 10, 1000];
+  const offValues = weights.map((weight) => {
+    const priors = weight > 0 ? new Map([[1, { off: 10, def: -10, weight }]]) : undefined;
+    const result = computeOpponentAdjustedRatings(performances, { priors, maxIterations: 500 });
+    assert.equal(result.converged, true);
+    return result.off.get(1)!;
+  });
+  assert.ok(close(offValues[0]!, 0, 1e-4), `weight=0 should reproduce the no-prior baseline of 0 (got ${offValues[0]})`);
+  for (let i = 1; i < offValues.length; i++) {
+    assert.ok(offValues[i]! > offValues[i - 1]!, `off[1] should increase monotonically with weight (${weights[i - 1]}->${offValues[i - 1]}, ${weights[i]}->${offValues[i]})`);
+  }
+  assert.ok(close(offValues[offValues.length - 1]!, 10, 1e-2), `a huge weight should push off[1] very close to the prior of 10 (got ${offValues[offValues.length - 1]})`);
+});
+
 test("computeOpponentAdjustedRatings: an initial prior breaks the tie in an underdetermined case instead of defaulting to 0", () => {
   // Same 2-team/1-game underdetermined case as above, but off_A is seeded
   // with a prior of 0.2 (def_B, off_B, def_A left at the default 0). Per
