@@ -80,7 +80,8 @@ import {
 import { getRatingParams } from "./ratings/config.js";
 import type { RatingParams } from "./ratings/config.js";
 import { computeInitialRating } from "./ratings/elo.js";
-import { computeRatings, computeAndStoreRatings, generateBacktestPredictionsForWeek } from "./ratings/service.js";
+import { computeRatings, computeAndStoreRatings, generateBacktestPredictionsForWeek, generatePredictionsForWeek } from "./ratings/service.js";
+import { syncCurrentOdds } from "./ingest/odds/syncCurrentOdds.js";
 import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./ratings/solveRatings.js";
 import type { SolveRatingParams } from "./ratings/solveRatings.js";
 import { computeFieldPositionSolve, residualizeFieldPosition, computeFgEfficiency } from "./ratings/specialTeams.js";
@@ -3606,6 +3607,10 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-persist-epa-solve-2023": startCfbPersistFinalEpaSolveJob(2023),
   "cfb-persist-epa-solve-2024": startCfbPersistFinalEpaSolveJob(2024),
   "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
+  "cfb-bootstrap-2026": startCfbSeasonBootstrapJob(2026),
+  "cfb-rawplays-2026": startCfbRawPlaysCurrentSeasonJob(2026),
+  "cfb-odds-current": startCfbOddsCurrentJob,
+  "cfb-live-predictions-2026": startCfbLivePredictionsJob(2026),
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
   "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
   "cfb-st-weight-sweep": startCfbStWeightSweepJob,
@@ -4901,5 +4906,95 @@ export function startCfbPersistFinalEpaSolveJob(season: number): () => Promise<J
         written += 1;
       }
       log(job, `persisted ${written} teams' off/def to external_ratings.`);
+    });
+}
+
+/**
+ * Bootstraps a new CFB season: teams (picks up conference realignment/new
+ * FBS members -- `teams` isn't season-scoped, so this is a safe upsert
+ * against whatever's already there) and the season's game schedule.
+ * Doesn't touch plays, odds, or ratings -- those are separate jobs below,
+ * since they need to be RE-run repeatedly as the season progresses, while
+ * this one is closer to a one-time-per-season setup step (though safe to
+ * re-run if CFBD updates the schedule, e.g. a game time change).
+ */
+export function startCfbSeasonBootstrapJob(year: number): () => Promise<JobStatus> {
+  return () =>
+    runJob(`cfb-bootstrap-${year}`, async (job) => {
+      log(job, `${year}: teams`);
+      const teamCount = await syncCfbdTeams(year);
+      log(job, `${year}: synced ${teamCount} teams`);
+      log(job, `${year}: games (regular season)`);
+      const games = await syncCfbdGames(year);
+      log(job, `${year}: synced ${games.synced} games, skipped ${games.skipped}`);
+    });
+}
+
+/**
+ * Raw play-by-play for ONE season, not the hardcoded [2023,2024,2025]
+ * every other *-ingest job here uses -- this is the ongoing, re-run-
+ * throughout-the-season version. Safe to call repeatedly: syncCfbdRawPlays
+ * defaults to weeks 1-15, and CFBD simply returns an empty play list for
+ * a week that hasn't happened yet, so re-running this each week just
+ * picks up whatever newly-completed games exist without needing to track
+ * which week to ask for.
+ */
+export function startCfbRawPlaysCurrentSeasonJob(year: number): () => Promise<JobStatus> {
+  return () =>
+    runJob(`cfb-rawplays-${year}`, async (job) => {
+      log(job, `${year}: raw play-by-play (weeks 1-15) -- future weeks will just come back empty`);
+      const result = await syncCfbdRawPlays(year);
+      log(job, `${year}: fetched ${result.playsFetched} raw plays, synced ${result.synced}, skipped (no game match) ${result.skippedNoGame}`);
+    });
+}
+
+/**
+ * Live market lines (The Odds API, via ingest/odds/syncCurrentOdds.ts) --
+ * season-agnostic by construction (matches whatever games in `games` are
+ * upcoming right now), so this isn't parameterized by year the way the
+ * other new jobs here are. Was built earlier this project but never
+ * wired into an admin job -- backtest/historical work only ever needed
+ * getOpeningLine/getClosingLine from the historical-odds ingestion path,
+ * not this one. Needed now for live 2026 operation: predictAndStoreWeek's
+ * live path (generatePredictionsForWeek) anchors to whatever
+ * getLatestMarketLine finds, which is fed by this sync.
+ */
+export function startCfbOddsCurrentJob(): Promise<JobStatus> {
+  return runJob("cfb-odds-current", async (job) => {
+    const result = await syncCurrentOdds("cfb");
+    log(job, `synced ${result.synced} current-odds snapshots, skipped ${result.skipped} (unmatched game/team)`);
+  });
+}
+
+/**
+ * LIVE prediction generation for a season -- mirrors cfb-recompute-ratings'
+ * loop shape exactly, but calls generatePredictionsForWeek (anchors to
+ * getLatestMarketLine, the live path) instead of
+ * generateBacktestPredictionsForWeek (anchors to the opening line, for
+ * backtest scoring only). This is what actually populates /slate with
+ * real, current predictions for a season instead of backtest artifacts.
+ *
+ * Weeks 0-16: CFBD's own week numbering for the media-facing "Week 0"
+ * slate of season-opening games hasn't been confirmed against a real
+ * 2026 response from this sandbox (no live CFBD route here) -- starting
+ * from 0 rather than 1 is a safe-by-construction choice (a week with no
+ * games logs 0 teams/0 predictions and moves on, same tolerance
+ * cfb-recompute-ratings already relies on for any week without games),
+ * not a claim about CFBD's actual numbering. Sanity-check the logged
+ * per-week counts against the real 2026 schedule once this runs.
+ * Safe to re-run repeatedly throughout the season -- both
+ * computeAndStoreRatings and generatePredictionsForWeek upsert.
+ */
+export function startCfbLivePredictionsJob(year: number): () => Promise<JobStatus> {
+  return () =>
+    runJob(`cfb-live-predictions-${year}`, async (job) => {
+      log(job, `Computing and storing LIVE CFB ${year} ratings + predictions, weeks 0-16.`);
+      for (let week = 0; week <= 16; week++) {
+        const state = await computeAndStoreRatings("cfb", year, week);
+        if (state.size === 0) continue;
+        const { predicted } = await generatePredictionsForWeek("cfb", year, week);
+        log(job, `week ${week}: ${state.size} teams rated, ${predicted} predictions generated`);
+      }
+      log(job, "done -- /slate should now reflect live 2026 predictions.");
     });
 }
