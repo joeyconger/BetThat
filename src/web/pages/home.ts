@@ -46,5 +46,5 @@ export function renderHome(runs: BacktestRunSummary[], statsByRun: Map<number, A
           </table>`
     }
   `;
-  return renderPage("Backtest runs", body);
+  return renderPage("Backtest runs", body, "/backtests");
 }

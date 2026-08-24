@@ -263,8 +263,8 @@ function topbar(activePath: string): string {
       <div class="topbar-inner">
         <span class="wordmark">BET<span class="dot">•</span>THAT</span>
         <nav>
-          ${link("/", "Backtests")}
-          ${link("/slate", "Slate")}
+          ${link("/", "Slate")}
+          ${link("/backtests", "Backtests")}
         </nav>
         <span class="topbar-tag">Diagnostics · not live picks</span>
       </div>

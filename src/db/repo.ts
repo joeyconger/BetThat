@@ -1399,6 +1399,33 @@ export async function getDistinctWeeks(sport: Sport, season: number): Promise<nu
   return result.rows.map((r) => r.week);
 }
 
+/** Every season with any game (any status, not just 'final') -- unlike getDistinctWeeks above, this is for populating the /slate UI's season dropdown, which needs to offer an in-progress or fully-upcoming season too, not just completed ones. Newest first. */
+export async function getAvailableSeasons(sport: Sport): Promise<number[]> {
+  const result = await pool.query<{ season: number }>(`SELECT DISTINCT season FROM games WHERE sport = $1 ORDER BY season DESC`, [sport]);
+  return result.rows.map((r) => r.season);
+}
+
+/** Every week with any game (any status) in a season -- the /slate UI's week dropdown. Unlike getDistinctWeeks, includes scheduled-but-not-yet-played weeks, since picking an upcoming week to see its predictions is the normal use case. */
+export async function getAvailableWeeks(sport: Sport, season: number): Promise<number[]> {
+  const result = await pool.query<{ week: number }>(`SELECT DISTINCT week FROM games WHERE sport = $1 AND season = $2 ORDER BY week ASC`, [sport, season]);
+  return result.rows.map((r) => r.week);
+}
+
+/**
+ * The season/week whose games are closest in time to right now (past or
+ * future) -- the sensible default for a homepage that shouldn't require
+ * picking a season/week before showing anything. Null only when there
+ * are no games with a known date for this sport at all.
+ */
+export async function getCurrentSeasonWeek(sport: Sport): Promise<{ season: number; week: number } | null> {
+  const result = await pool.query<{ season: number; week: number }>(
+    `SELECT season, week FROM games WHERE sport = $1 AND game_date IS NOT NULL
+     ORDER BY ABS(EXTRACT(EPOCH FROM (game_date - now()))) ASC LIMIT 1`,
+    [sport],
+  );
+  return result.rows[0] ?? null;
+}
+
 export interface FinalGame {
   id: number;
   homeTeamId: number;

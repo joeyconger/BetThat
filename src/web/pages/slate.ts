@@ -4,18 +4,33 @@ import type { HypotheticalMatchupResult } from "../../ratings/service.js";
 
 const TAB_INDEX: Record<string, number> = { weekly: 0, ratings: 1, sim: 2 };
 
-function sportSeasonWeekFields(sport: string, season: string, week: string): string {
+function sportSeasonWeekFields(sport: string, season: string, week: string, availableSeasons: number[], availableWeeks: number[]): string {
+  const seasonOptions = availableSeasons.map((s) => `<option value="${s}" ${String(s) === season ? "selected" : ""}>${s}</option>`).join("");
+  const weekOptions = availableWeeks.map((w) => `<option value="${w}" ${String(w) === week ? "selected" : ""}>Week ${w}</option>`).join("");
   return `
     <select name="sport">
       <option value="nfl" ${sport === "nfl" ? "selected" : ""}>NFL</option>
       <option value="cfb" ${sport === "cfb" ? "selected" : ""}>CFB</option>
     </select>
-    <input type="number" name="season" placeholder="Season, e.g. 2025" value="${escapeHtml(season)}" required>
-    <input type="number" name="week" placeholder="Week" value="${escapeHtml(week)}" required>
+    <select name="season" required>
+      <option value="" disabled ${season === "" ? "selected" : ""}>Season</option>
+      ${seasonOptions}
+    </select>
+    <select name="week" required>
+      <option value="" disabled ${week === "" ? "selected" : ""}>Week</option>
+      ${weekOptions}
+    </select>
   `;
 }
 
-function weeklySlateTab(sport: string, season: string, week: string, predictions: PredictionRow[] | null): string {
+function weeklySlateTab(
+  sport: string,
+  season: string,
+  week: string,
+  predictions: PredictionRow[] | null,
+  availableSeasons: number[],
+  availableWeeks: number[],
+): string {
   const headline =
     predictions && predictions.length > 0
       ? statTiles([{ label: "Games", value: String(predictions.length) }])
@@ -27,15 +42,18 @@ function weeklySlateTab(sport: string, season: string, week: string, predictions
       : predictions.length === 0
         ? `<p class="muted">No predictions generated for ${escapeHtml(sport)} ${escapeHtml(season)} week ${escapeHtml(week)} yet.</p>`
         : `<table>
-            <thead><tr><th>Matchup</th><th class="num">Model line (home)</th><th class="num">Confidence (±pts)</th></tr></thead>
+            <thead><tr><th>Matchup</th><th>Model line</th><th class="num">Confidence (±pts)</th></tr></thead>
             <tbody>${predictions
-              .map(
-                (p) => `<tr>
+              .map((p) => {
+                const favoredHome = p.modelSpreadHome < 0;
+                const line = Math.abs(p.modelSpreadHome).toFixed(1);
+                const favoredTeam = favoredHome ? p.homeTeam : p.awayTeam;
+                return `<tr>
                   <td>${escapeHtml(p.awayTeam)} @ ${escapeHtml(p.homeTeam)}</td>
-                  <td class="num">${p.modelSpreadHome >= 0 ? "+" : ""}${p.modelSpreadHome.toFixed(1)}</td>
+                  <td>${escapeHtml(favoredTeam)} by ${line}</td>
                   <td class="num muted">${p.confidence === null ? "—" : p.confidence.toFixed(1)}</td>
-                </tr>`,
-              )
+                </tr>`;
+              })
               .join("")}</tbody>
           </table>`;
 
@@ -43,7 +61,7 @@ function weeklySlateTab(sport: string, season: string, week: string, predictions
     <p class="subtitle">The model's own line for each game — a rating differential, home-field advantage, and a few secondary signals. No market comparison shown here.</p>
     <form method="get" action="/slate">
       <input type="hidden" name="tab" value="weekly">
-      ${sportSeasonWeekFields(sport, season, week)}
+      ${sportSeasonWeekFields(sport, season, week, availableSeasons, availableWeeks)}
       <button type="submit">Show slate</button>
     </form>
     ${headline}
@@ -67,7 +85,14 @@ function powerBar(rating: number, maxAbs: number): string {
   </div>`;
 }
 
-function powerRatingsTab(sport: string, season: string, week: string, ratings: TeamRatingRow[] | null): string {
+function powerRatingsTab(
+  sport: string,
+  season: string,
+  week: string,
+  ratings: TeamRatingRow[] | null,
+  availableSeasons: number[],
+  availableWeeks: number[],
+): string {
   const maxAbs = ratings ? Math.max(1e-9, ...ratings.map((r) => Math.abs(r.rating))) : 0;
   const headline =
     ratings && ratings.length > 0
@@ -104,7 +129,7 @@ function powerRatingsTab(sport: string, season: string, week: string, ratings: T
     <p class="subtitle">EPA-driven Elo ratings, in points (positive = above league average). Bars are relative to the widest spread in this list, not an absolute scale.</p>
     <form method="get" action="/slate">
       <input type="hidden" name="tab" value="ratings">
-      ${sportSeasonWeekFields(sport, season, week)}
+      ${sportSeasonWeekFields(sport, season, week, availableSeasons, availableWeeks)}
       <button type="submit">Show ratings</button>
     </form>
     ${headline}
@@ -132,6 +157,8 @@ function matchupSimTab(
   home: string,
   away: string,
   result: HypotheticalMatchupResult | null,
+  availableSeasons: number[],
+  availableWeeks: number[],
 ): string {
   const resultBlock = !result
     ? home && away
@@ -159,7 +186,7 @@ function matchupSimTab(
     <p class="subtitle">Pick any two teams — not necessarily ones scheduled to play — and see the model's implied line, using each team's rating as of the end of the selected week. No market line exists for a hypothetical matchup, so none is shown.</p>
     <form method="get" action="/slate">
       <input type="hidden" name="tab" value="sim">
-      ${sportSeasonWeekFields(sport, season, week)}
+      ${sportSeasonWeekFields(sport, season, week, availableSeasons, availableWeeks)}
       ${teamSelect("home", teams, home)}
       <span class="muted">vs</span>
       ${teamSelect("away", teams, away)}
@@ -180,19 +207,21 @@ export function renderSlatePage(params: {
   simHome: string;
   simAway: string;
   simResult: HypotheticalMatchupResult | null;
+  availableSeasons: number[];
+  availableWeeks: number[];
 }): string {
-  const { sport, season, week, activeTab, predictions, ratings, teams, simHome, simAway, simResult } = params;
+  const { sport, season, week, activeTab, predictions, ratings, teams, simHome, simAway, simResult, availableSeasons, availableWeeks } = params;
   const body = `
     <h1>Slate</h1>
     ${tabs(
       "slate",
       [
-        { label: "Weekly Slate", html: weeklySlateTab(sport, season, week, predictions) },
-        { label: "Power Ratings", html: powerRatingsTab(sport, season, week, ratings) },
-        { label: "Matchup Sim", html: matchupSimTab(sport, season, week, teams, simHome, simAway, simResult) },
+        { label: "Weekly Slate", html: weeklySlateTab(sport, season, week, predictions, availableSeasons, availableWeeks) },
+        { label: "Power Ratings", html: powerRatingsTab(sport, season, week, ratings, availableSeasons, availableWeeks) },
+        { label: "Matchup Sim", html: matchupSimTab(sport, season, week, teams, simHome, simAway, simResult, availableSeasons, availableWeeks) },
       ],
       TAB_INDEX[activeTab] ?? 0,
     )}
   `;
-  return renderPage("Slate", body, "/slate");
+  return renderPage("Slate", body, "/");
 }

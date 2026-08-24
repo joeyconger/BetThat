@@ -10,6 +10,9 @@ import {
   getTeamRatingsForWeek,
   getPredictionsForWeek,
   getTeamNameToIdMap,
+  getAvailableSeasons,
+  getAvailableWeeks,
+  getCurrentSeasonWeek,
 } from "./db/repo.js";
 import type { Sport } from "./db/repo.js";
 import { predictHypotheticalMatchup } from "./ratings/service.js";
@@ -172,7 +175,7 @@ async function handleRequest(
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/") {
+  if (req.method === "GET" && url.pathname === "/backtests") {
     const [runs, statsByRun] = await Promise.all([listBacktestRuns(), getOverallStatsByRun()]);
     html(res, renderHome(runs, statsByRun));
     return;
@@ -233,21 +236,34 @@ async function handleRequest(
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/slate") {
-    const sport = url.searchParams.get("sport") ?? "";
-    const season = url.searchParams.get("season") ?? "";
-    const week = url.searchParams.get("week") ?? "";
+  if (req.method === "GET" && (url.pathname === "/slate" || url.pathname === "/")) {
+    const sportParam = url.searchParams.get("sport") ?? "";
+    let season = url.searchParams.get("season") ?? "";
+    let week = url.searchParams.get("week") ?? "";
     const activeTab = url.searchParams.get("tab") ?? "weekly";
     const simHome = url.searchParams.get("home") ?? "";
     const simAway = url.searchParams.get("away") ?? "";
-    const validSport = isSport(sport) ? sport : "cfb";
-    const hasContext = isSport(sport) && season !== "" && week !== "";
+    const validSport = isSport(sportParam) ? sportParam : "cfb";
 
-    const [predictions, ratings, teamMap] = await Promise.all([
+    // No season/week in the URL (e.g. the bare homepage) -- default to
+    // whichever season/week has games closest to right now, so the
+    // homepage shows something useful without forcing a selection first.
+    if (season === "" || week === "") {
+      const current = await getCurrentSeasonWeek(validSport);
+      if (current) {
+        season = String(current.season);
+        week = String(current.week);
+      }
+    }
+    const hasContext = season !== "" && week !== "";
+
+    const [predictions, ratings, teamMap, availableSeasons] = await Promise.all([
       hasContext ? getPredictionsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
       hasContext ? getTeamRatingsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
       getTeamNameToIdMap(validSport),
+      getAvailableSeasons(validSport),
     ]);
+    const availableWeeks = hasContext ? await getAvailableWeeks(validSport, Number(season)) : [];
     const teams: SimTeamOption[] = [...teamMap.entries()]
       .map(([name, id]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -260,7 +276,7 @@ async function handleRequest(
     html(
       res,
       renderSlatePage({
-        sport: sport || "cfb",
+        sport: validSport,
         season,
         week,
         activeTab,
@@ -270,6 +286,8 @@ async function handleRequest(
         simHome,
         simAway,
         simResult,
+        availableSeasons,
+        availableWeeks,
       }),
     );
     return;
