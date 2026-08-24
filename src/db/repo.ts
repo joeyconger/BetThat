@@ -1091,9 +1091,9 @@ export async function getPriorSeasonFinalRating(
 export interface ExternalRatingInput {
   teamId: number;
   season: number;
-  /** null = season-final value (cfbd_sp, cfbd_returning_production -- neither has week granularity). */
+  /** null = season-final value (cfbd_sp, cfbd_returning_production, own_epa_solve_off/def -- none of these have week granularity). */
   week: number | null;
-  source: "cfbd_sp" | "cfbd_elo" | "manual_sp_weekly" | "cfbd_returning_production";
+  source: "cfbd_sp" | "cfbd_elo" | "manual_sp_weekly" | "cfbd_returning_production" | "own_epa_solve_off" | "own_epa_solve_def";
   rating: number;
 }
 
@@ -1125,6 +1125,39 @@ export async function getPriorSeasonSpRating(teamId: number, priorSeason: number
     [teamId, priorSeason],
   );
   return result.rows[0]?.rating;
+}
+
+/**
+ * Every team's own final-season EPA solve (off + def), persisted by
+ * cfb-solve-persist-final (adminJobs.ts) -- the preseason prior source for
+ * ratings/solveRatings.ts, migration 0016. Season Y-1's solve seeds season
+ * Y, same "prior season, own computation" shape as getPriorSeasonSpRating,
+ * just two rows (own_epa_solve_off/def) instead of one since off/def isn't
+ * a single number. A team present in only one of the two sources (should
+ * not happen in practice, both are always written together by the persist
+ * job, but not structurally guaranteed by the schema) is omitted rather
+ * than guessing the missing half.
+ */
+export async function getPriorSeasonEpaSolve(sport: Sport, priorSeason: number): Promise<Map<number, { off: number; def: number }>> {
+  const result = await pool.query<{ team_id: number; source: string; rating: number }>(
+    `SELECT er.team_id, er.source, er.rating
+     FROM external_ratings er
+     JOIN teams t ON t.id = er.team_id
+     WHERE t.sport = $1 AND er.season = $2 AND er.week IS NULL AND er.source IN ('own_epa_solve_off', 'own_epa_solve_def')`,
+    [sport, priorSeason],
+  );
+  const off = new Map<number, number>();
+  const def = new Map<number, number>();
+  for (const row of result.rows) {
+    if (row.source === "own_epa_solve_off") off.set(row.team_id, row.rating);
+    else def.set(row.team_id, row.rating);
+  }
+  const combined = new Map<number, { off: number; def: number }>();
+  for (const [teamId, offVal] of off) {
+    const defVal = def.get(teamId);
+    if (defVal !== undefined) combined.set(teamId, { off: offVal, def: defVal });
+  }
+  return combined;
 }
 
 /**

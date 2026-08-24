@@ -1,0 +1,103 @@
+/**
+ * The primary CFB rating engine: wraps opponentAdjust.ts's iterative
+ * opponent-adjustment solve (run on garbage-time-weighted EPA, see
+ * gamePerformance.ts's buildTeamPerformancesEpa) with a points-scale
+ * conversion and the preseason-prior construction. Replaces elo.ts's
+ * incremental-update computeSeasonRatings for CFB -- NFL has no raw-play/
+ * PPA ingestion (see ingest/cfbd/client.ts's getPlays doc history) and
+ * stays on the Elo path, which is why this lives in its own module rather
+ * than folding into elo.ts.
+ *
+ * Every design choice here is backed by a real-data diagnostic, not
+ * assumed -- see docs/prompts/iterative-solve-replaces-elo.md for the full
+ * writeup (Step 1's 8-checkpoint correlation-vs-SP+ comparison, the
+ * cold-start-via-seeding falsification, the EPA-vs-success-rate test, and
+ * the prior-weight sweep that found weight=2). Re-derive nothing from this
+ * file alone without reading that doc first.
+ */
+
+import { computeOpponentAdjustedRatings, type TeamPerformance } from "./opponentAdjust.js";
+
+export interface SolveRatingParams {
+  /**
+   * Converts the solve's raw OFF-DEF composite (garbage-time-weighted
+   * EPA-per-play units, typically roughly -0.3..+0.3 for real CFB teams)
+   * into a points-vs-average-FBS-team scale, the same role
+   * RatingParams.pointsPerEpa played for the old incremental Elo loop.
+   * 100 is a reasonable starting order of magnitude (giving roughly
+   * -30..+30 points for real teams) but UNTESTED at definition time --
+   * needs calibration via Step 4's RMSE-based evaluation metric, not
+   * derived from first principles. Do not treat the current value as
+   * final without checking this comment has been updated with a real
+   * sweep result.
+   */
+  pointsPerEpaSolve: number;
+  /**
+   * Weighted pseudo-games for the preseason prior (the team's own prior-
+   * season final solve, see opponentAdjust.ts's options.priors doc for
+   * the mechanism -- entered into the fixed-point equations, NOT a
+   * starting-point seed, which was proven not to work for this system).
+   * Calibrated value: 2. Real-data sweep (docs/prompts/
+   * iterative-solve-replaces-elo.md) found weight=2 beats Elo at all 8
+   * checkpoints tested (2025 weeks 4-14 + 2023/2024 finals), with the
+   * biggest gains exactly where they're needed (early weeks) and only a
+   * small, still-positive giveback late in the season. weight=5 already
+   * starts the "too much prior overwhelms real data" pattern (loses to
+   * Elo at week 14) -- do not casually increase this without re-running
+   * that sweep. 0 disables the prior entirely (cold start, no seeding).
+   */
+  priorWeight: number;
+}
+
+/** See each field's own doc for why these specific values, not a placeholder pair. */
+export const DEFAULT_SOLVE_RATING_PARAMS: SolveRatingParams = {
+  pointsPerEpaSolve: 100,
+  priorWeight: 2,
+};
+
+export interface SolveTeamRating {
+  /** offPoints - defPoints -- the single scalar ratings/elo.ts's predictSpread needs (rating differential + home field advantage). */
+  rating: number;
+  offPoints: number;
+  defPoints: number;
+  /** Real games played (NOT opponentAdjust.ts's teamDiagnostics.gamesPlayed, which double-counts offense+defense appearances for the same team -- this is that divided by 2, matching what every other consumer of a "gamesPlayed" field in this codebase expects). */
+  gamesPlayed: number;
+}
+
+/**
+ * Computes every team's rating from a set of (already as-of-week-filtered
+ * -- see opponentAdjust.ts's header doc, this function is just as
+ * lookahead-unsafe as the solve itself if the caller passes future games)
+ * performances, optionally blending in a preseason prior via weighted
+ * pseudo-games. priorSolve is typically the prior season's own final
+ * solve output (db/repo.ts's getPriorSeasonEpaSolve) -- passing a
+ * different, inconsistently-anchored prior risks the gauge-freedom issue
+ * documented in opponentAdjust.ts's initialOff/initialDef doc (though
+ * that risk applies to arbitrary priors generally, not specifically to
+ * this pseudo-game mechanism, which was built and tested precisely
+ * because seeding doesn't have this problem the same way -- see the
+ * mechanism's own doc for the distinction).
+ */
+export function computeSolveRatings(
+  performances: TeamPerformance[],
+  priorSolve: Map<number, { off: number; def: number }> | undefined,
+  params: SolveRatingParams,
+): Map<number, SolveTeamRating> {
+  const priors =
+    priorSolve && params.priorWeight > 0
+      ? new Map([...priorSolve].map(([teamId, p]) => [teamId, { off: p.off, def: p.def, weight: params.priorWeight }] as const))
+      : undefined;
+
+  const solve = computeOpponentAdjustedRatings(performances, { priors });
+
+  const ratings = new Map<number, SolveTeamRating>();
+  for (const teamId of solve.off.keys()) {
+    const off = solve.off.get(teamId)!;
+    const def = solve.def.get(teamId)!;
+    const offPoints = params.pointsPerEpaSolve * off;
+    const defPoints = params.pointsPerEpaSolve * def;
+    const gamesPlayed = (solve.teamDiagnostics.get(teamId)?.gamesPlayed ?? 0) / 2;
+    ratings.set(teamId, { rating: offPoints - defPoints, offPoints, defPoints, gamesPlayed });
+  }
+  return ratings;
+}
