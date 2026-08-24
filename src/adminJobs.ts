@@ -38,7 +38,7 @@ import { pairedTTest } from "./stats/significance.js";
 import { buildTeamPerformances, buildTeamPerformancesEpa } from "./ratings/gamePerformance.js";
 import type { GamePlaysGroup } from "./ratings/gamePerformance.js";
 import { computeOpponentAdjustedRatings, identifyLowConnectivityTeams } from "./ratings/opponentAdjust.js";
-import type { TeamPerformance } from "./ratings/opponentAdjust.js";
+import type { TeamPerformance, OpponentAdjustedRatings } from "./ratings/opponentAdjust.js";
 import { syncManualSpWeekly2025 } from "./ingest/manual/syncManualSpWeekly.js";
 import { syncCfbdHistoricalOdds } from "./ingest/cfbd/syncHistoricalOdds.js";
 import { syncCfbdSpRatings, syncCfbdEloRatings, syncCfbdReturningProduction } from "./ingest/cfbd/syncExternalRatings.js";
@@ -3050,6 +3050,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-solve-coldstart-test": startSolveColdStartTestJob,
   "cfb-solve-epa-hypothesis-test": startSolveEpaHypothesisTestJob,
   "cfb-solve-prior-weight-test": startSolvePriorWeightTestJob,
+  "cfb-solve-prior-weight-full-checkpoint-test": startSolvePriorWeightFullCheckpointTestJob,
 };
 
 /**
@@ -4143,5 +4144,143 @@ export function startSolvePriorWeightTestJob(): Promise<JobStatus> {
         );
       }
     }
+  });
+}
+
+/**
+ * Checks weight=2/5 (the two candidates that flipped weeks 4/6 in
+ * cfb-solve-prior-weight-test) across ALL checkpoints, not just the two
+ * that were losing -- a prior that helps early could plausibly hurt
+ * weeks 8-14, where the EPA solve was already beating Elo with no prior
+ * at all. The weight is fixed (not decayed per week), so its RELATIVE
+ * influence should shrink naturally as real games accumulate -- this
+ * checks that's actually true rather than assuming it.
+ *
+ * Prior sources, to avoid any circularity (never a season's own final
+ * solve as its own prior):
+ *  - 2025 weeks 4-14: prior = 2024's final-season EPA solve (same as the
+ *    weeks-4/6 test).
+ *  - 2024's own final week: prior = 2023's final-season EPA solve --
+ *    genuinely new coverage, not in the earlier test.
+ *  - 2023's own final week: no valid prior source exists (no 2022 raw
+ *    play data ingested) -- reported at weight=0 only, for reference.
+ */
+export function startSolvePriorWeightFullCheckpointTestJob(): Promise<JobStatus> {
+  return runJob("cfb-solve-prior-weight-full-checkpoint-test", async (job) => {
+    function pearson(xs: number[], ys: number[]): number {
+      const n = xs.length;
+      const meanX = xs.reduce((a, b) => a + b, 0) / n;
+      const meanY = ys.reduce((a, b) => a + b, 0) / n;
+      let cov = 0;
+      let varX = 0;
+      let varY = 0;
+      for (let i = 0; i < n; i++) {
+        cov += (xs[i]! - meanX) * (ys[i]! - meanY);
+        varX += (xs[i]! - meanX) ** 2;
+        varY += (ys[i]! - meanY) ** 2;
+      }
+      return cov / Math.sqrt(varX * varY);
+    }
+
+    async function buildEpaPerformances(season: number, week: number): Promise<TeamPerformance[]> {
+      const plays = await getPlaysForSeasonThroughWeek("cfb", season, week);
+      const gamesById = new Map<number, GamePlaysGroup>();
+      for (const p of plays) {
+        let g = gamesById.get(p.gameId);
+        if (!g) {
+          g = { gameId: p.gameId, homeTeamId: p.homeTeamId, awayTeamId: p.awayTeamId, plays: [] };
+          gamesById.set(p.gameId, g);
+        }
+        g.plays.push({
+          offenseTeamId: p.offenseTeamId,
+          defenseTeamId: p.defenseTeamId,
+          down: p.down,
+          distance: p.distance,
+          yardsGained: p.yardsGained,
+          playType: p.playType,
+          offenseScore: p.offenseScore,
+          defenseScore: p.defenseScore,
+          period: p.period,
+          clockMinutes: p.clockMinutes,
+          clockSeconds: p.clockSeconds,
+          ppa: p.ppa,
+        });
+      }
+      return buildTeamPerformancesEpa([...gamesById.values()]);
+    }
+
+    function priorsFrom(solve: OpponentAdjustedRatings, weight: number): Map<number, { off: number; def: number; weight: number }> {
+      const priors = new Map<number, { off: number; def: number; weight: number }>();
+      for (const [teamId, off] of solve.off) {
+        priors.set(teamId, { off, def: solve.def.get(teamId) ?? 0, weight });
+      }
+      return priors;
+    }
+
+    async function checkpoint(
+      label: string,
+      season: number,
+      week: number,
+      eloState: Map<number, { rating: number }>,
+      spDistribution: Map<number, number>,
+      priorSolve: OpponentAdjustedRatings | null,
+      weights: number[],
+    ): Promise<void> {
+      const performances = await buildEpaPerformances(season, week);
+      log(job, `\n${label}:`);
+      for (const weight of weights) {
+        const priors = weight > 0 && priorSolve ? priorsFrom(priorSolve, weight) : undefined;
+        const solve = computeOpponentAdjustedRatings(performances, { priors });
+        const composite = new Map<number, number>();
+        for (const teamId of solve.off.keys()) {
+          composite.set(teamId, solve.off.get(teamId)! - solve.def.get(teamId)!);
+        }
+        const rows: { elo: number; solve: number; sp: number }[] = [];
+        for (const [teamId, sp] of spDistribution) {
+          const eloRating = eloState.get(teamId)?.rating;
+          const solveVal = composite.get(teamId);
+          if (eloRating === undefined || solveVal === undefined) continue;
+          rows.push({ elo: eloRating, solve: solveVal, sp });
+        }
+        if (rows.length < 20) {
+          log(job, `  weight=${weight}: only ${rows.length} teams in common -- skipping.`);
+          continue;
+        }
+        const eloCorr = pearson(rows.map((r) => r.elo), rows.map((r) => r.sp));
+        const solveCorr = pearson(rows.map((r) => r.solve), rows.map((r) => r.sp));
+        log(
+          job,
+          `  weight=${weight}: n=${rows.length}, converged=${solve.converged} -- Elo=${eloCorr.toFixed(3)}, EPA solve=${solveCorr.toFixed(3)} (delta=${(solveCorr - eloCorr).toFixed(4)}) -- ${solveCorr > eloCorr ? "SOLVE BEATS ELO" : "trails"}`,
+        );
+      }
+    }
+
+    log(job, "computing 2023 and 2024 final-season EPA solves (prior sources)...");
+    const weeks2023 = await getDistinctWeeks("cfb", 2023);
+    const lastWeek2023 = Math.max(...weeks2023);
+    const performances2023 = await buildEpaPerformances(2023, lastWeek2023);
+    const solve2023 = computeOpponentAdjustedRatings(performances2023);
+
+    const weeks2024 = await getDistinctWeeks("cfb", 2024);
+    const lastWeek2024 = Math.max(...weeks2024);
+    const performances2024 = await buildEpaPerformances(2024, lastWeek2024);
+    const solve2024 = computeOpponentAdjustedRatings(performances2024);
+    log(job, `2023 solve: ${solve2023.off.size} teams, converged=${solve2023.converged}. 2024 solve: ${solve2024.off.size} teams, converged=${solve2024.converged}.`);
+
+    const weights = [0, 2, 5];
+
+    for (const week of [4, 6, 8, 10, 12, 14]) {
+      const eloState = await computeRatings("cfb", 2025, week);
+      const spDistribution = await getManualSpWeeklyDistributionForWeek("cfb", 2025, week);
+      await checkpoint(`2025 week ${week}`, 2025, week, eloState, spDistribution, solve2024, weights);
+    }
+
+    const eloState2024 = await computeRatings("cfb", 2024, lastWeek2024);
+    const spDistribution2024 = await getCfbdSpDistributionForSeason("cfb", 2024);
+    await checkpoint(`2024 final (week ${lastWeek2024}) -- prior = 2023 solve`, 2024, lastWeek2024, eloState2024, spDistribution2024, solve2023, weights);
+
+    const eloState2023 = await computeRatings("cfb", 2023, lastWeek2023);
+    const spDistribution2023 = await getCfbdSpDistributionForSeason("cfb", 2023);
+    await checkpoint(`2023 final (week ${lastWeek2023}) -- no valid prior source, weight=0 only`, 2023, lastWeek2023, eloState2023, spDistribution2023, null, [0]);
   });
 }
