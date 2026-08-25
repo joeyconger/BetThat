@@ -33,6 +33,7 @@ import {
   getReturningProductionDistribution,
   getGameHistoryForSeason,
   getPriorSeasonEpaSolve,
+  reassignGamesWeek,
 } from "./db/repo.js";
 import type { BacktestRunSummary } from "./db/repo.js";
 import { runPlaceboTest } from "./backtest/placebo.js";
@@ -3612,6 +3613,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-odds-current": startCfbOddsCurrentJob,
   "cfb-live-predictions-2026": startCfbLivePredictionsJob(2026),
   "cfb-2026-schedule-diagnose": startCfb2026ScheduleDiagnoseJob,
+  "cfb-2026-split-week0": startCfb2026SplitWeek0Job,
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
   "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
   "cfb-st-weight-sweep": startCfbStWeightSweepJob,
@@ -5015,6 +5017,25 @@ export function startCfbLivePredictionsJob(year: number): () => Promise<JobStatu
  * side is a currently-tracked FBS team, so that's visible without
  * guessing. Delete once the real answer is known and (if needed) acted on.
  */
+/**
+ * LOAD-BEARING one-time correction, not diagnostic: fixes CFBD's bundled
+ * season-opener week (see reassignGamesWeek's doc) by splitting CFB 2026's
+ * week=1 into the real week=0 (2026-08-29/30, 8 games -- UNC-TCU,
+ * UNLV-Memphis, etc.) and the real week=1 (2026-09-03 onward, 43 games).
+ * 2026-09-01 is a safe cutoff -- verified against real production data:
+ * the actual gap runs from 2026-08-30 02:00 to 2026-09-03 22:00, so any
+ * cutoff in between works identically. Run ONCE; re-running is harmless
+ * (0 rows match the second time) but pointless. Follow with
+ * cfb-live-predictions-2026 to regenerate ratings/predictions against the
+ * corrected week split.
+ */
+export function startCfb2026SplitWeek0Job(): Promise<JobStatus> {
+  return runJob("cfb-2026-split-week0", async (job) => {
+    const updated = await reassignGamesWeek("cfb", 2026, 1, 0, "2026-09-01");
+    log(job, `reassigned ${updated} games from week=1 to week=0 (game_date < 2026-09-01) -- expect 8.`);
+  });
+}
+
 export function startCfb2026ScheduleDiagnoseJob(): Promise<JobStatus> {
   return runJob("cfb-2026-schedule-diagnose", async (job) => {
     const games = await getGames(2026, "regular");

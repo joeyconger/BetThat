@@ -1426,6 +1426,30 @@ export async function getCurrentSeasonWeek(sport: Sport): Promise<{ season: numb
   return result.rows[0] ?? null;
 }
 
+/**
+ * One-time data correction, not a general-purpose helper: CFBD bundles
+ * the true season-opening "Week 0" slate and the following week's real
+ * "Week 1" slate into a single `week` value (confirmed for CFB 2026:
+ * week=1 spanned 2026-08-29 through 2026-09-07, an 8-day span vs. every
+ * other week's normal ~2-4 day spread, with a clean 3.5-day gap between
+ * the two clusters -- every other week is a normal single weekend, so
+ * this is specifically a season-opener quirk in CFBD's own numbering,
+ * not a systemic issue). Reassigns games dated before `beforeDate` from
+ * `fromWeek` to `toWeek`, nothing else -- every later week's games are
+ * already correctly bucketed and untouched. Returns the number of rows
+ * updated.
+ */
+export async function reassignGamesWeek(sport: Sport, season: number, fromWeek: number, toWeek: number, beforeDate: string): Promise<number> {
+  const result = await pool.query(`UPDATE games SET week = $1, updated_at = now() WHERE sport = $2 AND season = $3 AND week = $4 AND game_date < $5`, [
+    toWeek,
+    sport,
+    season,
+    fromWeek,
+    beforeDate,
+  ]);
+  return result.rowCount ?? 0;
+}
+
 export interface FinalGame {
   id: number;
   homeTeamId: number;
