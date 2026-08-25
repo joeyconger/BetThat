@@ -4,18 +4,21 @@ import type { HypotheticalMatchupResult } from "../../ratings/service.js";
 
 type ScoreProjection = { homeScore: number; awayScore: number };
 
-/** SP+-style "Team 31, Team 24" projected score, higher score first (not home/away order) -- falls back to the spread-only "Team X by Y.Y" format when no projection exists (NFL, or a team missing a rating). */
-function formatProjection(homeTeam: string, awayTeam: string, projection: ScoreProjection | null | undefined, modelSpreadHome: number): string {
-  if (!projection) {
-    const favoredHome = modelSpreadHome < 0;
-    const line = Math.abs(modelSpreadHome).toFixed(1);
-    return `${escapeHtml(favoredHome ? homeTeam : awayTeam)} by ${line}`;
-  }
+/** SP+-style "Team 31, Team 24" projected score, higher score first (not home/away order). Null when no projection exists (NFL, or a team missing a rating) -- callers show formatSpread alone in that case. */
+function formatProjection(homeTeam: string, awayTeam: string, projection: ScoreProjection | null | undefined): string | null {
+  if (!projection) return null;
   const [leader, leaderScore, trailer, trailerScore] =
     projection.homeScore >= projection.awayScore
       ? [homeTeam, projection.homeScore, awayTeam, projection.awayScore]
       : [awayTeam, projection.awayScore, homeTeam, projection.homeScore];
   return `${escapeHtml(leader)} ${Math.round(leaderScore)}, ${escapeHtml(trailer)} ${Math.round(trailerScore)}`;
+}
+
+/** "Team X by Y.Y" favored-team-plus-line format -- shown alongside (not instead of) the projected score, per explicit request. */
+function formatSpread(homeTeam: string, awayTeam: string, modelSpreadHome: number): string {
+  const favoredHome = modelSpreadHome < 0;
+  const line = Math.abs(modelSpreadHome).toFixed(1);
+  return `${escapeHtml(favoredHome ? homeTeam : awayTeam)} by ${line}`;
 }
 
 const TAB_INDEX: Record<string, number> = { weekly: 0, ratings: 1, sim: 2 };
@@ -59,13 +62,15 @@ function weeklySlateTab(
       : predictions.length === 0
         ? `<p class="muted">No predictions generated for ${escapeHtml(sport)} ${escapeHtml(season)} week ${escapeHtml(week)} yet.</p>`
         : `<table>
-            <thead><tr><th>Matchup</th><th>Projected score</th><th class="num">Confidence (±pts)</th></tr></thead>
+            <thead><tr><th>Matchup</th><th>Spread</th><th>Projected score</th><th class="num">Confidence (±pts)</th></tr></thead>
             <tbody>${predictions
               .map((p) => {
                 const projection = projectedScores.get(p.gameId);
+                const scoreText = formatProjection(p.homeTeam, p.awayTeam, projection);
                 return `<tr>
                   <td>${escapeHtml(p.awayTeam)} @ ${escapeHtml(p.homeTeam)}</td>
-                  <td>${formatProjection(p.homeTeam, p.awayTeam, projection, p.modelSpreadHome)}</td>
+                  <td>${formatSpread(p.homeTeam, p.awayTeam, p.modelSpreadHome)}</td>
+                  <td>${scoreText ?? '<span class="muted">—</span>'}</td>
                   <td class="num muted">${p.confidence === null ? "—" : p.confidence.toFixed(1)}</td>
                 </tr>`;
               })
@@ -182,15 +187,19 @@ function matchupSimTab(
     : (() => {
         const homeTeam = teams.find((t) => t.id === result.home.teamId);
         const awayTeam = teams.find((t) => t.id === result.away.teamId);
+        const homeName = homeTeam?.name ?? "Home";
+        const awayName = awayTeam?.name ?? "Away";
+        const scoreText = formatProjection(homeName, awayName, result.projection);
         return `
           ${statTiles([
             {
-              label: "Projected score",
-              value: formatProjection(homeTeam?.name ?? "Home", awayTeam?.name ?? "Away", result.projection, result.modelSpreadHome),
+              label: "Spread",
+              value: formatSpread(homeName, awayName, result.modelSpreadHome),
               sub: `±${result.confidence.toFixed(1)} pts`,
             },
-            { label: escapeHtml(homeTeam?.name ?? "Home"), value: `${result.home.rating >= 0 ? "+" : ""}${result.home.rating.toFixed(2)}`, sub: `${result.home.gamesPlayed} games played` },
-            { label: escapeHtml(awayTeam?.name ?? "Away"), value: `${result.away.rating >= 0 ? "+" : ""}${result.away.rating.toFixed(2)}`, sub: `${result.away.gamesPlayed} games played` },
+            ...(scoreText ? [{ label: "Projected score", value: scoreText }] : []),
+            { label: escapeHtml(homeName), value: `${result.home.rating >= 0 ? "+" : ""}${result.home.rating.toFixed(2)}`, sub: `${result.home.gamesPlayed} games played` },
+            { label: escapeHtml(awayName), value: `${result.away.rating >= 0 ? "+" : ""}${result.away.rating.toFixed(2)}`, sub: `${result.away.gamesPlayed} games played` },
           ])}
         `;
       })();
