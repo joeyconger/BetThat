@@ -218,7 +218,18 @@ const STYLES = `
   /* CSS-only tabs (radio-input hack, no JS) — tab-input radios live before
      tab-labels/tab-panels in the DOM so :checked ~ general-sibling
      selectors can target both. Each tabset instance is scoped by a unique
-     id prefix so multiple tabsets can coexist on one page. */
+     id prefix so multiple tabsets can coexist on one page. Panel
+     visibility is driven ENTIRELY by tabs()'s per-index dynamic
+     '#id-N:checked ~ ... :nth-of-type(N+1) { display:block }' rule below
+     -- there used to also be a static '.tab-panel-first { display:block }'
+     class on whichever panel was server-rendered active, meant as a belt-
+     and-suspenders default. It was actually a bug: that class doesn't
+     depend on :checked, so once a user clicked a DIFFERENT tab, the
+     dynamic rule made the new panel visible while the static rule kept
+     the original one visible too -- both panels stacked/rendered at once
+     instead of the click actually switching. Removed; the dynamic rule
+     alone already covers the initial render correctly, since the active
+     radio has 'checked' set server-side. */
   .tabset { margin-bottom: 1.75rem; }
   .tabset input.tab-input { position: absolute; opacity: 0; pointer-events: none; }
   .tab-labels { display: flex; gap: 0.2rem; border-bottom: 1px solid var(--border); overflow-x: auto; margin-bottom: 1.25rem; }
@@ -229,7 +240,6 @@ const STYLES = `
   }
   .tab-labels label:hover { color: var(--text); }
   .tab-panels .tab-panel { display: none; }
-  .tab-panels .tab-panel.tab-panel-first { display: block; }
 
   @media (max-width: 640px) {
     main { padding: 0 1rem; }
@@ -328,9 +338,7 @@ export function tabs(idPrefix: string, specs: TabSpec[], active = 0): string {
     .map((_, i) => `<input type="radio" name="${idPrefix}" id="${idPrefix}-${i}" class="tab-input"${i === active ? " checked" : ""}>`)
     .join("");
   const labels = specs.map((s, i) => `<label for="${idPrefix}-${i}">${escapeHtml(s.label)}</label>`).join("");
-  const panels = specs
-    .map((s, i) => `<div class="tab-panel${i === active ? " tab-panel-first" : ""}">${s.html}</div>`)
-    .join("");
+  const panels = specs.map((s) => `<div class="tab-panel">${s.html}</div>`).join("");
   const dynamicCss = specs
     .map(
       (_, i) => `
