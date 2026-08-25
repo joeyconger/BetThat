@@ -132,12 +132,20 @@ test("computeSolveRatings: a lower returningProduction fraction pulls LESS towar
   assert.ok(lowReturning.get(1)!.rating > noPrior.get(1)!.rating, "still pulled SOME toward the prior, just less");
 });
 
-test("computeSolveRatings: a team with returningProduction=0 gets exactly the no-prior rating (fully discounted)", () => {
+test("computeSolveRatings: a team with returningProduction=0 is discounted to the 0.35 floor, NOT fully erased", () => {
+  // A real production case (Oklahoma-UTEP, 2026) caught the earlier
+  // fully-erased version doing real damage: UTEP's percentPPA read as
+  // ~0, which zeroed their entire prior and rated a genuinely bad team as
+  // perfectly average -- see solveRatings.ts's doc for the full story.
+  // 0 must still retain SOME signal (the 0.35 floor), not match the
+  // true no-prior baseline.
   const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
   const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
   const zeroReturning = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0]]));
   const noPrior = computeSolveRatings(ROUND_ROBIN_3, undefined, { ...params, priorWeight: 0 });
-  assert.ok(close(zeroReturning.get(1)!.rating, noPrior.get(1)!.rating));
+  const floored = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0.35]]));
+  assert.ok(zeroReturning.get(1)!.rating > noPrior.get(1)!.rating, "0 returning production must still pull toward a positive prior, not land at the no-prior baseline");
+  assert.ok(close(zeroReturning.get(1)!.rating, floored.get(1)!.rating), "0 and 0.35 should behave identically -- both clamp to the same floor");
 });
 
 test("computeSolveRatings: a team MISSING from returningProduction falls back to the flat priorWeight, not zero", () => {
@@ -157,22 +165,22 @@ test("computeSolveRatings: returningProduction fraction is clamped at 1.5, not u
   assert.ok(close(wayOverOne.get(1)!.rating, clampedAtCap.get(1)!.rating));
 });
 
-test("computeSolveRatings: returningProduction is NEVER negative even when CFBD's real percentPPA is (observed as low as -0.567 in production)", () => {
+test("computeSolveRatings: a negative returningProduction (CFBD's real percentPPA has been observed as low as -0.567) clamps to the same 0.35 floor as 0, not below it", () => {
   const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
   const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
   const negative = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, -0.567]]));
   const zero = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0]]));
-  assert.ok(close(negative.get(1)!.rating, zero.get(1)!.rating), "a negative fraction must clamp to 0, not flip the prior's sign");
+  assert.ok(close(negative.get(1)!.rating, zero.get(1)!.rating), "a negative fraction must clamp to the same floor as 0, not flip the prior's sign or go lower");
 });
 
-test("computeSolveRatings: a team with returningProduction=0 AND zero real games of its own still appears in the output (not dropped), rated near league average", () => {
+test("computeSolveRatings: a team with returningProduction=0 AND zero real games of its own still appears in the output (not dropped), at the floored (not fully erased) prior", () => {
   // This is the real preseason scenario the mechanism exists for: before
   // any 2026 games are played, a team with gutted roster continuity has
-  // NO real performances of its own AND a fully-shrunk prior. An earlier
+  // NO real performances of its own AND a shrunk prior. An earlier
   // (weight-scaling, not value-shrinking) version of this mechanism
   // dropped such a team from the output map entirely instead of rating it
-  // at league average -- this guards against that regression. Team 4 has
-  // no entry in ROUND_ROBIN_3 at all (0 real games), only a prior.
+  // at its floored prior -- this guards against that regression. Team 4
+  // has no entry in ROUND_ROBIN_3 at all (0 real games), only a prior.
   const priorSolve = new Map([
     [1, { off: 10, def: -10 }],
     [4, { off: 8, def: -8 }],
@@ -180,7 +188,11 @@ test("computeSolveRatings: a team with returningProduction=0 AND zero real games
   const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
   const withZeroContinuity = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[4, 0]]));
   assert.ok(withZeroContinuity.has(4), "a returningProduction=0 team with zero real games must still be in the output map");
-  assert.ok(close(withZeroContinuity.get(4)!.rating, 0), "should be rated at league average, not carry its stale prior");
+  // With zero real games, target = prior exactly (see computeSolveRatings'
+  // doc) -- team 4's shrunk prior is off=8*0.35=2.8, def=-8*0.35=-2.8, so
+  // rating = 2.8 - (-2.8) = 5.6, NOT 0 -- the 0.35 floor means a team is
+  // discounted, never reset all the way to league average.
+  assert.ok(close(withZeroContinuity.get(4)!.rating, 5.6), "should retain 35% of its real prior, not be reset to league average");
 });
 
 test("DEFAULT_SOLVE_RATING_PARAMS matches the calibrated values documented in solveRatings.ts", () => {

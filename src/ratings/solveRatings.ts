@@ -191,9 +191,25 @@ export interface SolveTeamRating {
  * data isn't evidence of turnover. CFBD's percentPPA is OFFENSE-ONLY
  * (passing/receiving/rushing PPA) -- applied here to both off and def as
  * a roster-continuity proxy, since no defensive equivalent exists in this
- * data source. Clamped to [0, 1.5] defensively against a data outlier
- * (real 2026 data has shown values as low as -0.567 -- a genuine CFBD
- * quirk, not a bug here); every team keeps the full calibrated
+ * data source. Clamped to [0.35, 1.5], NOT [0, 1.5] -- floored at 0.35,
+ * not 0, after a real case caught the all-the-way-to-zero version doing
+ * real damage: UTEP's 2026 percentPPA reads as -0.011 (clamps to the
+ * floor), which zeroed out their ENTIRE prior and rated them as a
+ * perfectly average FBS team for 2026, when their real 2025 prior
+ * (off=-0.256, a genuinely bad offense) combined with Oklahoma's own
+ * prior projects almost exactly the real ~40-point Vegas line for
+ * Oklahoma-UTEP -- the un-shrunk model was actually right here, and the
+ * shrink-to-zero was actively hiding a correct signal. The likely
+ * mechanism: percentPPA is a RATIO of returning PPA to total PPA, which
+ * is inherently unstable near a team's total-PPA denominator being close
+ * to zero -- exactly the bad-offense case where getting the prior right
+ * matters most for a realistic blowout projection. 0.35 keeps returning
+ * production able to meaningfully discount a team's prior (a team
+ * reporting low continuity still loses up to 65% of its prior pull) without
+ * ever fully erasing a real, informative prior-season signal over one
+ * noisy ratio. Not an RMSE-fit value -- a floor chosen to stop a specific
+ * observed failure mode, worth a real walk-forward check if returning
+ * production is revisited later. Every team keeps the full calibrated
  * params.priorWeight regardless of fraction, so it's always > 0 and no
  * team is ever dropped from the output.
  */
@@ -209,7 +225,7 @@ export function computeSolveRatings(
       ? new Map(
           [...priorSolve].map(([teamId, p]) => {
             const fraction = returningProduction?.get(teamId);
-            const shrink = fraction === undefined ? 1 : Math.min(1.5, Math.max(0, fraction));
+            const shrink = fraction === undefined ? 1 : Math.min(1.5, Math.max(0.35, fraction));
             return [teamId, { off: p.off * shrink, def: p.def * shrink, weight: params.priorWeight }] as const;
           }),
         )
