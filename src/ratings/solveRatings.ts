@@ -154,24 +154,40 @@ export interface SolveTeamRating {
  * mechanism's own doc for the distinction).
  *
  * returningProduction (optional, CFBD's percentPPA -- db/repo.ts's
- * getReturningProductionDistribution) scales EACH TEAM'S OWN prior weight
- * by how much of last year's production is actually coming back, instead
- * of trusting every team's carryover equally: a team that gutted its
- * roster gets a much weaker (or near-zero) pull toward its prior-season
- * number, while a team that returns nearly everyone keeps close to
- * params.priorWeight's full trust. This is the fix for the gap flagged
- * directly: with the 2026 season not yet started, every team's rating was
- * PURE prior-season carryover with zero adjustment for transfers/draft
- * losses -- e.g. a team that lost most of its production would still be
- * rated as if it returned the same team. A team missing from
- * returningProduction (data not ingested/resolved) falls back to the flat
- * params.priorWeight, not zero -- missing data isn't evidence of turnover.
- * CFBD's percentPPA is OFFENSE-ONLY (passing/receiving/rushing PPA) --
- * applied here to both off and def prior weight for the same team as a
- * proxy for overall roster continuity, since no defensive equivalent
- * exists in this data source. Clamped to [0, 1.5] defensively against a
- * data outlier; not itself derived from a real-data fit (fraction directly
- * scales the already-calibrated priorWeight=2, not a fresh coefficient).
+ * getReturningProductionDistribution) shrinks EACH TEAM'S OWN prior VALUE
+ * toward 0 (league average) by how much of last year's production is
+ * actually coming back, instead of trusting every team's carryover
+ * equally: a team that gutted its roster gets a prior pulled most of the
+ * way to a generic average-team rating, while a team that returns nearly
+ * everyone keeps close to its full prior-season number. This is the fix
+ * for the gap flagged directly: with the 2026 season not yet started,
+ * every team's rating was PURE prior-season carryover with zero
+ * adjustment for transfers/draft losses.
+ *
+ * Shrinks the PRIOR VALUE, not the pseudo-game WEIGHT -- weight-scaling
+ * was tried first and doesn't work for this: with the pseudo-game math
+ * (opponentAdjust.ts's options.priors), a team with zero real games
+ * converges to target = prior EXACTLY, for ANY weight > 0 -- the weight
+ * only matters once real games exist to blend against. Pre-season, when
+ * this adjustment matters most, weight-scaling would have been a no-op
+ * (and weight=0 hits a real 0/0 in that same formula, which is why an
+ * earlier version of this code filtered zero-weight teams out of priors
+ * entirely -- discovered to silently drop teams like a returningProduction=0
+ * Oklahoma State from the ratings map altogether, breaking their
+ * predictions, when what's needed is a team AT the average rating, not a
+ * team missing from the map). Shrinking the value directly works
+ * correctly whether or not real games exist yet.
+ *
+ * A team missing from returningProduction (data not ingested/resolved)
+ * keeps its prior UNSHRUNK (fraction defaults to 1), not zeroed -- missing
+ * data isn't evidence of turnover. CFBD's percentPPA is OFFENSE-ONLY
+ * (passing/receiving/rushing PPA) -- applied here to both off and def as
+ * a roster-continuity proxy, since no defensive equivalent exists in this
+ * data source. Clamped to [0, 1.5] defensively against a data outlier
+ * (real 2026 data has shown values as low as -0.567 -- a genuine CFBD
+ * quirk, not a bug here); every team keeps the full calibrated
+ * params.priorWeight regardless of fraction, so it's always > 0 and no
+ * team is ever dropped from the output.
  */
 export function computeSolveRatings(
   performances: TeamPerformance[],
@@ -183,13 +199,11 @@ export function computeSolveRatings(
   const priors =
     priorSolve && params.priorWeight > 0
       ? new Map(
-          [...priorSolve]
-            .map(([teamId, p]) => {
-              const fraction = returningProduction?.get(teamId);
-              const teamWeight = fraction === undefined ? params.priorWeight : params.priorWeight * Math.min(1.5, Math.max(0, fraction));
-              return [teamId, { off: p.off, def: p.def, weight: teamWeight }] as const;
-            })
-            .filter(([, p]) => p.weight > 0),
+          [...priorSolve].map(([teamId, p]) => {
+            const fraction = returningProduction?.get(teamId);
+            const shrink = fraction === undefined ? 1 : Math.min(1.5, Math.max(0, fraction));
+            return [teamId, { off: p.off * shrink, def: p.def * shrink, weight: params.priorWeight }] as const;
+          }),
         )
       : undefined;
 

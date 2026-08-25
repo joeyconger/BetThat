@@ -157,6 +157,32 @@ test("computeSolveRatings: returningProduction fraction is clamped at 1.5, not u
   assert.ok(close(wayOverOne.get(1)!.rating, clampedAtCap.get(1)!.rating));
 });
 
+test("computeSolveRatings: returningProduction is NEVER negative even when CFBD's real percentPPA is (observed as low as -0.567 in production)", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const negative = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, -0.567]]));
+  const zero = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0]]));
+  assert.ok(close(negative.get(1)!.rating, zero.get(1)!.rating), "a negative fraction must clamp to 0, not flip the prior's sign");
+});
+
+test("computeSolveRatings: a team with returningProduction=0 AND zero real games of its own still appears in the output (not dropped), rated near league average", () => {
+  // This is the real preseason scenario the mechanism exists for: before
+  // any 2026 games are played, a team with gutted roster continuity has
+  // NO real performances of its own AND a fully-shrunk prior. An earlier
+  // (weight-scaling, not value-shrinking) version of this mechanism
+  // dropped such a team from the output map entirely instead of rating it
+  // at league average -- this guards against that regression. Team 4 has
+  // no entry in ROUND_ROBIN_3 at all (0 real games), only a prior.
+  const priorSolve = new Map([
+    [1, { off: 10, def: -10 }],
+    [4, { off: 8, def: -8 }],
+  ]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const withZeroContinuity = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[4, 0]]));
+  assert.ok(withZeroContinuity.has(4), "a returningProduction=0 team with zero real games must still be in the output map");
+  assert.ok(close(withZeroContinuity.get(4)!.rating, 0), "should be rated at league average, not carry its stale prior");
+});
+
 test("DEFAULT_SOLVE_RATING_PARAMS matches the calibrated values documented in solveRatings.ts", () => {
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.priorWeight, 2);
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve, 60);
