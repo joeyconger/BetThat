@@ -152,16 +152,45 @@ export interface SolveTeamRating {
  * this pseudo-game mechanism, which was built and tested precisely
  * because seeding doesn't have this problem the same way -- see the
  * mechanism's own doc for the distinction).
+ *
+ * returningProduction (optional, CFBD's percentPPA -- db/repo.ts's
+ * getReturningProductionDistribution) scales EACH TEAM'S OWN prior weight
+ * by how much of last year's production is actually coming back, instead
+ * of trusting every team's carryover equally: a team that gutted its
+ * roster gets a much weaker (or near-zero) pull toward its prior-season
+ * number, while a team that returns nearly everyone keeps close to
+ * params.priorWeight's full trust. This is the fix for the gap flagged
+ * directly: with the 2026 season not yet started, every team's rating was
+ * PURE prior-season carryover with zero adjustment for transfers/draft
+ * losses -- e.g. a team that lost most of its production would still be
+ * rated as if it returned the same team. A team missing from
+ * returningProduction (data not ingested/resolved) falls back to the flat
+ * params.priorWeight, not zero -- missing data isn't evidence of turnover.
+ * CFBD's percentPPA is OFFENSE-ONLY (passing/receiving/rushing PPA) --
+ * applied here to both off and def prior weight for the same team as a
+ * proxy for overall roster continuity, since no defensive equivalent
+ * exists in this data source. Clamped to [0, 1.5] defensively against a
+ * data outlier; not itself derived from a real-data fit (fraction directly
+ * scales the already-calibrated priorWeight=2, not a fresh coefficient).
  */
 export function computeSolveRatings(
   performances: TeamPerformance[],
   priorSolve: Map<number, { off: number; def: number }> | undefined,
   params: SolveRatingParams,
   stPlays: RawPlayForSpecialTeams[] = [],
+  returningProduction?: Map<number, number>,
 ): Map<number, SolveTeamRating> {
   const priors =
     priorSolve && params.priorWeight > 0
-      ? new Map([...priorSolve].map(([teamId, p]) => [teamId, { off: p.off, def: p.def, weight: params.priorWeight }] as const))
+      ? new Map(
+          [...priorSolve]
+            .map(([teamId, p]) => {
+              const fraction = returningProduction?.get(teamId);
+              const teamWeight = fraction === undefined ? params.priorWeight : params.priorWeight * Math.min(1.5, Math.max(0, fraction));
+              return [teamId, { off: p.off, def: p.def, weight: teamWeight }] as const;
+            })
+            .filter(([, p]) => p.weight > 0),
+        )
       : undefined;
 
   const solve = computeOpponentAdjustedRatings(performances, { priors });

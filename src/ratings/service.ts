@@ -6,6 +6,7 @@ import {
   getManualSpWeeklyDistributionForWeek,
   getPlaysForSeasonThroughWeek,
   getPriorSeasonEpaSolve,
+  getReturningProductionDistribution,
   upsertTeamRating,
   getGamesForWeek,
   getLatestMarketLine,
@@ -40,6 +41,15 @@ const MIN_WEEKLY_SP_SAMPLE = 20;
  * for the real-data justification (Step 1's 8-checkpoint correlation
  * comparison against SP+). NFL has no raw-play/PPA ingestion, so it stays
  * on the incremental Elo path (elo.ts's computeSeasonRatings) unchanged.
+ *
+ * computeCfbSolveRatings ALSO fetches getReturningProductionDistribution
+ * and passes it to computeSolveRatings -- each team's prior-season pull is
+ * scaled by how much production is actually coming back, not trusted
+ * equally regardless of roster turnover. This replaces, for the solve
+ * engine, the role computeInitialRating's SP+/returning-production blend
+ * used to play for the old Elo engine (that blend is CFB-dead now, per
+ * the paramsOverride note below -- this is its intended-purpose
+ * successor, not a parallel mechanism).
  *
  * `paramsOverride` for CFB no longer has the effect it used to for the
  * Elo-specific fields it doesn't share with the new engine (baseK,
@@ -88,6 +98,11 @@ async function computeCfbSolveRatings(season: number, throughWeek: number): Prom
   }
   const performances = buildTeamPerformancesEpa([...gamesById.values()]);
   const priorSolve = await getPriorSeasonEpaSolve("cfb", season - 1);
+  // Scales each team's OWN prior weight by roster continuity (see
+  // computeSolveRatings' returningProduction doc) -- this season's value
+  // (not season-1's), since CFBD's /player/returning for season Y already
+  // describes production returning INTO season Y.
+  const returningProduction = await getReturningProductionDistribution("cfb", season);
   const stPlays: RawPlayForSpecialTeams[] = plays.map((p) => ({
     gameId: p.gameId,
     homeTeamId: p.homeTeamId,
@@ -99,7 +114,7 @@ async function computeCfbSolveRatings(season: number, throughWeek: number): Prom
     playNumber: p.playNumber,
     yardsToGoal: p.yardsToGoal,
   }));
-  const solveRatings = computeSolveRatings(performances, priorSolve, DEFAULT_SOLVE_RATING_PARAMS, stPlays);
+  const solveRatings = computeSolveRatings(performances, priorSolve, DEFAULT_SOLVE_RATING_PARAMS, stPlays, returningProduction);
 
   const state = new Map<number, TeamRatingState>();
   for (const [teamId, r] of solveRatings) {

@@ -103,6 +103,60 @@ test("computeSolveRatings: a nonzero priorWeight actually pulls the rating towar
   assert.ok(withPrior.get(1)!.rating > 0, "a positive prior should pull the rating above the no-prior baseline");
 });
 
+const ROUND_ROBIN_3: TeamPerformance[] = [
+  { teamId: 1, opponentId: 2, rawOffenseValue: 0.5 },
+  { teamId: 2, opponentId: 1, rawOffenseValue: 0.5 },
+  { teamId: 2, opponentId: 3, rawOffenseValue: 0.5 },
+  { teamId: 3, opponentId: 2, rawOffenseValue: 0.5 },
+  { teamId: 1, opponentId: 3, rawOffenseValue: 0.5 },
+  { teamId: 3, opponentId: 1, rawOffenseValue: 0.5 },
+];
+
+test("computeSolveRatings: returningProduction=1.0 for a team matches the flat-weight (no returningProduction) result exactly", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const flat = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params);
+  const withFullReturning = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 1.0]]));
+  assert.ok(close(flat.get(1)!.rating, withFullReturning.get(1)!.rating));
+});
+
+test("computeSolveRatings: a lower returningProduction fraction pulls LESS toward the prior than a higher one", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const lowReturning = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0.2]]));
+  const highReturning = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 1.0]]));
+  const noPrior = computeSolveRatings(ROUND_ROBIN_3, undefined, { ...params, priorWeight: 0 });
+  // Prior is positive (off=10,def=-10 -> a positive pull), so less trust
+  // in it should land closer to the no-prior baseline (0), not further.
+  assert.ok(lowReturning.get(1)!.rating < highReturning.get(1)!.rating, "lower returning production should pull less toward a positive prior");
+  assert.ok(lowReturning.get(1)!.rating > noPrior.get(1)!.rating, "still pulled SOME toward the prior, just less");
+});
+
+test("computeSolveRatings: a team with returningProduction=0 gets exactly the no-prior rating (fully discounted)", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const zeroReturning = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 0]]));
+  const noPrior = computeSolveRatings(ROUND_ROBIN_3, undefined, { ...params, priorWeight: 0 });
+  assert.ok(close(zeroReturning.get(1)!.rating, noPrior.get(1)!.rating));
+});
+
+test("computeSolveRatings: a team MISSING from returningProduction falls back to the flat priorWeight, not zero", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  // returningProduction has data for OTHER teams, but not team 1.
+  const missingForTeam1 = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[2, 0.5]]));
+  const flat = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params);
+  assert.ok(close(missingForTeam1.get(1)!.rating, flat.get(1)!.rating), "missing returning-production data should not be treated as zero continuity");
+});
+
+test("computeSolveRatings: returningProduction fraction is clamped at 1.5, not unbounded", () => {
+  const priorSolve = new Map([[1, { off: 10, def: -10 }]]);
+  const params: SolveRatingParams = { pointsPerEpaSolve: 1, priorWeight: 2 };
+  const wayOverOne = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 5.0]]));
+  const clampedAtCap = computeSolveRatings(ROUND_ROBIN_3, priorSolve, params, [], new Map([[1, 1.5]]));
+  assert.ok(close(wayOverOne.get(1)!.rating, clampedAtCap.get(1)!.rating));
+});
+
 test("DEFAULT_SOLVE_RATING_PARAMS matches the calibrated values documented in solveRatings.ts", () => {
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.priorWeight, 2);
   assert.equal(DEFAULT_SOLVE_RATING_PARAMS.pointsPerEpaSolve, 60);

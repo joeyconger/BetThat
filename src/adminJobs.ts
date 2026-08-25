@@ -3609,6 +3609,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-persist-epa-solve-2024": startCfbPersistFinalEpaSolveJob(2024),
   "cfb-persist-epa-solve-2025": startCfbPersistFinalEpaSolveJob(2025),
   "cfb-bootstrap-2026": startCfbSeasonBootstrapJob(2026),
+  "cfb-returning-production-2026": startCfbReturningProductionForYearJob(2026),
   "cfb-rawplays-2026": startCfbRawPlaysCurrentSeasonJob(2026),
   "cfb-odds-current": startCfbOddsCurrentJob,
   "cfb-live-predictions-2026": startCfbLivePredictionsJob(2026),
@@ -4930,6 +4931,46 @@ export function startCfbSeasonBootstrapJob(year: number): () => Promise<JobStatu
       log(job, `${year}: games (regular season)`);
       const games = await syncCfbdGames(year);
       log(job, `${year}: synced ${games.synced} games, skipped ${games.skipped}`);
+    });
+}
+
+/**
+ * Ingests returning production for ONE season directly (not the hardcoded
+ * [2023,2024,2025] cfb-returning-production-ingest uses) -- needed for
+ * `year` itself, not year-1: CFBD's /player/returning for season Y already
+ * describes production returning INTO season Y (see client.ts's
+ * getReturningProduction doc). This is now LOAD-BEARING for CFB, not just
+ * diagnostic -- computeCfbSolveRatings (service.ts) reads it every time to
+ * scale each team's preseason prior weight by roster continuity. Also
+ * reports the distribution's real range (min/max/mean) and spot-checks two
+ * named teams, as a sanity check that the ingested values look plausible
+ * -- NOT to tune anything to those two teams' story, just to catch an
+ * obviously-broken ingest (e.g. everything landing at 0 or 1) before
+ * trusting it in the live rating path.
+ */
+export function startCfbReturningProductionForYearJob(year: number): () => Promise<JobStatus> {
+  return () =>
+    runJob(`cfb-returning-production-${year}`, async (job) => {
+      const result = await syncCfbdReturningProduction(year);
+      log(job, `${year}: synced ${result.synced}, skipped ${result.skipped}`);
+
+      const distribution = await getReturningProductionDistribution("cfb", year);
+      const values = [...distribution.values()];
+      if (values.length === 0) {
+        log(job, "WARNING: distribution is empty after sync -- nothing to spot-check.");
+        return;
+      }
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      log(job, `distribution: n=${values.length}, min=${min.toFixed(3)}, max=${max.toFixed(3)}, mean=${mean.toFixed(3)}`);
+
+      const teamNameToId = await getTeamNameToIdMap("cfb");
+      for (const name of ["Oklahoma", "Oklahoma State"]) {
+        const teamId = teamNameToId.get(name);
+        const value = teamId ? distribution.get(teamId) : undefined;
+        log(job, `  ${name}: percentPPA=${value === undefined ? "MISSING" : value.toFixed(3)}`);
+      }
     });
 }
 
