@@ -45,6 +45,14 @@ export interface SolveRatingParams {
    * this without re-running that sweep (cfb-epa-scale-calibration in
    * adminJobs.ts) with ST weights held at 0, since ST weights are
    * calibrated RELATIVE to this scale, not independently of it.
+   *
+   * Widened further to 69 (60 * 1.15) per explicit user judgment that
+   * real spreads still felt too compressed at the extremes (a top-10 vs.
+   * bottom-of-FBS matchup projecting ~30 points, smaller than that
+   * mismatch plausibly runs in reality) -- NOT re-derived from a fresh
+   * RMSE sweep. Still lands inside the empirically flat 50-75 basin
+   * above, so this isn't fighting the calibration, just moving within
+   * the range that sweep already found acceptable, toward the wide end.
    */
   pointsPerEpaSolve: number;
   /**
@@ -114,7 +122,7 @@ export interface SolveRatingParams {
 
 /** See each field's own doc for why these specific values, not a placeholder pair. */
 export const DEFAULT_SOLVE_RATING_PARAMS: SolveRatingParams = {
-  pointsPerEpaSolve: 60,
+  pointsPerEpaSolve: 69,
   priorWeight: 2,
   pointsPerFieldPositionYard: 0.5,
   pointsPerFgAboveExpected: 0,
