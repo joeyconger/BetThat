@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread, type GameForRating } from "./elo.js";
+import { computeSeasonRatings, carryoverRating, computeInitialRating, zScore, predictSpread, projectScore, type GameForRating } from "./elo.js";
 import { getRatingParams } from "./config.js";
 
 const NFL = getRatingParams("nfl");
@@ -979,4 +979,23 @@ test("computeSeasonRatings falls back to a no-op per component when that compone
   );
   assert.equal(withWeights.get(1)!.rating, withoutWeights.get(1)!.rating, "missing component fields fall back to pure epaMargin, identical to all weights at 0");
   assert.equal(withWeights.get(2)!.rating, withoutWeights.get(2)!.rating, "missing component fields fall back to pure epaMargin, identical to all weights at 0");
+});
+
+test("projectScore: the score difference exactly matches the rating differential + home field advantage", () => {
+  const p = projectScore(10, -3, 2, 5, 2.5);
+  // homeOff-homeDef = 13, awayOff-awayDef = -3 -> margin = 16, +hfa 2.5 = 18.5
+  const expectedMargin = 10 - -3 - (2 - 5) + 2.5;
+  assert.ok(Math.abs(p.homeScore - p.awayScore - expectedMargin) < 1e-9);
+});
+
+test("projectScore: two evenly matched teams (all zeros) split the baseline evenly around home field advantage", () => {
+  const p = projectScore(0, 0, 0, 0, 2.5);
+  assert.ok(Math.abs(p.homeScore - p.awayScore - 2.5) < 1e-9);
+  assert.ok(Math.abs((p.homeScore + p.awayScore) / 2 - 26.6) < 1e-9, "average of the two projected scores should sit at the real-data baseline");
+});
+
+test("projectScore: clamps at 0 instead of projecting a negative score for a large mismatch", () => {
+  const p = projectScore(-100, 100, 100, -100, 0);
+  assert.equal(p.homeScore, 0);
+  assert.ok(p.awayScore > 0);
 });

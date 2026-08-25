@@ -2,6 +2,22 @@ import { renderPage, statTiles, escapeHtml, tabs } from "../layout.js";
 import type { TeamRatingRow, PredictionRow } from "../../db/repo.js";
 import type { HypotheticalMatchupResult } from "../../ratings/service.js";
 
+type ScoreProjection = { homeScore: number; awayScore: number };
+
+/** SP+-style "Team 31, Team 24" projected score, higher score first (not home/away order) -- falls back to the spread-only "Team X by Y.Y" format when no projection exists (NFL, or a team missing a rating). */
+function formatProjection(homeTeam: string, awayTeam: string, projection: ScoreProjection | null | undefined, modelSpreadHome: number): string {
+  if (!projection) {
+    const favoredHome = modelSpreadHome < 0;
+    const line = Math.abs(modelSpreadHome).toFixed(1);
+    return `${escapeHtml(favoredHome ? homeTeam : awayTeam)} by ${line}`;
+  }
+  const [leader, leaderScore, trailer, trailerScore] =
+    projection.homeScore >= projection.awayScore
+      ? [homeTeam, projection.homeScore, awayTeam, projection.awayScore]
+      : [awayTeam, projection.awayScore, homeTeam, projection.homeScore];
+  return `${escapeHtml(leader)} ${Math.round(leaderScore)}, ${escapeHtml(trailer)} ${Math.round(trailerScore)}`;
+}
+
 const TAB_INDEX: Record<string, number> = { weekly: 0, ratings: 1, sim: 2 };
 
 function sportSeasonWeekFields(sport: string, season: string, week: string, availableSeasons: number[], availableWeeks: number[]): string {
@@ -30,6 +46,7 @@ function weeklySlateTab(
   predictions: PredictionRow[] | null,
   availableSeasons: number[],
   availableWeeks: number[],
+  projectedScores: Map<number, ScoreProjection | null>,
 ): string {
   const headline =
     predictions && predictions.length > 0
@@ -42,15 +59,13 @@ function weeklySlateTab(
       : predictions.length === 0
         ? `<p class="muted">No predictions generated for ${escapeHtml(sport)} ${escapeHtml(season)} week ${escapeHtml(week)} yet.</p>`
         : `<table>
-            <thead><tr><th>Matchup</th><th>Model line</th><th class="num">Confidence (±pts)</th></tr></thead>
+            <thead><tr><th>Matchup</th><th>Projected score</th><th class="num">Confidence (±pts)</th></tr></thead>
             <tbody>${predictions
               .map((p) => {
-                const favoredHome = p.modelSpreadHome < 0;
-                const line = Math.abs(p.modelSpreadHome).toFixed(1);
-                const favoredTeam = favoredHome ? p.homeTeam : p.awayTeam;
+                const projection = projectedScores.get(p.gameId);
                 return `<tr>
                   <td>${escapeHtml(p.awayTeam)} @ ${escapeHtml(p.homeTeam)}</td>
-                  <td>${escapeHtml(favoredTeam)} by ${line}</td>
+                  <td>${formatProjection(p.homeTeam, p.awayTeam, projection, p.modelSpreadHome)}</td>
                   <td class="num muted">${p.confidence === null ? "—" : p.confidence.toFixed(1)}</td>
                 </tr>`;
               })
@@ -58,7 +73,7 @@ function weeklySlateTab(
           </table>`;
 
   return `
-    <p class="subtitle">The model's own line for each game — a rating differential, home-field advantage, and a few secondary signals. No market comparison shown here.</p>
+    <p class="subtitle">The model's own projected score for each game — a rating differential, home-field advantage, and a few secondary signals, split around a real-data scoring baseline. No market comparison shown here.</p>
     <form method="get" action="/slate">
       <input type="hidden" name="tab" value="weekly">
       ${sportSeasonWeekFields(sport, season, week, availableSeasons, availableWeeks)}
@@ -167,13 +182,11 @@ function matchupSimTab(
     : (() => {
         const homeTeam = teams.find((t) => t.id === result.home.teamId);
         const awayTeam = teams.find((t) => t.id === result.away.teamId);
-        const favoredHome = result.modelSpreadHome < 0;
-        const line = Math.abs(result.modelSpreadHome).toFixed(1);
         return `
           ${statTiles([
             {
-              label: "Model line",
-              value: `${escapeHtml(favoredHome ? homeTeam?.name ?? "Home" : awayTeam?.name ?? "Away")} by ${line}`,
+              label: "Projected score",
+              value: formatProjection(homeTeam?.name ?? "Home", awayTeam?.name ?? "Away", result.projection, result.modelSpreadHome),
               sub: `±${result.confidence.toFixed(1)} pts`,
             },
             { label: escapeHtml(homeTeam?.name ?? "Home"), value: `${result.home.rating >= 0 ? "+" : ""}${result.home.rating.toFixed(2)}`, sub: `${result.home.gamesPlayed} games played` },
@@ -209,14 +222,16 @@ export function renderSlatePage(params: {
   simResult: HypotheticalMatchupResult | null;
   availableSeasons: number[];
   availableWeeks: number[];
+  projectedScores: Map<number, ScoreProjection | null>;
 }): string {
-  const { sport, season, week, activeTab, predictions, ratings, teams, simHome, simAway, simResult, availableSeasons, availableWeeks } = params;
+  const { sport, season, week, activeTab, predictions, ratings, teams, simHome, simAway, simResult, availableSeasons, availableWeeks, projectedScores } =
+    params;
   const body = `
     <h1>Slate</h1>
     ${tabs(
       "slate",
       [
-        { label: "Weekly Slate", html: weeklySlateTab(sport, season, week, predictions, availableSeasons, availableWeeks) },
+        { label: "Weekly Slate", html: weeklySlateTab(sport, season, week, predictions, availableSeasons, availableWeeks, projectedScores) },
         { label: "Power Ratings", html: powerRatingsTab(sport, season, week, ratings, availableSeasons, availableWeeks) },
         { label: "Matchup Sim", html: matchupSimTab(sport, season, week, teams, simHome, simAway, simResult, availableSeasons, availableWeeks) },
       ],

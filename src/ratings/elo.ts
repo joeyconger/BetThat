@@ -846,3 +846,40 @@ export function predictSpread(input: PredictionInput, params: RatingParams): Pre
 
   return { eloSpreadHome, modelSpreadHome: eloSpreadHome, confidence };
 }
+
+/**
+ * CFB-scale baseline: average FBS points scored per team per game, real
+ * 2023-2025 data (26.2, 26.8, 26.2 across the three seasons individually,
+ * ~26.6 pooled) -- not a guess. Splitting a projected TOTAL around this
+ * baseline is what turns a spread (a single differential) into two
+ * absolute projected scores, SP+-style, WITHOUT changing what the model
+ * actually predicts: homeScore - awayScore below works out to exactly
+ * off-def+hfa for each side combined, the same margin predictSpread
+ * already computes. This is a display transform, not a new model.
+ */
+const LEAGUE_AVG_POINTS_PER_TEAM_CFB = 26.6;
+
+export interface ScoreProjection {
+  homeScore: number;
+  awayScore: number;
+}
+
+/**
+ * Projects an actual final score for each side, not just a spread --
+ * needs the off/def decomposition (CFB's solve engine only; NFL's
+ * TeamRatingState has no such split, see its doc), since a margin alone
+ * carries no information about how many points either side scores, only
+ * the difference. homeOff/homeDef/awayOff/awayDef should already have any
+ * special-teams contribution folded in (solveRatings.ts's SolveTeamRating:
+ * off = offPoints + stFieldPositionOffPoints + stFgPoints, def = defPoints
+ * + stFieldPositionDefPoints), so off-def still equals the team's overall
+ * rating exactly -- callers should verify homeOff-homeDef-(awayOff-awayDef)
+ * matches the rating differential they'd otherwise use.
+ * Clamped at 0 -- a large enough mismatch could otherwise project a
+ * negative score, which isn't a meaningful thing to display.
+ */
+export function projectScore(homeOff: number, homeDef: number, awayOff: number, awayDef: number, homeFieldAdvantage: number): ScoreProjection {
+  const homeScore = LEAGUE_AVG_POINTS_PER_TEAM_CFB + homeOff + awayDef + homeFieldAdvantage / 2;
+  const awayScore = LEAGUE_AVG_POINTS_PER_TEAM_CFB + awayOff + homeDef - homeFieldAdvantage / 2;
+  return { homeScore: Math.max(0, homeScore), awayScore: Math.max(0, awayScore) };
+}

@@ -15,7 +15,7 @@ import {
   getCurrentSeasonWeek,
 } from "./db/repo.js";
 import type { Sport } from "./db/repo.js";
-import { predictHypotheticalMatchup } from "./ratings/service.js";
+import { predictHypotheticalMatchup, getProjectedScoresForWeek } from "./ratings/service.js";
 import {
   getOverallReport,
   getOverallStatsByRun,
@@ -257,11 +257,12 @@ async function handleRequest(
     }
     const hasContext = season !== "" && week !== "";
 
-    const [predictions, ratings, teamMap, availableSeasons] = await Promise.all([
+    const [predictions, ratings, teamMap, availableSeasons, projectedScores] = await Promise.all([
       hasContext ? getPredictionsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
       hasContext ? getTeamRatingsForWeek(validSport, Number(season), Number(week)) : Promise.resolve(null),
       getTeamNameToIdMap(validSport),
       getAvailableSeasons(validSport),
+      hasContext ? getProjectedScoresForWeek(validSport, Number(season), Number(week)) : Promise.resolve(new Map()),
     ]);
     const availableWeeks = hasContext ? await getAvailableWeeks(validSport, Number(season)) : [];
     const teams: SimTeamOption[] = [...teamMap.entries()]
@@ -288,6 +289,7 @@ async function handleRequest(
         simResult,
         availableSeasons,
         availableWeeks,
+        projectedScores,
       }),
     );
     return;

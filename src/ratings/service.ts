@@ -15,7 +15,7 @@ import {
 } from "../db/repo.js";
 import type { Sport } from "../db/repo.js";
 import { getRatingParams, type RatingParams } from "./config.js";
-import { computeSeasonRatings, computeInitialRating, predictSpread, zScore, type TeamRatingState } from "./elo.js";
+import { computeSeasonRatings, computeInitialRating, predictSpread, projectScore, zScore, type TeamRatingState } from "./elo.js";
 import { buildTeamPerformancesEpa, type GamePlaysGroup } from "./gamePerformance.js";
 import { computeSolveRatings, DEFAULT_SOLVE_RATING_PARAMS } from "./solveRatings.js";
 import type { RawPlayForSpecialTeams } from "./specialTeams.js";
@@ -190,6 +190,22 @@ export interface HypotheticalMatchupResult {
   away: { teamId: number; rating: number; gamesPlayed: number };
   modelSpreadHome: number;
   confidence: number;
+  /** Null for NFL (no off/def decomposition -- see TeamRatingState's doc) or if either team is unrated; see projectScore's doc for the CFB case. */
+  projection: { homeScore: number; awayScore: number } | null;
+}
+
+/**
+ * homeOff/homeDef for projectScore -- null when the state has no off/def
+ * split (NFL's incremental-Elo path never sets offRating/defRating) so
+ * callers can fall back to spread-only display instead of a misleading
+ * score built from zeros.
+ */
+function offDefFor(state: { offRating?: number; defRating?: number; stFieldPositionOffPoints?: number; stFieldPositionDefPoints?: number; stFgPoints?: number }): { off: number; def: number } | null {
+  if (state.offRating === undefined || state.defRating === undefined) return null;
+  return {
+    off: state.offRating + (state.stFieldPositionOffPoints ?? 0) + (state.stFgPoints ?? 0),
+    def: state.defRating + (state.stFieldPositionDefPoints ?? 0),
+  };
 }
 
 /**
@@ -224,12 +240,47 @@ export async function predictHypotheticalMatchup(
     params,
   );
 
+  const homeOffDef = offDefFor(home);
+  const awayOffDef = offDefFor(away);
+  const projection =
+    homeOffDef && awayOffDef ? projectScore(homeOffDef.off, homeOffDef.def, awayOffDef.off, awayOffDef.def, params.homeFieldAdvantage) : null;
+
   return {
     home: { teamId: homeTeamId, rating: home.rating, gamesPlayed: home.gamesPlayed },
     away: { teamId: awayTeamId, rating: away.rating, gamesPlayed: away.gamesPlayed },
     modelSpreadHome: prediction.modelSpreadHome,
     confidence: prediction.confidence,
+    projection,
   };
+}
+
+/**
+ * Projected final score for every real scheduled game in a week, keyed
+ * by gameId -- the Weekly Slate tab's per-game equivalent of
+ * predictHypotheticalMatchup's single projection. Same as-of-end-of-
+ * prior-week ratings snapshot predictAndStoreWeek uses (never that week's
+ * own results). A game missing from the map (rather than present with a
+ * null projection) means one or both teams have no rating yet; a game
+ * present with projection: null means NFL (no off/def split) -- see
+ * offDefFor's doc.
+ */
+export async function getProjectedScoresForWeek(sport: Sport, season: number, week: number): Promise<Map<number, { homeScore: number; awayScore: number } | null>> {
+  const [games, state] = await Promise.all([getGamesForWeek(sport, season, week), computeRatings(sport, season, week - 1)]);
+  const params = getRatingParams(sport);
+
+  const result = new Map<number, { homeScore: number; awayScore: number } | null>();
+  for (const game of games) {
+    const home = state.get(game.homeTeamId);
+    const away = state.get(game.awayTeamId);
+    if (!home || !away) continue;
+    const homeOffDef = offDefFor(home);
+    const awayOffDef = offDefFor(away);
+    result.set(
+      game.id,
+      homeOffDef && awayOffDef ? projectScore(homeOffDef.off, homeOffDef.def, awayOffDef.off, awayOffDef.def, params.homeFieldAdvantage) : null,
+    );
+  }
+  return result;
 }
 
 async function predictAndStoreWeek(
