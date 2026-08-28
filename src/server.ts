@@ -169,19 +169,25 @@ async function handleRequest(
     return;
   }
 
-  // Everything below is the HTML dashboard — Basic-auth gated.
-  if (!isBasicAuthorized(req.headers.authorization)) {
-    requireBasicAuth(res);
-    return;
-  }
-
+  // Backtests (the runs list and each run's detail report) are Basic-auth
+  // gated -- internal diagnostics, not meant to be public. Slate (the
+  // homepage) is deliberately NOT gated below -- it's the live-picks-style
+  // view meant to be viewable without logging in.
   if (req.method === "GET" && url.pathname === "/backtests") {
+    if (!isBasicAuthorized(req.headers.authorization)) {
+      requireBasicAuth(res);
+      return;
+    }
     const [runs, statsByRun] = await Promise.all([listBacktestRuns(), getOverallStatsByRun()]);
     html(res, renderHome(runs, statsByRun));
     return;
   }
 
   if (req.method === "GET" && /^\/backtest\/\d+$/.test(url.pathname)) {
+    if (!isBasicAuthorized(req.headers.authorization)) {
+      requireBasicAuth(res);
+      return;
+    }
     const runId = Number(url.pathname.split("/")[2]);
     const runs = await listBacktestRuns();
     const run = runs.find((r) => r.id === runId);
