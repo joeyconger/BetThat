@@ -102,7 +102,22 @@ async function computeCfbSolveRatings(season: number, throughWeek: number): Prom
   // computeSolveRatings' returningProduction doc) -- this season's value
   // (not season-1's), since CFBD's /player/returning for season Y already
   // describes production returning INTO season Y.
-  const returningProduction = await getReturningProductionDistribution("cfb", season);
+  //
+  // NORMALIZED against the population's own mean before use, not passed
+  // raw -- caught via a real case (Oklahoma-UTEP, 2026): CFBD's percentPPA
+  // averages only ~0.42 across all 136 FBS teams (real 2026 data), not
+  // 1.0, so using the raw fraction directly as a trust multiplier
+  // discounted almost EVERY team significantly, not just genuinely
+  // low-continuity ones -- Oklahoma's own above-average 0.632 was still
+  // cutting 37% off their real defensive strength. Dividing by the
+  // population mean means a team AT the average keeps full trust
+  // (normalized ~1.0), and only teams meaningfully below average get
+  // discounted -- computeSolveRatings' own clamp/floor logic is unchanged,
+  // only what's fed into it changes.
+  const rawReturningProduction = await getReturningProductionDistribution("cfb", season);
+  const rawValues = [...rawReturningProduction.values()];
+  const meanReturningProduction = rawValues.length > 0 ? rawValues.reduce((a, b) => a + b, 0) / rawValues.length : 1;
+  const returningProduction = new Map([...rawReturningProduction].map(([teamId, v]) => [teamId, v / meanReturningProduction]));
   const stPlays: RawPlayForSpecialTeams[] = plays.map((p) => ({
     gameId: p.gameId,
     homeTeamId: p.homeTeamId,
