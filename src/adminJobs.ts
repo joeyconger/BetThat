@@ -2955,6 +2955,36 @@ export function startWeatherBackfillJob(): Promise<JobStatus> {
  * (0 games) until weather-backfill has actually run — key numbers don't
  * need any new data, they're computed from odds already ingested.
  */
+/**
+ * How would TODAY's fully-calibrated model (solve engine, pointsPerEpaSolve=69,
+ * returning-production-normalized priors, field position=0.5/FG=0) have
+ * done ATS across the real, already-completed 2025 CFB season -- a
+ * direct backtest with the CURRENT config, not a historical/frozen one.
+ *
+ * NOT a clean out-of-sample holdout, and reported as such: the RMSE
+ * sweeps that calibrated pointsPerEpaSolve and the ST weights both used
+ * 2025 weeks 8-14 as checkpoints, so part of this season overlaps with
+ * what tuned the model. Read this as "how the current config performs
+ * over the season as a whole," not as proof of a genuinely held-out edge.
+ */
+export function startCfb2025AtsCheckJob(): Promise<JobStatus> {
+  return runJob("cfb-2025-ats-check", async (job) => {
+    log(job, "running CFB 2025 backtest with today's live config (solve engine, current calibration)");
+    const summary = await runBacktest({ name: "cfb-2025-ats-check", sport: "cfb", seasonStart: 2025, seasonEnd: 2025 });
+    const runId = summary.backtestRunId;
+    log(job, `scored ${summary.scored}, skipped (no odds) ${summary.skippedNoOdds}, run id ${runId}`);
+
+    const overall = await getOverallReport(runId);
+    const opening = await getOpeningCoverRate(runId);
+    log(
+      job,
+      `cover vs CLOSING line: ${fmtPct(overall.coverRate)} (${overall.games} games), avgClv=${overall.avgClv === null ? "n/a" : overall.avgClv.toFixed(2)}, beat-close rate=${fmtPct(overall.beatCloseRate)}`,
+    );
+    log(job, `cover vs OPENING line: ${fmtPct(opening.coverRateVsOpening)} (${opening.games} games)`);
+    log(job, "breakeven vs. standard -110 vig is ~52.4%. Not a clean holdout -- see this job's doc comment.");
+  });
+}
+
 export function startCfbMoreSegmentsJob(): Promise<JobStatus> {
   return runJob("cfb-more-segments", async (job) => {
     log(job, "running fresh CFB backtest 2023-2025 with validated defaults");
@@ -3614,6 +3644,7 @@ export const JOB_STARTERS: Record<string, () => Promise<JobStatus>> = {
   "cfb-odds-current": startCfbOddsCurrentJob,
   "cfb-live-predictions-2026": startCfbLivePredictionsJob(2026),
   "cfb-2026-schedule-diagnose": startCfb2026ScheduleDiagnoseJob,
+  "cfb-2025-ats-check": startCfb2025AtsCheckJob,
   "cfb-2026-split-week0": startCfb2026SplitWeek0Job,
   "cfb-st-evaluation": startCfbSpecialTeamsEvaluationJob,
   "cfb-epa-scale-calibration": startCfbEpaScaleCalibrationJob,
